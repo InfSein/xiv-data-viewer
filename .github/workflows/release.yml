@@ -1,0 +1,202 @@
+name: Release Windows Client
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: "Publish as GitHub Pre-release"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify & Resolve Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      slug: ${{ steps.meta.outputs.slug }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+    steps:
+      - name: Checkout repository with EXDSchema submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Read metadata from mygo.json
+        id: meta
+        run: |
+          VERSION=$(jq -r '.version' mygo.json)
+          SLUG=$(jq -r '.slug' mygo.json)
+          TAG="v${VERSION}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "mygo.json 缺少有效的 version 字段"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "${TAG}" ]; then
+            echo "标签 ${GITHUB_REF_NAME} 与 mygo.json 版本号 ${TAG} 不一致"
+            exit 1
+          fi
+          IS_PRE="false"
+          if echo "$VERSION" | grep -q "-"; then
+            IS_PRE="true"
+          fi
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            IS_PRE="true"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "slug=${SLUG}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${IS_PRE}" >> "$GITHUB_OUTPUT"
+
+      - name: Check Go formatting (gofmt)
+        run: |
+          UNFORMATTED=$(gofmt -l main.go schemas_embed.go internal)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "以下 Go 文件未通过 gofmt 格式化检查:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: Run go vet, mygo vet, and unit tests
+        run: |
+          go vet . ./internal/...
+          go tool mygo vet .
+          go test -race -count=1 . ./internal/...
+
+  build:
+    name: Build Windows (${{ matrix.arch }})
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout repository with EXDSchema submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install NSIS & zip
+        run: sudo apt-get update && sudo apt-get install -y nsis zip
+
+      - name: Compile Windows client & NSIS installer
+        env:
+          GOFLAGS: -tags=mygo_nowebview
+          MYGO_LDFLAGS: -X main.appVersion=${{ needs.verify.outputs.version }}
+        run: |
+          go tool mygo build -platform "windows/${{ matrix.arch }}"
+          ls -lh "build/windows-${{ matrix.arch }}"
+
+      - name: Prepare installer & portable ZIP assets
+        run: |
+          VERSION="${{ needs.verify.outputs.version }}"
+          SLUG="${{ needs.verify.outputs.slug }}"
+          ARCH="${{ matrix.arch }}"
+          OUT_DIR="build/windows-${ARCH}"
+          RELEASE_DIR="release-assets"
+          STAGE="portable-stage/${ARCH}"
+
+          mkdir -p "$RELEASE_DIR" "$STAGE"
+          cp "$OUT_DIR/${SLUG}-setup-${VERSION}-${ARCH}.exe" "$RELEASE_DIR/"
+          cp "$OUT_DIR/XIV Data Viewer.exe" "$STAGE/"
+          cp "$OUT_DIR/icon.png" "$STAGE/" 2>/dev/null || true
+          cp README.md "$STAGE/"
+          (cd "$STAGE" && zip -9 -r "../../${RELEASE_DIR}/${SLUG}-portable-${VERSION}-windows-${ARCH}.zip" .)
+          ls -lh "$RELEASE_DIR"
+
+      - name: Upload built Windows assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: release-assets/*
+
+  publish:
+    name: Publish GitHub Release
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all Windows build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-windows-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        run: |
+          cd release-assets
+          sha256sum *.exe *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          SLUG: ${{ needs.verify.outputs.slug }}
+          IS_PRE: ${{ needs.verify.outputs.is_prerelease }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          cat > release-notes.md <<EOF
+          ## 艾欧泽亚数据工作台 (XIV Data Viewer) ${TAG}
+
+          基于 **egoist/mygo** 构建的纯 Go 原生 Windows 桌面客户端（Direct3D 11 原生绘制，无需 WebView2 或 Node.js 运行时）。
+
+          ### 下载说明
+          - **Windows 安装包 (推荐)**：\`${SLUG}-setup-${VERSION}-amd64.exe\`（ARM64 设备请下载 \`arm64\` 版）
+          - **绿色便携压缩包**：\`${SLUG}-portable-${VERSION}-windows-amd64.zip\`（解压后直接运行 \`XIV Data Viewer.exe\`）
+          - **校验文件**：\`SHA256SUMS.txt\`
+
+          ### 首次使用
+          启动客户端后，根据引导界面选择本地 **FF14 国服** 或 **国际服** 客户端目录（至少配置其中一项），之后可随时在「设置」中修改路径。所有游戏文件仅执行严格只读访问。
+
+          ---
+          构建提交：\`${COMMIT_SHA}\`
+          EOF
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release ${TAG} 已存在，更新附件与发布说明..."
+            gh release upload "$TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "XIV Data Viewer ${TAG}" \
+              --notes-file release-notes.md \
+              --target "$COMMIT_SHA"
+          else
+            echo "创建新 Release ${TAG}..."
+            PRE_FLAG=""
+            if [ "$IS_PRE" = "true" ]; then
+              PRE_FLAG="--prerelease"
+            fi
+            gh release create "$TAG" release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$COMMIT_SHA" \
+              --title "XIV Data Viewer ${TAG}" \
+              --notes-file release-notes.md \
+              --generate-notes \
+              $PRE_FLAG
+          fi

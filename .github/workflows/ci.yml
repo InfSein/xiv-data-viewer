@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches-ignore: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: Format, Vet & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with EXDSchema submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate mygo.json configuration
+        run: |
+          jq -e '.name and .slug and .identifier and .version' mygo.json > /dev/null
+          VERSION=$(jq -r '.version' mygo.json)
+          echo "Detected app version: $VERSION"
+          echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'
+
+      - name: Check Go formatting (gofmt)
+        run: |
+          UNFORMATTED=$(gofmt -l main.go schemas_embed.go internal)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "以下 Go 文件未通过 gofmt 格式化检查:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: Verify Go modules
+        run: go mod verify
+
+      - name: Run go vet
+        run: go vet . ./internal/...
+
+      - name: Run MyGo static analyzer (mygo vet)
+        run: go tool mygo vet .
+
+      - name: Run unit and headless Native UI tests
+        run: go test -race -v -count=1 . ./internal/...
+
+  build-check:
+    name: Build Windows (${{ matrix.arch }})
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout repository with EXDSchema submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install NSIS for Windows installer packaging
+        run: sudo apt-get update && sudo apt-get install -y nsis zip
+
+      - name: Build Windows ${{ matrix.arch }} client & NSIS installer
+        env:
+          GOFLAGS: -tags=mygo_nowebview
+        run: |
+          VERSION=$(jq -r '.version' mygo.json)
+          MYGO_LDFLAGS="-X main.appVersion=${VERSION}" go tool mygo build -platform "windows/${{ matrix.arch }}"
+          ls -lh "build/windows-${{ matrix.arch }}"
+
+      - name: Verify expected Windows outputs
+        run: |
+          VERSION=$(jq -r '.version' mygo.json)
+          SLUG=$(jq -r '.slug' mygo.json)
+          test -f "build/windows-${{ matrix.arch }}/XIV Data Viewer.exe"
+          test -f "build/windows-${{ matrix.arch }}/${SLUG}-setup-${VERSION}-${{ matrix.arch }}.exe"
+
+      - name: Package portable ZIP preview artifact
+        run: |
+          VERSION=$(jq -r '.version' mygo.json)
+          SLUG=$(jq -r '.slug' mygo.json)
+          OUT_DIR="build/windows-${{ matrix.arch }}"
+          STAGE="dist-stage/windows-${{ matrix.arch }}"
+          mkdir -p "$STAGE"
+          cp "$OUT_DIR/XIV Data Viewer.exe" "$STAGE/"
+          cp "$OUT_DIR/icon.png" "$STAGE/" 2>/dev/null || true
+          cp README.md "$STAGE/"
+          (cd "$STAGE" && zip -9 -r "../../${SLUG}-portable-${VERSION}-windows-${{ matrix.arch }}.zip" .)
+
+      - name: Upload PR build preview artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}-preview
+          retention-days: 7
+          path: |
+            build/windows-${{ matrix.arch }}/*-setup-*.exe
+            *-portable-*-windows-${{ matrix.arch }}.zip
