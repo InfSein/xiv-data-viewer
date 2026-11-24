@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
@@ -75,6 +76,13 @@ func convertPixelCoordToMap(pixelX, pixelY float64, sizeFactor int) (coordX, coo
 // Service 提供面向界面的道具检索、详情解析、配方树递归、采集坐标、商店兑换与成就查询接口。
 type Service struct {
 	store *Store
+
+	questTextMu    sync.Mutex
+	questTextCache map[int]*QuestTextData
+	questTextOrder []int
+
+	actorEnOnce  sync.Once
+	actorEnNames map[int]string
 }
 
 // NewService 基于已加载的 Store 创建核心游戏数据查询服务。
@@ -97,7 +105,7 @@ func (s *Service) Close() error {
 
 // GetSystemStatus 返回系统概览统计与字典元数据。
 func (s *Service) GetSystemStatus() SystemStatus {
-	var craftable, gatherable, purchasable, gilShop, specialShop, retainer int
+	var craftable, gatherable, purchasable, gilShop, specialShop, retainer, collectableTurnIn int
 	for _, it := range s.store.ItemSummaries {
 		if it.IsCraftable {
 			craftable++
@@ -117,6 +125,9 @@ func (s *Service) GetSystemStatus() SystemStatus {
 		if it.IsRetainerVenture {
 			retainer++
 		}
+		if it.IsCollectableTurnIn {
+			collectableTurnIn++
+		}
 	}
 
 	return SystemStatus{
@@ -128,25 +139,32 @@ func (s *Service) GetSystemStatus() SystemStatus {
 		CNPath:         s.store.CNPath,
 		GlobalPath:     s.store.GlobalPath,
 		Stats: SystemStats{
-			TotalItems:           len(s.store.ItemSummaries),
-			CraftableItems:       craftable,
-			GatherableItems:      gatherable,
-			PurchasableItems:     purchasable,
-			GilShopItems:         gilShop,
-			SpecialShopItems:     specialShop,
-			RetainerVentureItems: retainer,
-			TotalRecipes:         len(s.store.Recipes),
-			TotalGatheringPoints: len(s.store.GatheringPoints),
-			TotalFishingSpots:    len(s.store.FishingSpots),
-			TotalShops:           s.store.TotalActiveShops,
-			TotalRetainerTasks:   s.store.TotalRetainerTasks,
-			TotalAchievements:    len(s.store.Achievements),
-			TotalTitles:          s.store.TotalTitles,
-			LoadTimeMs:           s.store.LoadTimeMs,
+			TotalItems:             len(s.store.ItemSummaries),
+			CraftableItems:         craftable,
+			GatherableItems:        gatherable,
+			PurchasableItems:       purchasable,
+			GilShopItems:           gilShop,
+			SpecialShopItems:       specialShop,
+			RetainerVentureItems:   retainer,
+			CollectableTurnInItems: collectableTurnIn,
+			TotalRecipes:           len(s.store.Recipes),
+			TotalGatheringPoints:   len(s.store.GatheringPoints),
+			TotalFishingSpots:      len(s.store.FishingSpots),
+			TotalShops:             s.store.TotalActiveShops,
+			TotalRetainerTasks:     s.store.TotalRetainerTasks,
+			TotalAchievements:      len(s.store.Achievements),
+			TotalTitles:            s.store.TotalTitles,
+			TotalQuests:            len(s.store.Quests),
+			TotalLeves:             len(s.store.Leves),
+			TotalCollectables:      s.store.TotalCollectables,
+			LoadTimeMs:             s.store.LoadTimeMs,
 		},
-		Categories:       s.store.CategoryList,
-		CraftTypes:       s.store.CraftTypeList,
-		AchievementKinds: s.store.AchievementKindList,
+		Categories:            s.store.CategoryList,
+		CraftTypes:            s.store.CraftTypeList,
+		AchievementKinds:      s.store.AchievementKindList,
+		AchievementCategories: s.store.AchievementCategoryList,
+		QuestSections:         s.store.QuestSectionList,
+		LeveAssignmentTypes:   s.store.LeveAssignmentTypes,
 	}
 }
 
@@ -202,6 +220,10 @@ func (s *Service) SearchItems(query ItemSearchQuery) ItemSearchResponse {
 			}
 		case "retainer_venture":
 			if !it.IsRetainerVenture {
+				continue
+			}
+		case "collectable_turnin":
+			if !it.IsCollectableTurnIn {
 				continue
 			}
 		case "equipment":
@@ -373,6 +395,17 @@ func (s *Service) GetItemDetail(itemID int) *ItemDetail {
 	shops := s.buildShopSources(itemID)
 	retainers := s.buildRetainerVentures(itemID, summary.NameCn)
 	rewardAchs := s.store.AchievementsByRewardItem[itemID]
+	colTurnIns := s.store.CollectableTurnInsByItem[itemID]
+	colRewards := s.store.CollectableRewardsByItem[itemID]
+	rewardQuests := s.store.QuestsByRewardItem[itemID]
+	var turnInLeves, rewardLeves []ItemLeveSource
+	for _, ls := range s.store.LevesByItem[itemID] {
+		if ls.IsTurnIn {
+			turnInLeves = append(turnInLeves, ls)
+		} else {
+			rewardLeves = append(rewardLeves, ls)
+		}
+	}
 
 	isIndisposable := row.BoolAt(23)
 	priceLow := row.IntAt(26)
@@ -416,6 +449,11 @@ func (s *Service) GetItemDetail(itemID int) *ItemDetail {
 		Gathering:                gathering,
 		Shops:                    shops,
 		RetainerVentures:         retainers,
+		CollectableTurnIns:       colTurnIns,
+		CollectableRewards:       colRewards,
+		RewardedFromQuests:       rewardQuests,
+		TurnInForLeves:           turnInLeves,
+		RewardedFromLeves:        rewardLeves,
 		RewardedFromAchievements: rewardAchs,
 	}
 }
@@ -920,8 +958,8 @@ type territoryMapLoc struct {
 	offsetY    float64
 }
 
-func (s *Service) resolveTerritoryAndMap(territoryID int) *territoryMapLoc {
-	tRow, ok := s.store.TerritoryTypes[territoryID]
+func resolveTerritoryAndMapFromTables(territoryID int, territoryTypes, maps map[int]sqpack.Row, placeNames map[int]string) *territoryMapLoc {
+	tRow, ok := territoryTypes[territoryID]
 	if !ok {
 		return nil
 	}
@@ -931,13 +969,13 @@ func (s *Service) resolveTerritoryAndMap(territoryID int) *territoryMapLoc {
 		zoneID = tRow.IntAt(4)
 	}
 	mapID := tRow.IntAt(6)
-	mapRow := s.store.Maps[mapID]
+	mapRow := maps[mapID]
 
-	regionName := s.store.PlaceNames[regionID]
+	regionName := placeNames[regionID]
 	if regionName == "" {
 		regionName = "艾欧泽亚"
 	}
-	zoneName := s.store.PlaceNames[zoneID]
+	zoneName := placeNames[zoneID]
 	if zoneName == "" {
 		zoneName = "未知区域"
 	}
@@ -962,6 +1000,82 @@ func (s *Service) resolveTerritoryAndMap(territoryID int) *territoryMapLoc {
 		offsetX:    offsetX,
 		offsetY:    offsetY,
 	}
+}
+
+func resolveMapLocation(rawLoc RawNpcLocation, territoryTypes, maps map[int]sqpack.Row, placeNames map[int]string) *MapLocationPoint {
+	tLoc := resolveTerritoryAndMapFromTables(rawLoc.TerritoryID, territoryTypes, maps, placeNames)
+	if tLoc == nil {
+		return nil
+	}
+	pt := &MapLocationPoint{
+		RegionName:  tLoc.regionName,
+		ZoneName:    tLoc.zoneName,
+		PlaceName:   tLoc.zoneName,
+		TerritoryID: rawLoc.TerritoryID,
+		MapID:       rawLoc.MapID,
+		MapPath:     tLoc.mapPath,
+		SizeFactor:  tLoc.sizeFactor,
+	}
+	if pt.MapID == 0 {
+		pt.MapID = tLoc.mapID
+	}
+	offX, offY := tLoc.offsetX, tLoc.offsetY
+	if spMap, ok := maps[pt.MapID]; ok {
+		if p := spMap.StringAt(6); p != "" {
+			pt.MapPath = p
+		}
+		if sf := spMap.IntAt(7); sf > 0 {
+			pt.SizeFactor = sf
+		}
+		offX = spMap.FloatAt(8)
+		offY = spMap.FloatAt(9)
+		subID := spMap.IntAt(12)
+		if subID == 0 {
+			subID = spMap.IntAt(11)
+		}
+		if subName := placeNames[subID]; subName != "" {
+			pt.PlaceName = subName
+		}
+	}
+	pt.CoordX, pt.CoordY, pt.NormX, pt.NormY = convertWorldCoordToMap(
+		rawLoc.WorldX, rawLoc.WorldZ, pt.SizeFactor, offX, offY,
+	)
+	return pt
+}
+
+func resolveVendorNpc(npcID int, npcNames map[int]RawNpcName, npcLocations map[int]RawNpcLocation, territoryTypes, maps map[int]sqpack.Row, placeNames map[int]string) (ShopVendorNpc, bool) {
+	npcInfo, ok := npcNames[npcID]
+	if !ok {
+		return ShopVendorNpc{}, false
+	}
+	vendor := ShopVendorNpc{
+		NpcID:      npcID,
+		NpcName:    npcInfo.Name,
+		NpcTitle:   npcInfo.Title,
+		SizeFactor: 100,
+		NormX:      0.5,
+		NormY:      0.5,
+	}
+	if rawLoc, ok := npcLocations[npcID]; ok {
+		if loc := resolveMapLocation(rawLoc, territoryTypes, maps, placeNames); loc != nil {
+			vendor.RegionName = loc.RegionName
+			vendor.ZoneName = loc.ZoneName
+			vendor.PlaceName = loc.PlaceName
+			vendor.TerritoryID = loc.TerritoryID
+			vendor.MapID = loc.MapID
+			vendor.MapPath = loc.MapPath
+			vendor.SizeFactor = loc.SizeFactor
+			vendor.CoordX = loc.CoordX
+			vendor.CoordY = loc.CoordY
+			vendor.NormX = loc.NormX
+			vendor.NormY = loc.NormY
+		}
+	}
+	return vendor, true
+}
+
+func (s *Service) resolveTerritoryAndMap(territoryID int) *territoryMapLoc {
+	return resolveTerritoryAndMapFromTables(territoryID, s.store.TerritoryTypes, s.store.Maps, s.store.PlaceNames)
 }
 
 func (s *Service) extractGatheringTimeWindows(pointID int) (isTimed bool, isEphemeral bool, windows []GatheringTimeWindow) {
@@ -1307,56 +1421,11 @@ func (s *Service) buildShopSources(itemID int) []ShopPurchaseSource {
 			if grp.seenNPCs[npcID] || len(grp.source.NPCs) >= 16 {
 				continue
 			}
-			npcInfo, ok := s.store.NpcNames[npcID]
+			vendor, ok := resolveVendorNpc(npcID, s.store.NpcNames, s.store.NpcLocations, s.store.TerritoryTypes, s.store.Maps, s.store.PlaceNames)
 			if !ok {
 				continue
 			}
 			grp.seenNPCs[npcID] = true
-
-			vendor := ShopVendorNpc{
-				NpcID:      npcID,
-				NpcName:    npcInfo.Name,
-				NpcTitle:   npcInfo.Title,
-				SizeFactor: 100,
-				NormX:      0.5,
-				NormY:      0.5,
-			}
-			if rawLoc, ok := s.store.NpcLocations[npcID]; ok {
-				if tLoc := s.resolveTerritoryAndMap(rawLoc.TerritoryID); tLoc != nil {
-					vendor.RegionName = tLoc.regionName
-					vendor.ZoneName = tLoc.zoneName
-					vendor.PlaceName = tLoc.zoneName
-					vendor.TerritoryID = rawLoc.TerritoryID
-					vendor.MapID = rawLoc.MapID
-					if vendor.MapID == 0 {
-						vendor.MapID = tLoc.mapID
-					}
-					vendor.MapPath = tLoc.mapPath
-					vendor.SizeFactor = tLoc.sizeFactor
-					offX, offY := tLoc.offsetX, tLoc.offsetY
-
-					if spMap, ok := s.store.Maps[vendor.MapID]; ok {
-						if p := spMap.StringAt(6); p != "" {
-							vendor.MapPath = p
-						}
-						if sf := spMap.IntAt(7); sf > 0 {
-							vendor.SizeFactor = sf
-						}
-						offX = spMap.FloatAt(8)
-						offY = spMap.FloatAt(9)
-						subID := spMap.IntAt(12)
-						if subID == 0 {
-							subID = spMap.IntAt(11)
-						}
-						if subName := s.store.PlaceNames[subID]; subName != "" {
-							vendor.PlaceName = subName
-						}
-					}
-					vendor.CoordX, vendor.CoordY, vendor.NormX, vendor.NormY = convertWorldCoordToMap(
-						rawLoc.WorldX, rawLoc.WorldZ, vendor.SizeFactor, offX, offY,
-					)
-				}
-			}
 			grp.source.NPCs = append(grp.source.NPCs, vendor)
 		}
 	}
@@ -1429,6 +1498,9 @@ func (s *Service) SearchAchievements(query AchievementSearchQuery) AchievementSe
 		if query.KindID > 0 && ach.KindID != query.KindID {
 			continue
 		}
+		if query.CategoryID > 0 && ach.CategoryID != query.CategoryID {
+			continue
+		}
 		if filter == "with_title" && ach.TitleID <= 0 {
 			continue
 		}
@@ -1486,6 +1558,199 @@ func (s *Service) SearchAchievements(query AchievementSearchQuery) AchievementSe
 		PageSize:   pageSize,
 		TotalPages: totalPages,
 	}
+}
+
+// paginateRange 计算标准 1-based 分页范围与总页数。
+func paginateRange(total, reqPage, pageSize int) (page, totalPages, start, end int) {
+	if pageSize <= 0 {
+		pageSize = 30
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	totalPages = max(1, (total+pageSize-1)/pageSize)
+	page = reqPage
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	start = (page - 1) * pageSize
+	end = min(total, start+pageSize)
+	return
+}
+
+// SearchQuests 搜索与筛选任务列表。
+func (s *Service) SearchQuests(query QuestSearchQuery) QuestSearchResponse {
+	q := strings.ToLower(strings.TrimSpace(query.Q))
+	numericQuery := -1
+	if q != "" {
+		if parsed, err := strconv.Atoi(q); err == nil && parsed > 0 {
+			numericQuery = parsed
+		}
+	}
+	filter := query.Filter
+	if filter == "" {
+		filter = "all"
+	}
+
+	filtered := make([]QuestEntry, 0, 128)
+	for _, qe := range s.store.Quests {
+		if query.SectionID >= 0 && qe.SectionID != query.SectionID {
+			continue
+		}
+		if query.ExpansionID >= 0 && qe.ExpansionID != query.ExpansionID {
+			continue
+		}
+		if query.MinLevel > 0 && qe.Level < query.MinLevel {
+			continue
+		}
+		if query.MaxLevel > 0 && qe.Level > query.MaxLevel {
+			continue
+		}
+		switch filter {
+		case "msq":
+			if !qe.IsMSQ {
+				continue
+			}
+		case "feature":
+			if !qe.IsFeature {
+				continue
+			}
+		case "repeatable":
+			if !qe.IsRepeatable {
+				continue
+			}
+		case "with_item":
+			if len(qe.RewardItems) == 0 {
+				continue
+			}
+		}
+		if q != "" {
+			if numericQuery > 0 && qe.ID == numericQuery {
+				filtered = append(filtered, qe)
+				continue
+			}
+			if !strings.Contains(strings.ToLower(qe.NameCn), q) &&
+				!strings.Contains(strings.ToLower(qe.NameEn), q) &&
+				!strings.Contains(strings.ToLower(qe.NameJa), q) &&
+				!strings.Contains(strings.ToLower(qe.InternalID), q) &&
+				!strings.Contains(strings.ToLower(qe.GenreName), q) &&
+				!strings.Contains(strings.ToLower(qe.PlaceName), q) &&
+				!strings.Contains(strings.ToLower(qe.IssuerName), q) {
+				continue
+			}
+		}
+		filtered = append(filtered, qe)
+	}
+
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 30
+	}
+	page, totalPages, start, end := paginateRange(len(filtered), query.Page, pageSize)
+	var items []QuestEntry
+	if start < end {
+		items = filtered[start:end]
+	}
+	return QuestSearchResponse{
+		Items:      items,
+		Total:      len(filtered),
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+	}
+}
+
+// GetQuestDetail 根据任务 ID 返回完整任务详情。
+func (s *Service) GetQuestDetail(questID int) *QuestEntry {
+	q, ok := s.store.QuestByID[questID]
+	if !ok {
+		return nil
+	}
+	return &q
+}
+
+// SearchLeves 搜索与筛选理符列表。
+func (s *Service) SearchLeves(query LeveSearchQuery) LeveSearchResponse {
+	q := strings.ToLower(strings.TrimSpace(query.Q))
+	numericQuery := -1
+	if q != "" {
+		if parsed, err := strconv.Atoi(q); err == nil && parsed > 0 {
+			numericQuery = parsed
+		}
+	}
+	kind := query.Kind
+	if kind == "" {
+		kind = "all"
+	}
+
+	filtered := make([]LeveEntry, 0, 128)
+	for _, lv := range s.store.Leves {
+		if kind != "all" && lv.LeveKind != kind {
+			continue
+		}
+		if query.AssignmentTypeID > 0 && lv.AssignmentTypeID != query.AssignmentTypeID {
+			continue
+		}
+		if query.MinLevel > 0 && lv.ClassJobLevel < query.MinLevel {
+			continue
+		}
+		if query.MaxLevel > 0 && lv.ClassJobLevel > query.MaxLevel {
+			continue
+		}
+		if q != "" {
+			if numericQuery > 0 && lv.ID == numericQuery {
+				filtered = append(filtered, lv)
+				continue
+			}
+			matchedTurnIn := false
+			for _, ti := range lv.TurnInItems {
+				if strings.Contains(strings.ToLower(ti.ItemName), q) {
+					matchedTurnIn = true
+					break
+				}
+			}
+			if !matchedTurnIn &&
+				!strings.Contains(strings.ToLower(lv.NameCn), q) &&
+				!strings.Contains(strings.ToLower(lv.NameEn), q) &&
+				!strings.Contains(strings.ToLower(lv.NameJa), q) &&
+				!strings.Contains(strings.ToLower(lv.AssignmentTypeName), q) &&
+				!strings.Contains(strings.ToLower(lv.TownName), q) &&
+				!strings.Contains(strings.ToLower(lv.PlaceNameStart), q) &&
+				!strings.Contains(strings.ToLower(lv.ClientName), q) {
+				continue
+			}
+		}
+		filtered = append(filtered, lv)
+	}
+
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 30
+	}
+	page, totalPages, start, end := paginateRange(len(filtered), query.Page, pageSize)
+	var items []LeveEntry
+	if start < end {
+		items = filtered[start:end]
+	}
+	return LeveSearchResponse{
+		Items:      items,
+		Total:      len(filtered),
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+	}
+}
+
+// GetLeveDetail 根据理符 ID 返回完整理符详情。
+func (s *Service) GetLeveDetail(leveID int) *LeveEntry {
+	lv, ok := s.store.LeveByID[leveID]
+	if !ok {
+		return nil
+	}
+	return &lv
 }
 
 // GetIconImage 从已挂载客户端解码道具或职业图标为 *image.RGBA。

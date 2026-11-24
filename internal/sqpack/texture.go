@@ -64,59 +64,107 @@ func ParseTextureHeader(raw []byte) (TextureHeader, error) {
 	return h, nil
 }
 
-// DecodeTexToRGBA 将 FF14 .tex 原始字节解码为标准 *image.RGBA 图像（取最高清晰度 Mip 0）。
-func DecodeTexToRGBA(raw []byte) (*image.RGBA, error) {
+// decodeTexPixels 将 FF14 .tex 原始字节解码为非预乘的直通 RGBA 像素切片（取最高清晰度 Mip 0）。
+func decodeTexPixels(raw []byte) (int, int, []byte, error) {
 	hdr, err := ParseTextureHeader(raw)
 	if err != nil {
-		return nil, err
+		return 0, 0, nil, err
 	}
 	w := int(hdr.Width)
 	h := int(hdr.Height)
 	if w <= 0 || h <= 0 {
-		return nil, fmt.Errorf("无效贴图尺寸: %dx%d", w, h)
+		return 0, 0, nil, fmt.Errorf("无效贴图尺寸: %dx%d", w, h)
 	}
 	dataOff := int(hdr.SurfaceOffsets[0])
 	if dataOff < textureHeaderSize || dataOff >= len(raw) {
 		dataOff = textureHeaderSize
 	}
 	src := raw[dataOff:]
-	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	pix := make([]byte, 4*w*h)
 
 	switch hdr.Format {
 	case TexFormatB8G8R8A8:
-		decodeBGRA8(src, dst.Pix, w*h, false)
+		decodeBGRA8(src, pix, w*h, false)
 	case TexFormatB8G8R8X8:
-		decodeBGRA8(src, dst.Pix, w*h, true)
+		decodeBGRA8(src, pix, w*h, true)
 	case TexFormatB4G4R4A4:
-		decodeBGRA4444(src, dst.Pix, w*h)
+		decodeBGRA4444(src, pix, w*h)
 	case TexFormatB5G5R5A1:
-		decodeBGRA5551(src, dst.Pix, w*h)
+		decodeBGRA5551(src, pix, w*h)
 	case TexFormatL8:
-		decodeL8(src, dst.Pix, w*h)
+		decodeL8(src, pix, w*h)
 	case TexFormatA8:
-		decodeA8(src, dst.Pix, w*h)
+		decodeA8(src, pix, w*h)
 	case TexFormatDXT1:
-		decodeDXT1(src, dst.Pix, w, h)
+		decodeDXT1(src, pix, w, h)
 	case TexFormatDXT3:
-		decodeDXT3(src, dst.Pix, w, h)
+		decodeDXT3(src, pix, w, h)
 	case TexFormatDXT5:
-		decodeDXT5(src, dst.Pix, w, h)
+		decodeDXT5(src, pix, w, h)
 	case TexFormatBC4:
-		decodeBC4(src, dst.Pix, w, h)
+		decodeBC4(src, pix, w, h)
 	case TexFormatBC5:
-		decodeBC5(src, dst.Pix, w, h)
+		decodeBC5(src, pix, w, h)
 	case TexFormatBC7:
-		decodeBC7(src, dst.Pix, w, h)
+		decodeBC7(src, pix, w, h)
 	default:
-		return nil, fmt.Errorf("暂不支持的 .tex 贴图格式: %d (0x%x)", hdr.Format, hdr.Format)
+		return 0, 0, nil, fmt.Errorf("暂不支持的 .tex 贴图格式: %d (0x%x)", hdr.Format, hdr.Format)
 	}
 
-	return dst, nil
+	return w, h, pix, nil
 }
 
-// DecodeTexToPNG 将 FF14 .tex 原始字节解码并编码为 PNG 字节数组。
+// premultiplyRGBA 原地将直通 RGBA 像素预乘为 Go image.RGBA 规范要求的预乘 Alpha 像素。
+// .tex 原始数据存储直通色彩（透明区 RGB 可能为 255），若直接作为预乘 *image.RGBA 提交给 GPU 混合，
+// 会导致透明像素在深色背景上叠加出纯白或白边光晕。
+func premultiplyRGBA(pix []byte) {
+	for i := 0; i+3 < len(pix); i += 4 {
+		a := uint32(pix[i+3])
+		switch a {
+		case 255:
+			continue
+		case 0:
+			pix[i] = 0
+			pix[i+1] = 0
+			pix[i+2] = 0
+		default:
+			pix[i] = byte((uint32(pix[i])*a + 127) / 255)
+			pix[i+1] = byte((uint32(pix[i+1])*a + 127) / 255)
+			pix[i+2] = byte((uint32(pix[i+2])*a + 127) / 255)
+		}
+	}
+}
+
+// DecodeTexToNRGBA 将 FF14 .tex 原始字节解码为非预乘的直通 *image.NRGBA 图像（取最高清晰度 Mip 0）。
+func DecodeTexToNRGBA(raw []byte) (*image.NRGBA, error) {
+	w, h, pix, err := decodeTexPixels(raw)
+	if err != nil {
+		return nil, err
+	}
+	return &image.NRGBA{
+		Pix:    pix,
+		Stride: 4 * w,
+		Rect:   image.Rect(0, 0, w, h),
+	}, nil
+}
+
+// DecodeTexToRGBA 将 FF14 .tex 原始字节解码并预乘 Alpha，返回标准 *image.RGBA 图像（取最高清晰度 Mip 0）。
+func DecodeTexToRGBA(raw []byte) (*image.RGBA, error) {
+	w, h, pix, err := decodeTexPixels(raw)
+	if err != nil {
+		return nil, err
+	}
+	premultiplyRGBA(pix)
+	return &image.RGBA{
+		Pix:    pix,
+		Stride: 4 * w,
+		Rect:   image.Rect(0, 0, w, h),
+	}, nil
+}
+
+// DecodeTexToPNG 将 FF14 .tex 原始字节解码并编码为无损直通 Alpha PNG 字节数组。
 func DecodeTexToPNG(raw []byte) ([]byte, error) {
-	img, err := DecodeTexToRGBA(raw)
+	img, err := DecodeTexToNRGBA(raw)
 	if err != nil {
 		return nil, err
 	}

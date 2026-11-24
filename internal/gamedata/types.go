@@ -17,45 +17,394 @@ type CraftTypeInfo struct {
 	RecipeCount int
 }
 
+// AchievementCategoryInfo 表示成就二级分类统计信息。
+type AchievementCategoryInfo struct {
+	ID       int
+	KindID   int
+	KindName string
+	Name     string
+	Count    int
+}
+
 // AchievementKindInfo 表示成就大类统计信息。
 type AchievementKindInfo struct {
+	ID         int
+	Name       string
+	Count      int
+	Categories []AchievementCategoryInfo
+}
+
+// SystemStats 汇总当前加载的客户端数据规模指标。
+type SystemStats struct {
+	TotalItems             int
+	CraftableItems         int
+	GatherableItems        int
+	PurchasableItems       int
+	GilShopItems           int
+	SpecialShopItems       int
+	RetainerVentureItems   int
+	CollectableTurnInItems int
+	TotalRecipes           int
+	TotalGatheringPoints   int
+	TotalFishingSpots      int
+	TotalShops             int
+	TotalRetainerTasks     int
+	TotalAchievements      int
+	TotalTitles            int
+	TotalQuests            int
+	TotalLeves             int
+	TotalCollectables      int
+	LoadTimeMs             int64
+}
+
+// SystemStatus 描述当前已挂载客户端版本、路径与各类汇总统计。
+type SystemStatus struct {
+	HasCN                 bool
+	HasGlobal             bool
+	CNVersion             string
+	GlobalVersion         string
+	PrimaryVersion        string
+	CNPath                string
+	GlobalPath            string
+	Stats                 SystemStats
+	Categories            []ItemCategoryInfo
+	CraftTypes            []CraftTypeInfo
+	AchievementKinds      []AchievementKindInfo
+	AchievementCategories []AchievementCategoryInfo
+	QuestSections         []QuestSectionInfo
+	LeveAssignmentTypes   []LeveAssignmentTypeInfo
+}
+
+// MapLocationPoint 描述一个可直接用于地图弹窗展示的地点与坐标信息。
+type MapLocationPoint struct {
+	RegionName  string
+	ZoneName    string
+	PlaceName   string
+	TerritoryID int
+	MapID       int
+	MapPath     string
+	SizeFactor  int
+	CoordX      float64
+	CoordY      float64
+	NormX       float64
+	NormY       float64
+}
+
+// QuestSectionInfo 表示任务日志大类统计信息。
+type QuestSectionInfo struct {
 	ID    int
 	Name  string
 	Count int
 }
 
-// SystemStats 汇总当前加载的客户端数据规模指标。
-type SystemStats struct {
-	TotalItems           int
-	CraftableItems       int
-	GatherableItems      int
-	PurchasableItems     int
-	GilShopItems         int
-	SpecialShopItems     int
-	RetainerVentureItems int
-	TotalRecipes         int
-	TotalGatheringPoints int
-	TotalFishingSpots    int
-	TotalShops           int
-	TotalRetainerTasks   int
-	TotalAchievements    int
-	TotalTitles          int
-	LoadTimeMs           int64
+// QuestRewardItem 表示任务的道具/货币/神典石奖励项。
+type QuestRewardItem struct {
+	ItemID           int
+	ItemName         string
+	IconID           int
+	Count            int
+	IsHQ             bool
+	GroupLabel       string
+	ClassJobCategory string
 }
 
-// SystemStatus 描述当前已挂载客户端版本、路径与各类汇总统计。
-type SystemStatus struct {
-	HasCN            bool
-	HasGlobal        bool
-	CNVersion        string
-	GlobalVersion    string
-	PrimaryVersion   string
-	CNPath           string
-	GlobalPath       string
-	Stats            SystemStats
-	Categories       []ItemCategoryInfo
-	CraftTypes       []CraftTypeInfo
-	AchievementKinds []AchievementKindInfo
+// QuestUnlockReward 表示任务解锁的职业、情感动作、技能或副本等内容。
+type QuestUnlockReward struct {
+	Kind   string // job|emote|action|general|instance|other
+	Label  string
+	IconID int
+}
+
+// QuestEntry 表示单条任务的完整解析数据。
+type QuestEntry struct {
+	ID                    int
+	InternalID            string
+	NameCn                string
+	NameEn                string
+	NameJa                string
+	IconID                int // 任务类型图标 ID（061431 普通 / 061432 主线 / 061433 可重复 / 061439 功能解锁）
+	BannerIconID          int // 任务详情横幅插图 ID（Quest.Icon，0 表示无）
+	SpecialIconID         int // 任务专属徽章贴图 ID（Quest.IconSpecial，0 表示无）
+	EventIconID           int
+	HasLevelSync          bool // 任务名含等级调整标识（\ue0be）
+	IsJobFixed            bool // 任务名含固定职业标识（\ue0bf）
+	SectionID             int
+	SectionName           string
+	CategoryName          string
+	GenreID               int
+	GenreName             string
+	ExpansionID           int
+	ExpansionName         string
+	PlaceName             string
+	SortKey               int
+	Level                 int
+	LevelOffset           int
+	LevelMax              int
+	ClassJobCategoryName  string
+	ClassJobCategory2Name string
+	Level2                int
+	ClassJobRequiredName  string
+	IssuerNpcID           int
+	IssuerName            string
+	IssuerLocation        *MapLocationPoint
+	TargetNpcID           int
+	TargetName            string
+	TargetLocation        *MapLocationPoint
+	PreviousQuestIDs      []int
+	PreviousQuestNames    []string
+	PreviousQuestJoin     int
+	QuestLockIDs          []int
+	QuestLockNames        []string
+	InstanceContentNames  []string
+	GrandCompanyName      string
+	BeastTribeName        string
+	BeastReputationRank   string
+	BeastReputationValue  int
+	MountRequiredName     string
+	IsHouseRequired       bool
+	IsRepeatable          bool
+	RepeatIntervalLabel   string
+	CanCancel             bool
+	BellStart             int
+	BellEnd               int
+	IsMSQ                 bool
+	IsFeature             bool
+	GilReward             int
+	ExpFactor             int
+	ExpReward             int
+	CurrencyRewardItemID  int
+	CurrencyRewardName    string
+	CurrencyRewardIconID  int
+	CurrencyRewardCount   int
+	TomestoneItemID       int
+	TomestoneName         string
+	TomestoneIconID       int
+	TomestoneCount        int
+	ReputationReward      int
+	RewardItems           []QuestRewardItem
+	Unlocks               []QuestUnlockReward
+}
+
+// QuestDialogueLine 表示按剧情顺序整理的单段任务对话、选项或系统提示。
+type QuestDialogueLine struct {
+	Key     string
+	Kind    string // "dialogue" | "question" | "answer" | "system" | "battle"
+	Speaker string
+	Text    string
+}
+
+// QuestTextData 表示按需从 SqPack 解析的任务概要、目的步骤与对话文本。
+type QuestTextData struct {
+	QuestID    int
+	Journals   []string
+	Objectives []string
+	Dialogues  []QuestDialogueLine
+}
+
+// QuestSearchQuery 任务检索与筛选参数。
+type QuestSearchQuery struct {
+	Q           string
+	SectionID   int
+	ExpansionID int
+	Filter      string // all|msq|feature|repeatable|with_item
+	MinLevel    int
+	MaxLevel    int
+	Page        int
+	PageSize    int
+}
+
+// QuestSearchResponse 任务分页检索结果。
+type QuestSearchResponse struct {
+	Items      []QuestEntry
+	Total      int
+	Page       int
+	PageSize   int
+	TotalPages int
+}
+
+// LeveAssignmentTypeInfo 表示理符分类（佣兵/采集/制作/军队）统计信息。
+type LeveAssignmentTypeInfo struct {
+	ID     int
+	Name   string
+	IconID int
+	Kind   string // craft|gathering|battle|company
+	Count  int
+}
+
+// LeveTurnInItem 表示制作/捕鱼理符需要交纳的道具项。
+type LeveTurnInItem struct {
+	ItemID   int
+	ItemName string
+	IconID   int
+	Count    int
+}
+
+// LeveCombatTarget 表示战斗/军队理符中的目标怪物信息。
+type LeveCombatTarget struct {
+	BNpcName string
+	Level    int
+	Count    int
+}
+
+// LeveObjectiveItem 表示采集/战斗理符的任务专用道具目标。
+type LeveObjectiveItem struct {
+	ItemName string
+	Count    int
+	DropRate int
+}
+
+// LeveRewardEntry 表示理符随机奖励组中的单条奖励道具。
+type LeveRewardEntry struct {
+	ItemID   int
+	ItemName string
+	IconID   int
+	Count    int
+	IsHQ     bool
+}
+
+// LeveRewardGroup 表示理符的单个概率奖励池。
+type LeveRewardGroup struct {
+	ProbabilityPercent int
+	Items              []LeveRewardEntry
+}
+
+// LeveEntry 表示单条理符任务的完整解析数据。
+type LeveEntry struct {
+	ID                      int
+	NameCn                  string
+	NameEn                  string
+	NameJa                  string
+	DescriptionCn           string
+	IconCityState           int
+	IconIssuer              int
+	LeveKind                string // craft|gathering|battle|company
+	LeveKindLabel           string
+	AssignmentTypeID        int
+	AssignmentTypeName      string
+	AssignmentTypeIconID    int
+	GenreName               string
+	TownName                string
+	ClientName              string
+	ClassJobCategoryName    string
+	ClassJobLevel           int
+	PlaceNameStart          string
+	PlaceNameIssued         string
+	PlaceNameStartZone      string
+	LevemeteLocation        *MapLocationPoint
+	StartLocation           *MapLocationPoint
+	TimeLimit               int
+	AllowanceCost           int
+	CanCancel               bool
+	LockedLeve              bool
+	ExpReward               int
+	ExpFactor               float64
+	GilReward               int
+	CraftRepeats            int
+	TurnInItems             []LeveTurnInItem
+	RuleName                string
+	GatheringItemNumber     int
+	GatheringUseSecondary   bool
+	FishingSpotName         string
+	SpearfishingPlaceName   string
+	GatheringTargetLocation *MapLocationPoint
+	Objectives              []string
+	CombatTargets           []LeveCombatTarget
+	RequiredObjectiveItems  []LeveObjectiveItem
+	RewardGroups            []LeveRewardGroup
+}
+
+// LeveSearchQuery 理符检索与筛选参数。
+type LeveSearchQuery struct {
+	Q                string
+	Kind             string // all|craft|gathering|battle|company
+	AssignmentTypeID int
+	MinLevel         int
+	MaxLevel         int
+	Page             int
+	PageSize         int
+}
+
+// LeveSearchResponse 理符分页检索结果。
+type LeveSearchResponse struct {
+	Items      []LeveEntry
+	Total      int
+	Page       int
+	PageSize   int
+	TotalPages int
+}
+
+// CollectableTier 表示单个收藏价值档位及对应奖励。
+type CollectableTier struct {
+	Label             string // 低档|中档|高档
+	MinCollectability int
+	RewardItemID      int
+	RewardItemName    string
+	RewardItemIconID  int
+	RewardAmount      int
+	ExpRatio          int
+	ExpReward         int
+	SecondaryItemID   int
+	SecondaryItemName string
+	SecondaryIconID   int
+	SecondaryAmount   int
+	GilReward         int
+	Satisfaction      int
+	Points            int
+}
+
+// CollectableTurnInSource 表示物品作为收藏品上交时的交易条目（收藏品商店 / 老主顾 / 重建供货）。
+type CollectableTurnInSource struct {
+	SourceKind        string // shop|satisfaction|hwd
+	SourceLabel       string
+	ShopID            int
+	ShopName          string
+	GroupName         string
+	LevelMin          int
+	LevelMax          int
+	Stars             int
+	RequiredQuestID   int
+	RequiredQuestName string
+	RewardMode        string // scrip|item|supply
+	IsBonus           bool
+	Tiers             []CollectableTier
+	NPCs              []ShopVendorNpc
+}
+
+// CollectableRewardSource 表示某道具通过收藏品交易获得的反向来源。
+type CollectableRewardSource struct {
+	ShopName          string
+	TurnInItemID      int
+	TurnInItemName    string
+	TurnInItemIconID  int
+	GroupName         string
+	LevelMin          int
+	LevelMax          int
+	MinCollectability int
+	RewardLow         int
+	RewardMid         int
+	RewardHigh        int
+	NPCs              []ShopVendorNpc
+}
+
+// ItemQuestSource 表示道具与任务的奖励关联摘要。
+type ItemQuestSource struct {
+	QuestID    int
+	NameCn     string
+	GenreName  string
+	Level      int
+	Count      int
+	GroupLabel string
+}
+
+// ItemLeveSource 表示道具与理符的关联摘要（交纳委托或奖励掉落）。
+type ItemLeveSource struct {
+	LeveID             int
+	NameCn             string
+	AssignmentTypeName string
+	Level              int
+	Count              int
+	ProbabilityPercent int
+	IsTurnIn           bool
 }
 
 // AchievementEntry 表示单条成就及关联称号/奖励道具解析结果。
@@ -86,11 +435,12 @@ type AchievementEntry struct {
 
 // AchievementSearchQuery 成就与称号检索条件。
 type AchievementSearchQuery struct {
-	Q        string
-	KindID   int
-	Filter   string // "all" | "with_title" | "with_item"
-	Page     int
-	PageSize int
+	Q          string
+	KindID     int
+	CategoryID int
+	Filter     string // "all" | "with_title" | "with_item"
+	Page       int
+	PageSize   int
 }
 
 // AchievementSearchResponse 成就检索分页结果。
@@ -104,36 +454,38 @@ type AchievementSearchResponse struct {
 
 // ItemSummary 道具列表摘要信息。
 type ItemSummary struct {
-	ID                 int
-	NameCn             string
-	NameEn             string
-	NameJa             string
-	IconID             int
-	ItemLevel          int
-	EquipLevel         int
-	Rarity             int
-	CategoryID         int
-	CategoryName       string
-	CategoryIconID     int
-	PriceMid           int
-	CanBeHQ            bool
-	IsTradable         bool
-	IsMarketable       bool
-	IsCraftable        bool
-	IsGatherable       bool
-	IsPurchasable      bool
-	IsGilShop          bool
-	IsSpecialShop      bool
-	IsRetainerVenture  bool
-	HasEquipmentStats  bool
-	UsedInRecipesCount int
+	ID                  int
+	NameCn              string
+	NameEn              string
+	NameJa              string
+	IconID              int
+	ItemLevel           int
+	EquipLevel          int
+	Rarity              int
+	CategoryID          int
+	CategoryName        string
+	CategoryIconID      int
+	PriceMid            int
+	CanBeHQ             bool
+	IsTradable          bool
+	IsMarketable        bool
+	IsCraftable         bool
+	IsGatherable        bool
+	IsPurchasable       bool
+	IsGilShop           bool
+	IsSpecialShop       bool
+	IsRetainerVenture   bool
+	IsCollectableTurnIn bool
+	IsCollectableReward bool
+	HasEquipmentStats   bool
+	UsedInRecipesCount  int
 }
 
 // ItemSearchQuery 道具多条件筛选与分页参数。
 type ItemSearchQuery struct {
 	Q            string
 	CategoryID   int
-	Filter       string // all|craftable|gatherable|purchasable|gil_shop|special_shop|retainer_venture|equipment|consumable
+	Filter       string // all|craftable|gatherable|purchasable|gil_shop|special_shop|retainer_venture|collectable_turnin|equipment|consumable
 	CraftTypeID  *int
 	MinIlvl      int
 	MaxIlvl      int
@@ -472,5 +824,10 @@ type ItemDetail struct {
 	Gathering                GatheringMethodDetail
 	Shops                    []ShopPurchaseSource
 	RetainerVentures         []RetainerVentureSource
+	CollectableTurnIns       []CollectableTurnInSource
+	CollectableRewards       []CollectableRewardSource
+	RewardedFromQuests       []ItemQuestSource
+	TurnInForLeves           []ItemLeveSource
+	RewardedFromLeves        []ItemLeveSource
 	RewardedFromAchievements []AchievementEntry
 }

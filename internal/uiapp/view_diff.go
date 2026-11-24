@@ -4,14 +4,51 @@ import (
 	"fmt"
 
 	"github.com/InfSein/xiv-data-viewer/internal/backup"
+	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/egoist/mygo/ui"
 )
 
 var diffFilterModes = []string{"all", "added", "modified", "removed"}
 var diffFilterLabels = []string{"全部", "新增", "变更", "移除"}
 
-var diffEntityModes = []string{"all", "item", "achievement"}
-var diffEntityLabels = []string{"全部", "物品", "成就"}
+var diffEntityModes = []string{"all", "item", "quest", "leve", "achievement"}
+var diffEntityLabels = []string{"全部", "物品", "任务", "理符", "成就"}
+
+const (
+	diffColGap    float32 = 10
+	diffColIDW    float32 = 68
+	diffColNameW  float32 = 240
+	diffColTypeW  float32 = 72
+	diffColChgMin float32 = 140
+)
+
+func canInspectDiffEntry(entry backup.DiffItemEntry) bool {
+	if entry.ChangeType == "removed" {
+		return false
+	}
+	switch entry.EntityType {
+	case "item", "quest", "leve", "achievement":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *App) inspectDiffEntry(entry backup.DiffItemEntry) {
+	if !canInspectDiffEntry(entry) {
+		return
+	}
+	switch entry.EntityType {
+	case "item":
+		a.inspectItemFromOtherTab(entry.ID)
+	case "quest":
+		a.inspectQuestFromOtherTab(entry.ID)
+	case "leve":
+		a.inspectLeveFromOtherTab(entry.ID)
+	case "achievement":
+		a.inspectAchievementFromOtherTab(entry.ID, entry.RewardItemID)
+	}
+}
 
 func (a *App) renderDiffView(c *ui.Context) {
 	t := themeOf(c)
@@ -62,8 +99,11 @@ func (a *App) renderDiffView(c *ui.Context) {
 				kitBlock(c, ui.Row(c).FillWidth().Padding(8, 12).Gap(16).AlignItems(ui.Center).Wrap(), toneCard).Children(func() {
 					drawCompactDiffStat(c, "新增物品", "+"+formatInt(sum.AddedItems), t.successText)
 					drawCompactDiffStat(c, "物品变更", formatInt(sum.ModifiedItems), t.warningText)
+					colTotal := sum.NewCollectableTurnInItems + sum.ModifiedCollectableItems
+					drawCompactDiffStat(c, "收藏品变动", formatInt(colTotal), t.infoText)
+					drawCompactDiffStat(c, "新增任务", "+"+formatInt(sum.AddedQuests), t.successText)
+					drawCompactDiffStat(c, "新增理符", "+"+formatInt(sum.AddedLeves), t.successText)
 					drawCompactDiffStat(c, "新增配方", "+"+formatInt(sum.AddedRecipes), t.foreground)
-					drawCompactDiffStat(c, "可采集", "+"+formatInt(sum.NewGatherableItems), t.foreground)
 					drawCompactDiffStat(c, "新增成就", "+"+formatInt(sum.AddedAchievements), t.infoText)
 					drawCompactDiffStat(c, "新增称号", "+"+formatInt(sum.AddedTitles), t.foreground)
 				})
@@ -103,13 +143,11 @@ func (a *App) renderDiffView(c *ui.Context) {
 
 		// 3. 变更表头
 		ui.Row(c).FillWidth().Padding(8, 16).Background(t.card).
-			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Gap(10).Children(func() {
-			ui.Text(c, "ID").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(54).TextAlign(ui.End)
-			ui.Text(c, "名称").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(190)
-			ui.Text(c, "品级/点数").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(62).TextAlign(ui.End)
-			ui.Text(c, "类型").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(72)
-			ui.Text(c, "变更内容").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).MinWidth(140)
-			ui.Text(c, "操作").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(74).TextAlign(ui.End)
+			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Gap(diffColGap).Children(func() {
+			ui.Text(c, "ID").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColIDW).Shrink(0)
+			ui.Text(c, "名称").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColNameW).Shrink(0)
+			ui.Text(c, "类型").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColTypeW).Shrink(0).TextAlign(ui.Center)
+			ui.Text(c, "变更内容").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(diffColChgMin)
 		})
 
 		// 4. 变更明细行
@@ -122,36 +160,69 @@ func (a *App) renderDiffView(c *ui.Context) {
 						if i > 0 {
 							kitSeparator(c, false).Margin(0, 16)
 						}
-						isAch := entry.EntityType == "achievement"
 						row := ui.Row(c.Key(fmt.Sprintf("df-row-%s-%d", entry.EntityType, entry.ID))).
-							FillWidth().Padding(10, 16).Gap(10).
+							FillWidth().Padding(10, 16).Gap(diffColGap).
 							AlignItems(ui.Center).Transition(colorTransition(motionFast))
 						if row.Hovered() {
 							row.Background(t.tint(0.85))
 						}
 						row.Children(func() {
-							numTextf(c, "#%d", entry.ID).FontSize(t.text.micro).TextColor(t.muted).Width(54).TextAlign(ui.End).SingleLine()
-
-							ui.Row(c).Width(190).Shrink(0).Gap(8).AlignItems(ui.Center).Children(func() {
-								a.drawGameIcon(c, entry.IconID, false, 26, t.radius.md)
-								ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
-									ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
-										ui.Text(c, entry.NameCn).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
-										if isAch {
-											drawPill(c, "成就", pillAccent)
-										}
-									})
-									ui.Text(c, entry.CategoryName).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
-								})
-							})
-
-							lvTxt := fmt.Sprintf("%d", entry.ItemLevel)
-							if isAch {
-								lvTxt = fmt.Sprintf("%d 点", entry.Points)
+							dispName := entry.NameCn
+							if entry.EntityType == "quest" {
+								dispName = gamedata.CleanQuestTitle(dispName)
 							}
-							numText(c, lvTxt).FontSize(t.text.xs).TextColor(t.foreground).Width(62).TextAlign(ui.End).SingleLine()
+							canJump := canInspectDiffEntry(entry)
+							renderIDAndName := func(hovered bool) {
+								// ID 列左对齐，并将类型 tag 收纳在 ID 下方，避免单独占列或挤压名称
+								ui.Column(c).Width(diffColIDW).Shrink(0).AlignItems(ui.Start).Gap(3).Children(func() {
+									numTextf(c, "#%d", entry.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+									switch entry.EntityType {
+									case "achievement":
+										drawPill(c, "成就", pillAccent)
+									case "quest":
+										drawPill(c, "任务", pillWarning)
+									case "leve":
+										drawPill(c, "理符", pillPositive)
+									default:
+										if entry.HasCollectableChange {
+											drawPill(c, "收藏品", pillAccent)
+										}
+									}
+								})
 
-							ui.Box(c).Width(72).Shrink(0).Children(func() {
+								ui.Row(c).Width(diffColNameW).Shrink(0).Gap(8).AlignItems(ui.Center).Children(func() {
+									a.drawGameIcon(c, entry.IconID, false, 26, t.radius.md)
+									ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
+										nameCol := t.foreground
+										if hovered {
+											nameCol = t.primary
+										}
+										ui.Text(c, dispName).FontSize(t.text.xs).FontWeight(500).TextColor(nameCol).SingleLine()
+										ui.Text(c, entry.CategoryName).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+									})
+								})
+							}
+
+							jumpW := diffColIDW + diffColGap + diffColNameW
+							if canJump {
+								jumpBtn := ui.ButtonBase(c.Key(fmt.Sprintf("df-jump-%s-%d", entry.EntityType, entry.ID))).
+									Label("查看 " + dispName).Width(jumpW).Shrink(0).Gap(diffColGap).Padding(0).
+									Justify(ui.Start).AlignItems(ui.Center).
+									Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+								jumpBtn.Children(func() {
+									renderIDAndName(jumpBtn.Hovered())
+								})
+								if jumpBtn.Clicked() {
+									a.inspectDiffEntry(entry)
+								}
+							} else {
+								ui.Row(c).Width(jumpW).Shrink(0).Gap(diffColGap).AlignItems(ui.Center).Children(func() {
+									renderIDAndName(false)
+								})
+							}
+
+							// 类型列使用 Row 居中，防止 Column 默认 Stretch 拉宽胶囊产生多余空白
+							ui.Row(c).Width(diffColTypeW).Shrink(0).Center().Children(func() {
 								switch entry.ChangeType {
 								case "added":
 									drawPill(c, "新增", pillPositive)
@@ -162,8 +233,11 @@ func (a *App) renderDiffView(c *ui.Context) {
 								}
 							})
 
-							// 无外层套娃框的清爽增删变更项
-							ui.Row(c).Grow(1).Shrink(1).MinWidth(140).Gap(10).Wrap().AlignItems(ui.Center).Children(func() {
+							// 仅“变更”条目显示具体字段变化；新增与已移除条目保持空白
+							ui.Row(c).Grow(1).Shrink(1).MinWidth(diffColChgMin).Gap(10).Wrap().AlignItems(ui.Center).Children(func() {
+								if entry.ChangeType != "modified" {
+									return
+								}
 								for _, chg := range entry.Changes {
 									ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
 										ui.Text(c, chg.Label).FontSize(t.text.micro).TextColor(t.muted)
@@ -175,18 +249,6 @@ func (a *App) renderDiffView(c *ui.Context) {
 											numText(c, chg.After).FontSize(t.text.micro).FontWeight(500).TextColor(t.insText)
 										})
 									})
-								}
-							})
-
-							ui.Row(c).Width(74).Shrink(0).Justify(ui.End).Children(func() {
-								if !isAch && entry.ChangeType != "removed" {
-									if kitButton(c, fmt.Sprintf("df-view-item-%d", entry.ID), "详情", btnOpts{variant: btnOutline, size: btnSizeXs}) {
-										a.inspectItemFromOtherTab(entry.ID)
-									}
-								} else if isAch && entry.RewardItemID > 0 {
-									if kitButton(c, fmt.Sprintf("df-view-rew-%d", entry.ID), "奖励", btnOpts{variant: btnOutline, size: btnSizeXs}) {
-										a.inspectItemFromOtherTab(entry.RewardItemID)
-									}
 								}
 							})
 						})

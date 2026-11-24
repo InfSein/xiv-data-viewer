@@ -87,7 +87,7 @@ var (
 
 // 排版、尺寸与动效常量。
 const (
-	fontStack = "IBM Plex Sans, Microsoft YaHei UI, Microsoft YaHei, PingFang SC, Segoe UI, system-ui"
+	fontStack = defaultEnglishFont + ", Microsoft YaHei UI, Microsoft YaHei, PingFang SC, Segoe UI, system-ui"
 
 	lineUI    float32 = 1.45
 	lineProse float32 = 1.62
@@ -316,6 +316,7 @@ var (
 
 // applyAppTheme 根据用户配置与系统深浅色状态，为当前帧注入统一主题令牌。
 func applyAppTheme(c *ui.Context, mode string) uiTokens {
+	ensureDefaultFonts()
 	dark := c.Theme().Dark
 	switch mode {
 	case "light":
@@ -1225,4 +1226,12 @@ var (
 	icoAlertCircle = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12.5"/><circle cx="12" cy="16" r="0.8" fill="currentColor"/></svg>`))
 
 	icoInfo = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16"/><circle cx="12" cy="8" r="0.8" fill="currentColor"/></svg>`))
+
+	icoScroll = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 4H8a2 2 0 0 0-2 2v12a2 2 0 0 1-2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 1 2-2Z"/><line x1="10" y1="9" x2="15" y2="9"/><line x1="10" y1="13" x2="15" y2="13"/></svg>`))
+
+	icoScrollFill = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M8 3a3 3 0 0 0-3 3v11.17A3 3 0 0 0 3 20a1 1 0 0 0 1 1h12a3 3 0 0 0 3-3V6a3 3 0 0 0 3-3 1 1 0 0 0-1-1H8Zm2 5.25a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 0 1.5h-4.5A.75.75 0 0 1 10 8.25Zm0 4a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1-.75-.75Z"/></svg>`))
+
+	icoClipboard = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2.5" width="8" height="3.5" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><line x1="9" y1="11" x2="15" y2="11"/><line x1="9" y1="15" x2="13" y2="15"/></svg>`))
+
+	icoClipboardFill = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M9.5 2A1.5 1.5 0 0 0 8 3.5v.5H6a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2v-.5A1.5 1.5 0 0 0 14.5 2h-5ZM9 10.25a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1-.75-.75Zm0 4a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"/></svg>`))
 )

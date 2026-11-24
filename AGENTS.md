@@ -28,9 +28,29 @@
 3. **验证与测试**：
    - 为新增解包能力编写 `internal/sqpack/` 单元测试；依赖本机客户端文件的用例从 `.env` 读取路径，未配置时使用 `t.Skip` 跳过，确保无客户端的 CI 环境可通过。
 
-## 4. UI 设计规范 (`framed-sheet`)
+## 4. 新增数据解析接入版本 Diff 规范
+
+当用户要求新增游戏数据解析项目（如任务、理符、收藏品、宠物、坐骑、副本等任何**具有稳定主键、且可能随游戏版本更新产生增删或数值改动**的数据集）时，**只要适合加入版本对比，须同步接入版本 Diff**（纯 UI 辅助映射或无独立变更对比价值的底层资源除外）：
+
+1. **快照结构与兼容性**：在 `internal/backup/backup.go` 的 `VersionBackupMeta` 与 `snapshotPayload` 中补充紧凑快照字段（独立实体使用专属切片，附属于物品或成就的子能力则以可选 `*bool` / 摘要字段挂载于原有紧凑记录上），并在启动快照检查中兼容历史快照平滑升级，避免把老版本已有数据误报为新增。
+2. **字段级对比与汇总**：在 `CompareVersions` 与 `DiffSummary` 中实现新增、变更与移除检测及清晰的中文 `ItemFieldChange` 明细；若某功能集成在现有视图（如收藏品交易集成在物品内），Diff 中也归入对应主实体记录并高亮标签，不单独拆出独立菜单。
+3. **界面与测试同步**：更新 `internal/uiapp/view_diff.go`（变更摘要统计、筛选开关、详情直跳按钮）与顶部差异检索，补充 `internal/backup/` 及 `internal/uiapp/` 单元测试，并同步更新 `ARCHITECTURE.md`。
+
+## 5. UI 设计规范 (`framed-sheet`)
 
 - **布局结构**：一体式浅色外框（`#f9fbfc`），左侧导航栏 `228px` + 顶部检索栏 `48px`（无分割线），右下内嵌白底工作台画布（`#ffffff`、`1px #e8eaec` 边框、`16px` 圆角、距右/底各 `8px`）。
 - **令牌复用**：色彩、胶囊、KPI 带与图标统一复用 `internal/uiapp/tokens.go`（`colGround`~`colPrimary`、`drawPill`、`drawKPIStrip`、`numText`）。
-- **排版对齐**：字体栈 `"IBM Plex Sans, Microsoft YaHei UI, Microsoft YaHei, PingFang SC, system-ui"`，最小字号 `11px`；所有数字启用 `FontFeatures("tnum")` 等宽特性，表格数值列右对齐（`ui.End`）。
+- **排版对齐**：字体栈 `"Google Sans, Microsoft YaHei UI, Microsoft YaHei, PingFang SC, Segoe UI, system-ui"`（西文与数字默认内嵌 Google Sans，中文自动回退系统字体），最小字号 `11px`；所有数字启用 `FontFeatures("tnum")` 等宽特性，表格数值列右对齐（`ui.End`）。
 - **视觉禁令**：严禁渐变、发光、毛玻璃（`Blur`/`Vibrancy`）、卡片阴影（`Shadow`）、斑马纹表格、KPI 装饰圆圈以及 `★`/Emoji 符号（星级统一使用 `Lv.100 · 2星` 等纯文本）。
+
+## 6. 变更日志与发版流程规范
+
+1. **任务完成自动维护 `CHANGELOG.md`**：
+   - 后续任何 Agent 完成功能开发、体验优化、问题修复或工程配置变更后，在任务收尾前**必须同步更新**根目录 `CHANGELOG.md` 的 `## [Unreleased]` 区块（按 `### 新增`、`### 优化与调整`、`### 修复`、`### 工程与测试` 分类追加简洁准确的中文说明，仅纯文档或注释调整可酌情省略）。
+2. **发版指令自动执行（`发版：x.y.z`）**：
+   - 当用户发送 `发版：x.y.z`（或 `发版: x.y.z`，例如 `发版：2.1.0`）时，自动读取并执行项目内置技能 [release](.agents/skills/release/SKILL.md)：
+     1. 汇总当前 `git diff`、未跟踪文件及 `CHANGELOG.md` 的 `[Unreleased]` 记录；
+     2. 同步更新 `package.json`（`version`）、`mygo.json`（`version`）与 `main.go`（`appVersion`）为 `x.y.z`；
+     3. 将 `CHANGELOG.md` 归档为 `## [x.y.z] - YYYY-MM-DD` 并保留空的 `## [Unreleased]`；
+     4. 通过 `gofmt`、`go vet`、`go tool mygo vet .` 与 `go test` 全量校验（Windows 传入 `GOFLAGS=-tags=mygo_nowebview`）；
+     5. 暂存全部变更，提交标题为 `Version x.y.z`、正文为中文改动汇总的 Commit，并推送至当前远端分支（由 `.github/workflows/release.yml` 自动根据 `mygo.json` 发布 GitHub Release，切勿同时手动推送 `vx.y.z` 标签）。

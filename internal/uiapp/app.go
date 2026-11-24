@@ -26,10 +26,28 @@ const (
 	modeReady
 )
 
+type setupServerMode uint8
+
+const (
+	setupModeCN setupServerMode = iota
+	setupModeGlobal
+	setupModeBoth
+)
+
+type loadStage uint8
+
+const (
+	loadStageSheets loadStage = iota
+	loadStageIndices
+	loadStageSnapshot
+)
+
 type activeTab uint8
 
 const (
 	tabWorkbench activeTab = iota
+	tabQuests
+	tabLeves
 	tabAchievements
 	tabDiff
 	tabSettings
@@ -76,12 +94,25 @@ type App struct {
 	statusPopoverOpen bool
 
 	// 配置与引导/设置表单草稿
-	cfg              config.AppConfig
-	draftCNPath      string
-	draftGlobalPath  string
-	draftError       string
-	draftNotice      string
-	loadError        string
+	cfg             config.AppConfig
+	setupMode       setupServerMode
+	draftCNPath     string
+	draftGlobalPath string
+	draftError      string
+	draftNotice     string
+	loadError       string
+	pathDiagCache   map[string]cachedPathDiag
+
+	// 异步加载阶段与真实进度
+	loadSeq          uint64
+	loadStartedAt    time.Time
+	loadingCNVer     string
+	loadingGlobalVer string
+	loadStage        loadStage
+	loadSheetsDone   int
+	loadSheetsTotal  int
+	loadIndexStep    int
+	loadIndexTotal   int
 	loadingStatusTxt string
 
 	// 核心后端服务
@@ -111,6 +142,29 @@ type App struct {
 	history         []historyEntry
 	detailScroll    ui.ScrollState
 	itemListScroll  ui.ScrollState
+
+	// 任务视图状态
+	questQuery        gamedata.QuestSearchQuery
+	questPageStr      string
+	questRes          gamedata.QuestSearchResponse
+	questListScroll   ui.ScrollState
+	questDetailScroll ui.ScrollState
+	selectedQuestID   int
+	selectedQuest     *gamedata.QuestEntry
+	selectedQuestText *gamedata.QuestTextData
+	questTextLoading  bool
+	questTextSeq      uint64
+	questSummaryOpen  bool
+	questDialogueOpen bool
+
+	// 理符视图状态
+	leveQuery        gamedata.LeveSearchQuery
+	levePageStr      string
+	leveRes          gamedata.LeveSearchResponse
+	leveListScroll   ui.ScrollState
+	leveDetailScroll ui.ScrollState
+	selectedLeveID   int
+	selectedLeve     *gamedata.LeveEntry
 
 	// 成就与称号视图状态
 	achQuery   gamedata.AchievementSearchQuery
@@ -147,6 +201,7 @@ type App struct {
 
 // NewApp 创建客户端应用实例并读取本地持久化配置。
 func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
+	ensureDefaultFonts()
 	cfg, _ := config.LoadAppConfig(dataDir)
 	a := &App{
 		appVersion:      appVersion,
@@ -155,8 +210,10 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 		sidebarW:        sidebarDefWidth,
 		listW:           itemListDefWidth,
 		cfg:             cfg,
+		setupMode:       inferSetupMode(cfg.CNPath, cfg.GlobalPath),
 		draftCNPath:     cfg.CNPath,
 		draftGlobalPath: cfg.GlobalPath,
+		pathDiagCache:   make(map[string]cachedPathDiag),
 		bitmaps:         NewBitmapCache(600),
 		showHQ:          true,
 		itemQuery: gamedata.ItemSearchQuery{
@@ -166,6 +223,20 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 			PageSize: 30,
 		},
 		itemPageStr: "1",
+		questQuery: gamedata.QuestSearchQuery{
+			SectionID:   -1,
+			ExpansionID: -1,
+			Filter:      "all",
+			Page:        1,
+			PageSize:    30,
+		},
+		questPageStr: "1",
+		leveQuery: gamedata.LeveSearchQuery{
+			Kind:     "all",
+			Page:     1,
+			PageSize: 30,
+		},
+		levePageStr: "1",
 		achQuery: gamedata.AchievementSearchQuery{
 			Filter:   "all",
 			Page:     1,
@@ -187,16 +258,49 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 	}
 
 	// 判断是否已有有效配置：首次启动或路径无效时停留在路径引导页
-	if _, err := config.ValidateAndResolve(cfg); err != nil {
+	if resolved, err := config.ValidateAndResolve(cfg); err != nil {
 		a.mode = modeSetup
 		if !errors.Is(err, config.ErrNoClientConfigured) {
-			a.draftError = err.Error()
+			a.draftError = friendlyConfigError(err, cfg)
 		}
 	} else {
 		a.mode = modeLoading
-		a.loadingStatusTxt = "正在以只读模式解析本地 FF14 游戏数据..."
+		a.prepareLoadingState(resolved)
 	}
 	return a
+}
+
+func inferSetupMode(cnPath, globalPath string) setupServerMode {
+	hasCN := strings.TrimSpace(cnPath) != ""
+	hasGlobal := strings.TrimSpace(globalPath) != ""
+	switch {
+	case hasCN && hasGlobal:
+		return setupModeBoth
+	case hasGlobal:
+		return setupModeGlobal
+	default:
+		return setupModeCN
+	}
+}
+
+func (a *App) prepareLoadingState(resolved *config.ResolvedPaths) {
+	a.loadStartedAt = time.Now()
+	a.loadStage = loadStageSheets
+	a.loadSheetsDone = 0
+	a.loadSheetsTotal = 0
+	a.loadIndexStep = 0
+	a.loadIndexTotal = 4
+	a.loadingCNVer = ""
+	a.loadingGlobalVer = ""
+	if resolved != nil {
+		if resolved.HasCN() {
+			a.loadingCNVer = resolved.CN.Version
+		}
+		if resolved.HasGlobal() {
+			a.loadingGlobalVer = resolved.Global.Version
+		}
+	}
+	a.loadingStatusTxt = "正在以只读模式读取本地游戏数据表..."
 }
 
 // ThemeSource 返回当前配置对应的 MyGo 窗口主题源。
@@ -315,7 +419,11 @@ func (a *App) windowBackground(t uiTokens) ui.Color {
 // View 为 MyGo 原生窗口构建每帧用户界面。
 func (a *App) View(c *ui.Context) {
 	t := applyAppTheme(c, a.cfg.Theme)
-	if a.mode == modeReady {
+	switch a.mode {
+	case modeLoading:
+		// 驱动加载页已用时间秒数平稳刷新
+		c.After(150 * time.Millisecond)
+	case modeReady:
 		// 每秒驱动一次重绘以刷新实时艾欧泽亚时钟及限时采集倒计时
 		c.After(time.Second)
 
@@ -355,29 +463,15 @@ func (a *App) View(c *ui.Context) {
 	c.Root().Background(rootBg)
 }
 
-func (a *App) renderLoadingView(c *ui.Context) {
-	t := themeOf(c)
-	a.renderBareTitleBar(c, true)
-	ui.Column(c).Grow(1).FillWidth().Center().Padding(24).Children(func() {
-		kitPanel(c, t.radius.xl).Width(400).Padding(24, 28).Gap(12).AlignItems(ui.Center).Children(func() {
-			ui.Spinner(c).FontSize(20).TextColor(t.primary).Label("加载中")
-			ui.Column(c).AlignItems(ui.Center).Gap(4).Children(func() {
-				ui.Text(c, "正在读取游戏数据").FontSize(t.text.base).FontWeight(600).TextColor(t.foreground)
-				ui.Text(c, a.loadingStatusTxt).FontSize(t.text.xs).TextColor(t.muted).TextAlign(ui.Center)
-			})
-		})
-	})
-}
-
 // SaveAndReloadPaths 校验并持久化国服/国际服路径配置，然后异步重载游戏数据仓库。
 func (a *App) SaveAndReloadPaths(cnPath, globalPath string) bool {
 	nextCfg := a.cfg
-	nextCfg.CNPath = strings.TrimSpace(cnPath)
-	nextCfg.GlobalPath = strings.TrimSpace(globalPath)
+	nextCfg.CNPath = normalizeUserPathInput(cnPath)
+	nextCfg.GlobalPath = normalizeUserPathInput(globalPath)
 
 	resolved, err := config.ValidateAndResolve(nextCfg)
 	if err != nil {
-		a.draftError = err.Error()
+		a.draftError = friendlyConfigError(err, nextCfg)
 		a.draftNotice = ""
 		return false
 	}
@@ -401,13 +495,15 @@ func (a *App) SaveAndReloadPaths(cnPath, globalPath string) bool {
 	}
 
 	a.cfg = nextCfg
+	a.setupMode = inferSetupMode(nextCfg.CNPath, nextCfg.GlobalPath)
 	a.draftCNPath = nextCfg.CNPath
 	a.draftGlobalPath = nextCfg.GlobalPath
 	a.draftError = ""
 	a.draftNotice = ""
 	a.loadError = ""
+	a.invalidatePathDiag()
 	a.mode = modeLoading
-	a.loadingStatusTxt = "正在重新解析本地 FF14 游戏数据并校验版本快照..."
+	a.prepareLoadingState(resolved)
 
 	a.startAsyncLoad(nextCfg)
 	return true
@@ -417,15 +513,58 @@ func (a *App) startAsyncLoad(cfg config.AppConfig) {
 	resolved, err := config.ValidateAndResolve(cfg)
 	if err != nil {
 		a.mode = modeSetup
-		a.draftError = err.Error()
+		a.setupMode = inferSetupMode(cfg.CNPath, cfg.GlobalPath)
+		a.draftError = friendlyConfigError(err, cfg)
 		return
 	}
 
+	a.loadSeq++
+	seq := a.loadSeq
+	a.prepareLoadingState(resolved)
+
+	applyProgress := func(stage loadStage, done, total int, msg string) {
+		if a.loadSeq != seq || a.mode != modeLoading {
+			return
+		}
+		a.loadStage = stage
+		switch stage {
+		case loadStageSheets:
+			a.loadSheetsDone = done
+			a.loadSheetsTotal = total
+		case loadStageIndices:
+			a.loadIndexStep = done
+			if total > 0 {
+				a.loadIndexTotal = total
+			}
+		}
+		if msg != "" {
+			a.loadingStatusTxt = msg
+		}
+	}
+
+	dispatchProgress := func(stage loadStage, done, total int, msg string) {
+		if a.win == nil {
+			applyProgress(stage, done, total, msg)
+			return
+		}
+		a.win.Update(func() {
+			applyProgress(stage, done, total, msg)
+		})
+	}
+
 	runLoad := func() (*gamedata.Service, *backup.Service, *exporter.Service, gamedata.SystemStatus, backup.VersionStatusResponse, error) {
-		store, err := gamedata.LoadGameDataStore(resolved)
+		store, err := gamedata.LoadGameDataStoreWithProgress(resolved, a.schemasFS, func(p gamedata.LoadProgress) {
+			st := loadStageSheets
+			if p.Stage == gamedata.LoadStageIndices {
+				st = loadStageIndices
+			}
+			dispatchProgress(st, p.Done, p.Total, p.Message)
+		})
 		if err != nil {
 			return nil, nil, nil, gamedata.SystemStatus{}, backup.VersionStatusResponse{}, err
 		}
+
+		dispatchProgress(loadStageSnapshot, 0, 0, "正在校验本地版本快照与对比基线...")
 		svc := gamedata.NewService(store)
 		status := svc.GetSystemStatus()
 
@@ -442,9 +581,15 @@ func (a *App) startAsyncLoad(cfg config.AppConfig) {
 	}
 
 	applyResult := func(svc *gamedata.Service, bSvc *backup.Service, expSvc *exporter.Service, status gamedata.SystemStatus, vStatus backup.VersionStatusResponse, err error) {
+		if a.loadSeq != seq {
+			if svc != nil {
+				_ = svc.Close()
+			}
+			return
+		}
 		if err != nil {
 			a.loadError = err.Error()
-			a.draftError = fmt.Sprintf("加载游戏数据失败: %v", err)
+			a.draftError = fmt.Sprintf("读取游戏数据时出现问题：%v", err)
 			a.mode = modeSetup
 			return
 		}
@@ -465,6 +610,20 @@ func (a *App) startAsyncLoad(cfg config.AppConfig) {
 		a.itemQuery.Page = 1
 		a.itemPageStr = "1"
 		a.refreshItemList()
+		a.refreshQuests()
+		if len(a.questRes.Items) > 0 {
+			a.selectQuest(a.questRes.Items[0].ID)
+		} else {
+			a.selectedQuestID = 0
+			a.selectedQuest = nil
+		}
+		a.refreshLeves()
+		if len(a.leveRes.Items) > 0 {
+			a.selectLeve(a.leveRes.Items[0].ID)
+		} else {
+			a.selectedLeveID = 0
+			a.selectedLeve = nil
+		}
 		a.refreshAchievements()
 
 		// 默认选中典型样本（若存在 #44099 图拉尔菠萝蛋糕则选中它，否则选当前列表首项）
@@ -569,6 +728,113 @@ func (a *App) selectItem(itemID int) {
 func (a *App) inspectItemFromOtherTab(itemID int) {
 	a.selectItem(itemID)
 	a.navigateTab(tabWorkbench)
+}
+
+func (a *App) refreshQuests() {
+	if a.service == nil {
+		return
+	}
+	a.questRes = a.service.SearchQuests(a.questQuery)
+	a.questQuery.Page = a.questRes.Page
+	a.questPageStr = strconv.Itoa(a.questRes.Page)
+	a.questListScroll.Y = 0
+}
+
+func (a *App) selectQuest(questID int) {
+	if a.service == nil || questID <= 0 {
+		return
+	}
+	detail := a.service.GetQuestDetail(questID)
+	if detail == nil {
+		return
+	}
+	a.selectedQuestID = questID
+	a.selectedQuest = detail
+	a.questDetailScroll.Y = 0
+	// 切换任务时默认折叠任务概要与对话文本，避免剧透
+	a.questSummaryOpen = false
+	a.questDialogueOpen = false
+	a.selectedQuestText = nil
+
+	a.questTextSeq++
+	seq := a.questTextSeq
+	svc := a.service
+
+	if a.win == nil {
+		a.questTextLoading = false
+		a.selectedQuestText = svc.GetQuestText(questID)
+		return
+	}
+
+	a.questTextLoading = true
+	go func() {
+		txt := svc.GetQuestText(questID)
+		a.win.Update(func() {
+			if a.questTextSeq != seq || a.selectedQuestID != questID {
+				return
+			}
+			a.questTextLoading = false
+			a.selectedQuestText = txt
+		})
+	}()
+}
+
+func (a *App) inspectQuestFromOtherTab(questID int) {
+	a.selectQuest(questID)
+	a.navigateTab(tabQuests)
+}
+
+func (a *App) refreshLeves() {
+	if a.service == nil {
+		return
+	}
+	a.leveRes = a.service.SearchLeves(a.leveQuery)
+	a.leveQuery.Page = a.leveRes.Page
+	a.levePageStr = strconv.Itoa(a.leveRes.Page)
+	a.leveListScroll.Y = 0
+}
+
+func (a *App) selectLeve(leveID int) {
+	if a.service == nil || leveID <= 0 {
+		return
+	}
+	detail := a.service.GetLeveDetail(leveID)
+	if detail == nil {
+		return
+	}
+	a.selectedLeveID = leveID
+	a.selectedLeve = detail
+	a.leveDetailScroll.Y = 0
+}
+
+func (a *App) inspectLeveFromOtherTab(leveID int) {
+	a.selectLeve(leveID)
+	a.navigateTab(tabLeves)
+}
+
+// inspectAchievementFromOtherTab 跳转至成就页并按 ID 筛选定位目标成就；若无匹配且存在奖励道具则回退跳转道具详情。
+func (a *App) inspectAchievementFromOtherTab(achID, fallbackRewardItemID int) {
+	if a.service == nil || achID <= 0 {
+		return
+	}
+	query := gamedata.AchievementSearchQuery{
+		Q:        strconv.Itoa(achID),
+		Filter:   "all",
+		Page:     1,
+		PageSize: 30,
+	}
+	res := a.service.SearchAchievements(query)
+	if res.Total > 0 {
+		a.achQuery = query
+		a.achRes = res
+		a.achPageStr = strconv.Itoa(res.Page)
+		a.achScroll.Y = 0
+		a.navigateTab(tabAchievements)
+		return
+	}
+	if fallbackRewardItemID > 0 {
+		a.inspectItemFromOtherTab(fallbackRewardItemID)
+	}
 }
 
 func (a *App) refreshAchievements() {

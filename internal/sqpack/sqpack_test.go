@@ -19,6 +19,27 @@ func TestHashAndSeString(t *testing.T) {
 	if got := DecodeSeString(withBreak); got != "A\nB" {
 		t.Fatalf("期望换行解析 'A\\nB'，实际 %q", got)
 	}
+
+	// 验证 Sheet 表引用展开、ObjectParameter(1) 转冒险者及 PUA 清理
+	// "将" + <Sheet(Item, 35588, 0)/> + "交给" + <Highlight>ObjectParameter(1)</Highlight>
+	sheetRaw := append([]byte("将"), 0x02, 0x28, 0x0b, 0xff, 0x05)
+	sheetRaw = append(sheetRaw, []byte("Item")...)
+	sheetRaw = append(sheetRaw, 0xf2, 0x8b, 0x04, 0x01, 0x03)
+	sheetRaw = append(sheetRaw, []byte("交给")...)
+	sheetRaw = append(sheetRaw, 0x02, 0x29, 0x03, 0xeb, 0x02, 0x03)
+	gotDisp := DecodeSeStringDisplay(sheetRaw, func(sheetName string, rowID int, colIdx int) string {
+		if sheetName == "Item" && rowID == 35588 {
+			return "黄金外壳零件"
+		}
+		return ""
+	})
+	if gotDisp != "将黄金外壳零件交给冒险者" {
+		t.Fatalf("DecodeSeStringDisplay 解析不符合预期: got %q", gotDisp)
+	}
+
+	if cleaned := CleanPUARunes("\ue0be 羊佑织梦降神节"); cleaned != "羊佑织梦降神节" {
+		t.Fatalf("CleanPUARunes 清理失败: got %q", cleaned)
+	}
 }
 
 func TestRealLocalSqPackIfPresent(t *testing.T) {
@@ -67,6 +88,12 @@ func TestRealLocalSqPackIfPresent(t *testing.T) {
 		mapImg, err := ReadMapImage(reader, NewTextureCache(16), "s1f1/00")
 		if err != nil || mapImg == nil || mapImg.Bounds().Dx() <= 0 {
 			t.Fatalf("解码地图贴图 s1f1/00 失败: img=%v err=%v", mapImg, err)
+		}
+
+		// 5. 测试任务类型图标 061431 解码
+		qIconImg, err := ReadIconImage(reader, NewTextureCache(16), 61431, false)
+		if err != nil || qIconImg == nil || qIconImg.Bounds().Dx() <= 0 {
+			t.Fatalf("解码任务类型图标 061431 失败: img=%v err=%v", qIconImg, err)
 		}
 	}
 

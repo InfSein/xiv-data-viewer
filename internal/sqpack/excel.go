@@ -174,6 +174,8 @@ func (r Row) IntAt(idx int) int {
 		return 0
 	}
 	switch v := r[idx].(type) {
+	case int:
+		return v
 	case int8:
 		return int(v)
 	case uint8:
@@ -238,6 +240,21 @@ func (r Row) StringAt(idx int) string {
 		return DecodeSeString(v)
 	case string:
 		return strings.TrimSpace(v)
+	default:
+		return ""
+	}
+}
+
+// StringDisplayAt 将行中指定列解码为面向界面展示的可读文本，并展开表引用与玩家占位符。
+func (r Row) StringDisplayAt(idx int, resolve SeSheetResolver) string {
+	if idx < 0 || idx >= len(r) || r[idx] == nil {
+		return ""
+	}
+	switch v := r[idx].(type) {
+	case []byte:
+		return DecodeSeStringDisplay(v, resolve)
+	case string:
+		return CleanPUARunes(v)
 	default:
 		return ""
 	}

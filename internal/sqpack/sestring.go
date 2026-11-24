@@ -46,6 +46,9 @@ type sePart struct {
 	payload   sePayload
 }
 
+// SeSheetResolver 根据 SeString <Sheet(...)/> 标签引用的表名、行号和列索引解析显示文本。
+type SeSheetResolver func(sheetName string, rowID int, colIdx int) string
+
 // DecodeSeString 将 EXD 原始字符串字节解码为纯文本，若含 0x02 控制标签则解析并格式化。
 func DecodeSeString(raw []byte) string {
 	if len(raw) == 0 {
@@ -60,6 +63,57 @@ func DecodeSeString(raw []byte) string {
 		return strings.TrimSpace(string(raw))
 	}
 	return strings.TrimSpace(formatSeStringText(parts, "\n"))
+}
+
+// DecodeSeStringDisplay 将 EXD 原始字符串字节解码为适合界面阅读的纯文本，
+// 会通过 resolve 展开表引用，并将条件/玩家名标签转换为自然可读文本并清理私用区字形。
+func DecodeSeStringDisplay(raw []byte, resolve SeSheetResolver) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if bytes.IndexByte(raw, sePayloadStart) < 0 {
+		return CleanPUARunes(string(raw))
+	}
+	parts, err := parseSeString(raw)
+	if err != nil {
+		return CleanPUARunes(string(raw))
+	}
+	return CleanPUARunes(formatSeStringDisplay(parts, "\n", resolve))
+}
+
+// CleanPUARunes 去除 FF14 私有字体符号（U+E000..U+F8FF），并收拢因剥离残留的多余半角空格。
+func CleanPUARunes(s string) string {
+	if s == "" {
+		return ""
+	}
+	hasPUA := false
+	for _, r := range s {
+		if r >= 0xE000 && r <= 0xF8FF {
+			hasPUA = true
+			break
+		}
+	}
+	if !hasPUA {
+		return strings.TrimSpace(s)
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	prevSpace := false
+	for _, r := range s {
+		if r >= 0xE000 && r <= 0xF8FF {
+			continue
+		}
+		if r == ' ' {
+			if b.Len() == 0 || prevSpace {
+				continue
+			}
+			prevSpace = true
+		} else {
+			prevSpace = false
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func readSeExpression(buf []byte, from int) (seExpression, error) {
@@ -381,6 +435,148 @@ func formatSeStringText(parts []sePart, lineBreak string) string {
 			}
 		default:
 			// 纯文本渲染模式忽略样式、颜色、图标、点击链接等控制标签
+		}
+	}
+	return b.String()
+}
+
+func formatSeExpressionDisplay(exp seExpression, lineBreak string, resolve SeSheetResolver) string {
+	switch exp.exprType {
+	case exprInteger:
+		return fmt.Sprintf("%d", exp.intVal)
+	case exprString:
+		return formatSeStringDisplay(exp.subParts, lineBreak, resolve)
+	case exprParameter:
+		// ObjectParameter(1) 在任务文本中恒指代玩家角色
+		if exp.paramKind == 235 && exp.intVal == 1 {
+			return "冒险者"
+		}
+		return ""
+	case exprPlaceholder, exprBinary:
+		return ""
+	default:
+		return ""
+	}
+}
+
+func fallbackSheetLabel(sheetName string) string {
+	switch strings.ToLower(strings.TrimSpace(sheetName)) {
+	case "item", "itemhq", "itemmp":
+		return "[指定道具]"
+	case "eventitem":
+		return "[任务道具]"
+	case "bnpcname":
+		return "[目标敌人]"
+	case "eobj", "eobjname":
+		return "[目标物件]"
+	case "classjob":
+		return "[当前职业]"
+	case "race":
+		return "[种族]"
+	default:
+		if sheetName == "" {
+			return ""
+		}
+		return "[" + sheetName + "]"
+	}
+}
+
+func formatSeStringDisplay(parts []sePart, lineBreak string, resolve SeSheetResolver) string {
+	var b strings.Builder
+	for _, p := range parts {
+		if !p.isPayload {
+			b.WriteString(p.text)
+			continue
+		}
+		pl := p.payload
+		if len(pl.data) == 0 {
+			switch pl.tagType {
+			case 16: // LineBreak
+				b.WriteString(lineBreak)
+			case 22: // SoftHyphen
+				b.WriteByte('-')
+			case 29: // Indent
+				b.WriteByte(' ')
+			case 31: // Dash
+				b.WriteString("—")
+			}
+			continue
+		}
+
+		switch pl.tagType {
+		case 8: // If(cond, trueVal, falseVal)
+			if len(pl.data) == 3 {
+				tStr := strings.TrimSpace(formatSeExpressionDisplay(pl.data[1], lineBreak, resolve))
+				fStr := strings.TrimSpace(formatSeExpressionDisplay(pl.data[2], lineBreak, resolve))
+				switch {
+				case tStr != "" && fStr != "":
+					if tStr == fStr {
+						b.WriteString(tStr)
+					} else if len([]rune(tStr)) <= 8 && len([]rune(fStr)) <= 8 {
+						b.WriteString(tStr)
+						b.WriteByte('/')
+						b.WriteString(fStr)
+					} else {
+						b.WriteString(tStr)
+					}
+				case tStr != "":
+					b.WriteString(tStr)
+				case fStr != "":
+					b.WriteString(fStr)
+				}
+			}
+		case 9: // Switch(cond, case1, case2, ...)
+			if len(pl.data) >= 2 {
+				var unique []string
+				seen := make(map[string]bool)
+				for i := 1; i < len(pl.data); i++ {
+					s := strings.TrimSpace(formatSeExpressionDisplay(pl.data[i], lineBreak, resolve))
+					if s != "" && !seen[s] {
+						seen[s] = true
+						unique = append(unique, s)
+					}
+				}
+				if len(unique) == 1 {
+					b.WriteString(unique[0])
+				} else if len(unique) == 2 && len([]rune(unique[0])) <= 6 && len([]rune(unique[1])) <= 6 {
+					b.WriteString(unique[0])
+					b.WriteByte('/')
+					b.WriteString(unique[1])
+				} else if len(unique) > 0 {
+					b.WriteString(unique[0])
+				}
+			}
+		case 40, 48, 49, 50, 51: // Sheet, SheetJa, SheetEn, SheetDe, SheetFr
+			sheetName := strings.TrimSpace(formatSeExpressionDisplay(pl.data[0], "", resolve))
+			resolved := ""
+			if len(pl.data) >= 2 && pl.data[1].exprType == exprInteger && resolve != nil {
+				colIdx := 0
+				if len(pl.data) >= 3 && pl.data[2].exprType == exprInteger {
+					colIdx = int(pl.data[2].intVal)
+				}
+				resolved = strings.TrimSpace(resolve(sheetName, int(pl.data[1].intVal), colIdx))
+			}
+			if resolved == "" {
+				resolved = fallbackSheetLabel(sheetName)
+			}
+			b.WriteString(resolved)
+		case 18: // Gui 按键图标
+			b.WriteString("[按键]")
+		case 32, 36: // Value, TwoDigitValue
+			val := strings.TrimSpace(formatSeExpressionDisplay(pl.data[0], lineBreak, resolve))
+			if val == "" {
+				val = "[数值]"
+			}
+			b.WriteString(val)
+		case 80: // ZeroPaddedValue
+			val := strings.TrimSpace(formatSeExpressionDisplay(pl.data[0], lineBreak, resolve))
+			b.WriteString(val)
+		case 41: // Highlight: 展开内部文本（如玩家名），不包裹尖括号标签
+			for _, e := range pl.data {
+				b.WriteString(formatSeExpressionDisplay(e, lineBreak, resolve))
+			}
+		default:
+			// 颜色、发光、斜体等样式控制标签在纯文本展示时静默跳过
 		}
 	}
 	return b.String()

@@ -95,6 +95,11 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 					hasGather := len(item.Gathering.Nodes) > 0 || len(item.Gathering.FishingSpots) > 0 || len(item.Gathering.Spearfishing) > 0
 					hasShops := len(item.Shops) > 0
 					hasRetainer := len(item.RetainerVentures) > 0
+					hasColTurnIn := len(item.CollectableTurnIns) > 0
+					hasColReward := len(item.CollectableRewards) > 0
+					hasQuestSrc := len(item.RewardedFromQuests) > 0
+					hasLeveTurnIn := len(item.TurnInForLeves) > 0
+					hasLeveReward := len(item.RewardedFromLeves) > 0
 					hasAch := len(item.RewardedFromAchievements) > 0
 
 					a.renderDetailHero(c, item, isHQ, hasAch)
@@ -111,8 +116,28 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 						a.renderConsumableSection(c, item, isHQ)
 					}
 
+					if hasColTurnIn {
+						a.renderCollectableTurnInsSection(c, item.NameCn, item.CollectableTurnIns)
+					}
+
+					if hasColReward {
+						a.renderCollectableRewardsSection(c, item.NameCn, item.CollectableRewards)
+					}
+
 					if hasAch {
 						a.renderRewardAchievementsSection(c, item.RewardedFromAchievements)
+					}
+
+					if hasQuestSrc {
+						a.renderQuestSourcesSection(c, item.RewardedFromQuests)
+					}
+
+					if hasLeveTurnIn {
+						a.renderLeveSourcesSection(c, "理符交纳委托", item.TurnInForLeves, true)
+					}
+
+					if hasLeveReward {
+						a.renderLeveSourcesSection(c, "理符奖励掉落", item.RewardedFromLeves, false)
 					}
 
 					if hasShops {
@@ -135,11 +160,12 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 						a.renderUsedInRecipesSection(c, item.UsedInRecipes)
 					}
 
-					if !hasShops && !hasRecipes && !hasUsedIn && !hasGather && !hasRetainer && !hasAch {
+					if !hasShops && !hasRecipes && !hasUsedIn && !hasGather && !hasRetainer && !hasAch &&
+						!hasColTurnIn && !hasColReward && !hasQuestSrc && !hasLeveTurnIn && !hasLeveReward {
 						ui.Row(c).FillWidth().Padding(16, 0, 0, 0).Gap(8).AlignItems(ui.Center).
 							BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).Children(func() {
 							ui.Icon(c, icoInfo).Size(iconSm, iconSm).Shrink(0).TextColor(t.muted)
-							ui.Text(c, "暂无常规商店、制作、采集或雇员探险来源，可能出自副本掉落、任务或活动奖励。").
+							ui.Text(c, "暂无常规商店、制作、采集、任务或收藏品来源，可能出自副本掉落或限时活动。").
 								FontSize(t.text.xs).TextColor(t.muted).Grow(1).Shrink(1)
 						})
 					}
@@ -263,11 +289,23 @@ func (a *App) renderDetailHero(c *ui.Context, item *gamedata.ItemDetail, isHQ bo
 			if item.IsRetainerVenture {
 				srcParts = append(srcParts, "雇员探险")
 			}
+			if len(item.CollectableTurnIns) > 0 {
+				srcParts = append(srcParts, "收藏品交纳")
+			}
+			if len(item.CollectableRewards) > 0 {
+				srcParts = append(srcParts, "收藏品回报")
+			}
+			if len(item.RewardedFromQuests) > 0 {
+				srcParts = append(srcParts, "任务奖励")
+			}
+			if len(item.TurnInForLeves) > 0 || len(item.RewardedFromLeves) > 0 {
+				srcParts = append(srcParts, "理符委托")
+			}
 			if hasAch {
 				srcParts = append(srcParts, "成就奖励")
 			}
 			if len(srcParts) == 0 {
-				thirdValue = "副本掉落 / 任务或活动"
+				thirdValue = "副本掉落 / 活动奖励"
 			} else {
 				thirdValue = strings.Join(srcParts, " · ")
 			}
@@ -615,59 +653,325 @@ func (a *App) renderShopsSection(c *ui.Context, itemName string, shops []gamedat
 					})
 
 					// 第二行：售卖 NPC 与坐标按钮
-					ui.Row(c).FillWidth().Gap(8).Wrap().AlignItems(ui.Center).Children(func() {
-						if len(shop.NPCs) == 0 {
-							ui.Text(c, "通用柜台 / 住宅区或军需官兑换").FontSize(t.text.xs).TextColor(t.muted)
-							return
-						}
-						maxShow := min(6, len(shop.NPCs))
-						for _, npc := range shop.NPCs[:maxShow] {
-							txt := npc.NpcName
-							if npc.ZoneName != "" {
-								txt += " · " + npc.ZoneName
+					a.renderVendorNpcChips(c, fmt.Sprintf("npcmap-%d-%d", shop.ShopID, sIdx), fmt.Sprintf("%s · %s", shop.ShopName, itemName), "通用柜台 / 住宅区或军需官兑换", shop.NPCs)
+				})
+			}
+		})
+	})
+}
+
+func (a *App) renderMapLocationBtn(c *ui.Context, key, title, subtitle string, loc *gamedata.MapLocationPoint) {
+	if loc == nil {
+		return
+	}
+	t := themeOf(c)
+	locTxt := loc.ZoneName
+	if loc.PlaceName != "" && loc.PlaceName != loc.ZoneName {
+		locTxt = loc.ZoneName + " · " + loc.PlaceName
+	}
+	if loc.MapPath != "" {
+		coordLbl := fmt.Sprintf("%s (%.1f, %.1f)", locTxt, loc.CoordX, loc.CoordY)
+		btn := ui.ButtonBase(c.Key(key)).Label("查看地图："+coordLbl).
+			Height(24).Padding(0, 8).Radius(t.radius.md).Gap(5).
+			Background(t.card).Border(hairline, t.border).AlignItems(ui.Center).
+			Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+		if btn.Hovered() {
+			btn.Background(t.tint(1.5))
+		}
+		btn.Children(func() {
+			ui.Icon(c, icoMapPin).Size(iconXs, iconXs).Shrink(0).TextColor(t.infoText)
+			ui.Text(c, locTxt).FontSize(t.text.xs).TextColor(t.subdued).SingleLine()
+			numTextf(c, "%.1f, %.1f", loc.CoordX, loc.CoordY).FontSize(t.text.micro).FontWeight(500).TextColor(t.infoText).SingleLine()
+		})
+		if btn.Clicked() {
+			a.openMap(MapMarkerData{
+				Title:      title,
+				Subtitle:   subtitle,
+				RegionName: loc.RegionName,
+				ZoneName:   loc.ZoneName,
+				PlaceName:  loc.PlaceName,
+				MapPath:    loc.MapPath,
+				CoordX:     loc.CoordX,
+				CoordY:     loc.CoordY,
+				NormX:      loc.NormX,
+				NormY:      loc.NormY,
+			})
+		}
+		return
+	}
+	ui.Text(c, locTxt).FontSize(t.text.xs).TextColor(t.muted)
+}
+
+func (a *App) renderVendorNpcChips(c *ui.Context, keyPrefix, subtitle, emptyHint string, npcs []gamedata.ShopVendorNpc) {
+	t := themeOf(c)
+	ui.Row(c).FillWidth().Gap(8).Wrap().AlignItems(ui.Center).Children(func() {
+		if len(npcs) == 0 {
+			if emptyHint != "" {
+				ui.Text(c, emptyHint).FontSize(t.text.xs).TextColor(t.muted)
+			}
+			return
+		}
+		maxShow := min(6, len(npcs))
+		for _, npc := range npcs[:maxShow] {
+			txt := npc.NpcName
+			if npc.ZoneName != "" {
+				txt += " · " + npc.ZoneName
+			}
+			if npc.MapPath != "" {
+				coordLbl := fmt.Sprintf("%s  (%.1f, %.1f)", txt, npc.CoordX, npc.CoordY)
+				btn := ui.ButtonBase(c.Key(fmt.Sprintf("%s-%d", keyPrefix, npc.NpcID))).
+					Label("查看地图："+coordLbl).
+					Height(24).Padding(0, 8).Radius(t.radius.md).Gap(5).
+					Background(t.card).AlignItems(ui.Center).
+					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+				if btn.Hovered() {
+					btn.Background(t.tint(1.5))
+				}
+				btn.Children(func() {
+					ui.Icon(c, icoMapPin).Size(iconXs, iconXs).Shrink(0).TextColor(t.infoText)
+					ui.Text(c, txt).FontSize(t.text.xs).TextColor(t.subdued).SingleLine()
+					numTextf(c, "%.1f, %.1f", npc.CoordX, npc.CoordY).FontSize(t.text.micro).FontWeight(500).TextColor(t.infoText).SingleLine()
+				})
+				if btn.Clicked() {
+					title := npc.NpcName
+					if npc.NpcTitle != "" {
+						title += " <" + npc.NpcTitle + ">"
+					}
+					a.openMap(MapMarkerData{
+						Title:      title,
+						Subtitle:   subtitle,
+						RegionName: npc.RegionName,
+						ZoneName:   npc.ZoneName,
+						PlaceName:  npc.PlaceName,
+						MapPath:    npc.MapPath,
+						CoordX:     npc.CoordX,
+						CoordY:     npc.CoordY,
+						NormX:      npc.NormX,
+						NormY:      npc.NormY,
+					})
+				}
+			} else {
+				ui.Text(c, txt).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+			}
+		}
+		if len(npcs) > maxShow {
+			numTextf(c, "等共 %d 名 NPC", len(npcs)).FontSize(t.text.micro).TextColor(t.muted)
+		}
+	})
+}
+
+func collectableKindPill(kind string) pillKind {
+	switch kind {
+	case "satisfaction":
+		return pillWarning
+	case "hwd":
+		return pillPositive
+	default:
+		return pillAccent
+	}
+}
+
+func (a *App) renderCollectableTurnInsSection(c *ui.Context, itemName string, list []gamedata.CollectableTurnInSource) {
+	t := themeOf(c)
+	drawDetailSection(c, "收藏品交易交纳", fmt.Sprintf("%d 项", len(list)), nil, func() {
+		ui.Column(c).FillWidth().Children(func() {
+			for idx, src := range list {
+				if idx > 0 {
+					kitSeparator(c, false)
+				}
+				ui.Column(c.Key(fmt.Sprintf("colturn-%d-%d", src.ShopID, idx))).FillWidth().Padding(10, 2).Gap(8).Children(func() {
+					ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Wrap().Gap(8).Children(func() {
+						ui.Row(c).Gap(6).AlignItems(ui.Center).Wrap().Children(func() {
+							drawPill(c, src.SourceLabel, collectableKindPill(src.SourceKind))
+							ui.Text(c, src.ShopName).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
+							if src.GroupName != "" {
+								ui.Text(c, src.GroupName).FontSize(t.text.xs).TextColor(t.muted)
 							}
-							if npc.MapPath != "" {
-								coordLbl := fmt.Sprintf("%s  (%.1f, %.1f)", txt, npc.CoordX, npc.CoordY)
-								btn := ui.ButtonBase(c.Key(fmt.Sprintf("npcmap-%d-%d-%d", shop.ShopID, sIdx, npc.NpcID))).
-									Label("查看地图："+coordLbl).
-									Height(24).Padding(0, 8).Radius(t.radius.md).Gap(5).
-									Background(t.card).AlignItems(ui.Center).
-									Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-								if btn.Hovered() {
-									btn.Background(t.tint(1.5))
-								}
-								btn.Children(func() {
-									ui.Icon(c, icoMapPin).Size(iconXs, iconXs).Shrink(0).TextColor(t.infoText)
-									ui.Text(c, txt).FontSize(t.text.xs).TextColor(t.subdued).SingleLine()
-									numTextf(c, "%.1f, %.1f", npc.CoordX, npc.CoordY).FontSize(t.text.micro).FontWeight(500).TextColor(t.infoText).SingleLine()
-								})
-								if btn.Clicked() {
-									title := npc.NpcName
-									if npc.NpcTitle != "" {
-										title += " <" + npc.NpcTitle + ">"
-									}
-									a.openMap(MapMarkerData{
-										Title:      title,
-										Subtitle:   fmt.Sprintf("%s · %s", shop.ShopName, itemName),
-										RegionName: npc.RegionName,
-										ZoneName:   npc.ZoneName,
-										PlaceName:  npc.PlaceName,
-										MapPath:    npc.MapPath,
-										CoordX:     npc.CoordX,
-										CoordY:     npc.CoordY,
-										NormX:      npc.NormX,
-										NormY:      npc.NormY,
-									})
-								}
-							} else {
-								ui.Text(c, txt).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+							if src.IsBonus {
+								drawPill(c, "需求奖励加成", pillWarning)
 							}
+						})
+						var metas []string
+						if src.LevelMin > 0 && src.LevelMax > src.LevelMin {
+							metas = append(metas, fmt.Sprintf("Lv.%d~%d", src.LevelMin, src.LevelMax))
+						} else if src.LevelMin > 0 {
+							metas = append(metas, fmt.Sprintf("Lv.%d", src.LevelMin))
 						}
-						if len(shop.NPCs) > maxShow {
-							numTextf(c, "等共 %d 名商人", len(shop.NPCs)).FontSize(t.text.micro).TextColor(t.muted)
+						if src.Stars > 0 {
+							metas = append(metas, fmt.Sprintf("%d星", src.Stars))
+						}
+						if src.RequiredQuestName != "" {
+							metas = append(metas, "前置："+src.RequiredQuestName)
+						}
+						if len(metas) > 0 {
+							numText(c, strings.Join(metas, " · ")).FontSize(t.text.xs).TextColor(t.muted)
 						}
 					})
+
+					if len(src.Tiers) > 0 {
+						kitBlock(c, ui.Row(c).FillWidth().Clip(), toneCard).Children(func() {
+							for ti, tier := range src.Tiers {
+								cell := ui.Column(c).Grow(1).Shrink(1).Basis(0).MinWidth(0).Padding(8, 10).Gap(4)
+								if ti > 0 {
+									cell.BorderWidth(0, 0, 0, hairline).BorderColor(t.border)
+								}
+								cell.Children(func() {
+									numTextf(c, "%s · 价值 %d+", tier.Label, tier.MinCollectability).
+										FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+
+									if tier.RewardItemID > 0 && tier.RewardAmount > 0 {
+										btn := ui.ButtonBase(c.Key(fmt.Sprintf("coltier-%d-%d-%d", src.ShopID, idx, ti))).
+											Label("查看 "+tier.RewardItemName).Padding(2, 4).Radius(t.radius.sm).
+											Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+										if btn.Hovered() {
+											btn.Background(t.tint(1.5))
+										}
+										btn.Children(func() {
+											ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
+												if tier.RewardItemIconID > 0 {
+													a.drawGameIcon(c, tier.RewardItemIconID, false, 18, 3)
+												}
+												ui.Text(c, tier.RewardItemName).FontSize(t.text.xs).TextColor(t.foreground).SingleLine().Shrink(1)
+												numTextf(c, "×%d", tier.RewardAmount).FontSize(t.text.sm).FontWeight(600).TextColor(t.infoText).SingleLine()
+											})
+										})
+										if btn.Clicked() {
+											a.selectItem(tier.RewardItemID)
+										}
+									}
+
+									var extras []string
+									if tier.SecondaryItemID > 0 && tier.SecondaryAmount > 0 {
+										extras = append(extras, fmt.Sprintf("%s ×%d", tier.SecondaryItemName, tier.SecondaryAmount))
+									}
+									if tier.GilReward > 0 {
+										extras = append(extras, fmt.Sprintf("%s 金币", formatInt(tier.GilReward)))
+									}
+									if tier.Satisfaction > 0 {
+										extras = append(extras, fmt.Sprintf("信赖度 +%d", tier.Satisfaction))
+									}
+									if tier.ExpReward > 0 {
+										extras = append(extras, fmt.Sprintf("%s EXP", formatInt(tier.ExpReward)))
+									} else if tier.ExpRatio > 0 {
+										extras = append(extras, fmt.Sprintf("EXP 系数 %d", tier.ExpRatio))
+									}
+									if tier.Points > 0 {
+										extras = append(extras, fmt.Sprintf("技巧点 %d", tier.Points))
+									}
+									if len(extras) > 0 {
+										numText(c, strings.Join(extras, " · ")).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+									}
+								})
+							}
+						})
+					}
+
+					a.renderVendorNpcChips(c, fmt.Sprintf("colnpc-%d-%d", src.ShopID, idx), src.ShopName+" · "+itemName, "", src.NPCs)
 				})
+			}
+		})
+	})
+}
+
+func (a *App) renderCollectableRewardsSection(c *ui.Context, itemName string, list []gamedata.CollectableRewardSource) {
+	t := themeOf(c)
+	drawDetailSection(c, "通过收藏品交纳获得", fmt.Sprintf("%d 项", len(list)), nil, func() {
+		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
+			for idx, rew := range list {
+				btn := ui.ButtonBase(c.Key(fmt.Sprintf("colrew-%d-%d", rew.TurnInItemID, idx))).
+					Label("查看 "+rew.TurnInItemName).MinWidth(250).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
+					Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
+					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+				if btn.Hovered() {
+					btn.Background(t.tint(1.5))
+				}
+				btn.Children(func() {
+					ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+						a.drawGameIcon(c, rew.TurnInItemIconID, false, 26, t.radius.md)
+						ui.Column(c).Gap(2).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+							ui.Text(c, rew.TurnInItemName).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
+							sub := rew.ShopName
+							if rew.MinCollectability > 0 {
+								sub += fmt.Sprintf(" · 价值 %d+", rew.MinCollectability)
+							}
+							numText(c, sub).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+						})
+					})
+					amtStr := fmt.Sprintf("%d / %d / %d", rew.RewardLow, rew.RewardMid, rew.RewardHigh)
+					if rew.RewardLow == rew.RewardHigh {
+						amtStr = fmt.Sprintf("×%d", rew.RewardHigh)
+					}
+					numText(c, amtStr).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
+				})
+				if btn.Clicked() {
+					a.selectItem(rew.TurnInItemID)
+				}
+			}
+		})
+	})
+}
+
+func (a *App) renderQuestSourcesSection(c *ui.Context, quests []gamedata.ItemQuestSource) {
+	t := themeOf(c)
+	drawDetailSection(c, "任务奖励", fmt.Sprintf("%d 项", len(quests)), nil, func() {
+		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
+			for idx, qs := range quests {
+				btn := ui.ButtonBase(c.Key(fmt.Sprintf("item-qsrc-%d-%d", qs.QuestID, idx))).
+					Label("查看任务 "+qs.NameCn).MinWidth(240).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
+					Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
+					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+				if btn.Hovered() {
+					btn.Background(t.tint(1.5))
+				}
+				btn.Children(func() {
+					ui.Column(c).Gap(2).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+						ui.Text(c, gamedata.CleanQuestTitle(qs.NameCn)).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
+						sub := qs.GroupLabel
+						if qs.GenreName != "" {
+							sub = qs.GenreName + " · " + sub
+						}
+						if qs.Level > 0 {
+							sub = fmt.Sprintf("Lv.%d · %s", qs.Level, sub)
+						}
+						numText(c, sub).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+					})
+					numTextf(c, "×%d", qs.Count).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
+				})
+				if btn.Clicked() {
+					a.inspectQuestFromOtherTab(qs.QuestID)
+				}
+			}
+		})
+	})
+}
+
+func (a *App) renderLeveSourcesSection(c *ui.Context, title string, leves []gamedata.ItemLeveSource, isTurnIn bool) {
+	t := themeOf(c)
+	drawDetailSection(c, title, fmt.Sprintf("%d 项", len(leves)), nil, func() {
+		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
+			for idx, ls := range leves {
+				btn := ui.ButtonBase(c.Key(fmt.Sprintf("item-lsrc-%t-%d-%d", isTurnIn, ls.LeveID, idx))).
+					Label("查看理符 "+ls.NameCn).MinWidth(240).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
+					Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
+					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+				if btn.Hovered() {
+					btn.Background(t.tint(1.5))
+				}
+				btn.Children(func() {
+					ui.Column(c).Gap(2).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+						ui.Text(c, ls.NameCn).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
+						sub := fmt.Sprintf("Lv.%d · %s", ls.Level, ls.AssignmentTypeName)
+						numText(c, sub).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+					})
+					right := fmt.Sprintf("×%d", ls.Count)
+					if !isTurnIn && ls.ProbabilityPercent > 0 {
+						right = fmt.Sprintf("×%d (%d%%)", ls.Count, ls.ProbabilityPercent)
+					}
+					numText(c, right).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
+				})
+				if btn.Clicked() {
+					a.inspectLeveFromOtherTab(ls.LeveID)
+				}
 			}
 		})
 	})

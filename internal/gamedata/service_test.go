@@ -1,6 +1,7 @@
 package gamedata
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
 	"testing"
@@ -29,7 +30,8 @@ func TestRealGameDataService(t *testing.T) {
 		t.Skipf("本地未配置可用 FF14 客户端，跳过真实数据测试: %v", err)
 	}
 
-	store, err := LoadGameDataStore(resolved)
+	schemasFS := os.DirFS(filepath.Join("..", "..", "schemas"))
+	store, err := LoadGameDataStoreWithSchemas(resolved, schemasFS)
 	if err != nil {
 		t.Fatalf("加载双服数据失败: %v", err)
 	}
@@ -47,11 +49,40 @@ func TestRealGameDataService(t *testing.T) {
 	if status.Stats.TotalItems <= 30000 || status.Stats.TotalRecipes <= 10000 {
 		t.Fatalf("道具或配方数量异常: items=%d recipes=%d", status.Stats.TotalItems, status.Stats.TotalRecipes)
 	}
+	if status.Stats.TotalQuests <= 3000 || status.Stats.TotalLeves <= 800 || status.Stats.TotalCollectables <= 100 {
+		t.Fatalf("任务/理符/收藏品数量异常: quests=%d leves=%d collectables=%d",
+			status.Stats.TotalQuests, status.Stats.TotalLeves, status.Stats.TotalCollectables)
+	}
 	if status.Stats.PurchasableItems <= 5000 || status.Stats.TotalShops <= 500 {
 		t.Fatalf("商店数量异常: purch=%d shops=%d", status.Stats.PurchasableItems, status.Stats.TotalShops)
 	}
 	if status.Stats.RetainerVentureItems <= 800 || len(status.CraftTypes) != 8 {
 		t.Fatalf("雇员探险或制作职业异常: retainer=%d crafts=%d", status.Stats.RetainerVentureItems, len(status.CraftTypes))
+	}
+	if len(status.AchievementKinds) == 0 || len(status.AchievementCategories) == 0 {
+		t.Fatalf("成就大类或二级分类统计为空: kinds=%d cats=%d", len(status.AchievementKinds), len(status.AchievementCategories))
+	}
+	var dungeonCat AchievementCategoryInfo
+	for _, c := range status.AchievementCategories {
+		if c.KindID == 1 && c.ID == 2 {
+			dungeonCat = c
+			break
+		}
+	}
+	if dungeonCat.ID == 0 || dungeonCat.Count == 0 {
+		t.Fatalf("未在战斗大类下找到迷宫探险二级分类: %+v", status.AchievementCategories)
+	}
+	achCatRes := svc.SearchAchievements(AchievementSearchQuery{CategoryID: dungeonCat.ID, PageSize: 20})
+	if achCatRes.Total != dungeonCat.Count || len(achCatRes.Items) == 0 {
+		t.Fatalf("按成就二级分类筛选数量不匹配: total=%d want=%d", achCatRes.Total, dungeonCat.Count)
+	}
+	for _, ach := range achCatRes.Items {
+		if ach.CategoryID != dungeonCat.ID || ach.KindID != dungeonCat.KindID {
+			t.Fatalf("成就二级分类筛选混入无关条目: %+v", ach)
+		}
+	}
+	if status.HasGlobal && achCatRes.Items[0].NameJa == "" {
+		t.Fatalf("已配置国际服时日文成就名不应为空: %+v", achCatRes.Items[0])
 	}
 
 	// 多语言检索

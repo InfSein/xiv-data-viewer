@@ -23,6 +23,7 @@ var itemScopeFilters = []itemScopeDef{
 	{mode: "gil_shop", label: "金币商店"},
 	{mode: "special_shop", label: "特殊兑换"},
 	{mode: "retainer_venture", label: "雇员探险"},
+	{mode: "collectable_turnin", label: "收藏品交纳"},
 	{mode: "equipment", label: "武器装备"},
 	{mode: "consumable", label: "食品药水"},
 }
@@ -35,18 +36,42 @@ var itemSortOptions = []selectOption[string]{
 	{value: "level_desc", label: "装备等级降序"},
 }
 
+const appBrandTitle = "XIV Data Viewer"
+
+// formatAppVersionTag 将应用版本号规范化为带小写 v 前缀的展示标签。
+func formatAppVersionTag(ver string) string {
+	v := strings.TrimSpace(ver)
+	if v == "" {
+		return ""
+	}
+	if strings.HasPrefix(v, "v") || strings.HasPrefix(v, "V") {
+		return "v" + v[1:]
+	}
+	return "v" + v
+}
+
+// renderBrandCaption 绘制左上角品牌图标、名称与右侧不加粗小字版本号。
+func (a *App) renderBrandCaption(c *ui.Context) {
+	t := themeOf(c)
+	ui.Icon(c, icoAppLogo).Size(iconMd, iconMd).TextColor(t.primary)
+	ui.Row(c).Gap(6).AlignItems(ui.Baseline).Children(func() {
+		ui.Text(c, appBrandTitle).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground).SingleLine()
+		if ver := formatAppVersionTag(a.appVersion); ver != "" {
+			numText(c, ver).FontSize(t.text.micro).FontWeight(400).TextColor(t.muted).SingleLine()
+		}
+	})
+}
+
 // renderBareTitleBar 用于引导页与加载页的简洁可拖拽顶栏；showCaption 控制是否绘制应用名称。
 func (a *App) renderBareTitleBar(c *ui.Context, showCaption bool) {
-	t := themeOf(c)
 	tb := c.TitleBar()
 	h := max(titleBarHeight, tb.Height)
 	padL := tb.Left + 14
 	padR := tb.Right + 10
 	ui.Row(c).Height(h).FillWidth().Padding(0, padR, 0, padL).AlignItems(ui.Center).DragWindow().Children(func() {
 		if showCaption {
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				ui.Icon(c, icoAppLogo).Size(iconMd, iconMd).TextColor(t.primary)
-				ui.Text(c, "艾欧泽亚数据工作台").FontSize(t.text.xs).FontWeight(500).TextColor(t.subdued).SingleLine()
+			ui.Row(c).Gap(7).AlignItems(ui.Center).Children(func() {
+				a.renderBrandCaption(c)
 			})
 		}
 	})
@@ -100,7 +125,7 @@ func (a *App) renderTitleBar(c *ui.Context) {
 // renderBrandMenu 左上角可点击品牌菜单，收拢全局辅助工具。
 func (a *App) renderBrandMenu(c *ui.Context) {
 	t := themeOf(c)
-	b := ui.ButtonBase(c.Key("brand-menu-btn")).Label("艾欧泽亚数据工作台").
+	b := ui.ButtonBase(c.Key("brand-menu-btn")).Label(appBrandTitle).
 		Height(28).Padding(0, 8, 0, 6).Radius(t.radius.md).Gap(7).
 		AlignItems(ui.Center).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 	if b.Hovered() {
@@ -129,8 +154,7 @@ func (a *App) renderBrandMenu(c *ui.Context) {
 		}
 	})
 	b.Children(func() {
-		ui.Icon(c, icoAppLogo).Size(iconMd, iconMd).TextColor(t.primary)
-		ui.Text(c, "艾欧泽亚数据工作台").FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground).SingleLine()
+		a.renderBrandCaption(c)
 	})
 }
 
@@ -138,6 +162,42 @@ func (a *App) renderTitleSearch(c *ui.Context) {
 	sc := shortcutLabel("K")
 	ui.Box(c).Width(420).MinWidth(200).Shrink(1).Children(func() {
 		switch a.tab {
+		case tabQuests:
+			inp := kitInput(c, "title-search-quest", &a.questQuery.Q, kitInputOpts{
+				placeholder: "搜索任务名、区域、NPC 或 ID...",
+				label:       "搜索任务",
+				size:        btnSizeSm,
+				tintBg:      true,
+				leading:     icoSearch,
+				shortcut:    sc,
+				clearable:   true,
+			})
+			if a.focusSearch {
+				inp.Focus()
+				a.focusSearch = false
+			}
+			if inp.Changed() {
+				a.questQuery.Page = 1
+				a.refreshQuests()
+			}
+		case tabLeves:
+			inp := kitInput(c, "title-search-leve", &a.leveQuery.Q, kitInputOpts{
+				placeholder: "搜索理符名、委托道具、发布地或 ID...",
+				label:       "搜索理符",
+				size:        btnSizeSm,
+				tintBg:      true,
+				leading:     icoSearch,
+				shortcut:    sc,
+				clearable:   true,
+			})
+			if a.focusSearch {
+				inp.Focus()
+				a.focusSearch = false
+			}
+			if inp.Changed() {
+				a.leveQuery.Page = 1
+				a.refreshLeves()
+			}
 		case tabAchievements:
 			inp := kitInput(c, "title-search-ach", &a.achQuery.Q, kitInputOpts{
 				placeholder: "搜索成就、称号或 ID...",
@@ -158,7 +218,7 @@ func (a *App) renderTitleSearch(c *ui.Context) {
 			}
 		case tabDiff:
 			inp := kitInput(c, "title-search-diff", &a.diffSearch, kitInputOpts{
-				placeholder: "搜索差异中的物品、成就或 ID...",
+				placeholder: "搜索差异中的物品、任务、理符、成就或 ID...",
 				label:       "搜索版本差异",
 				size:        btnSizeSm,
 				tintBg:      true,
@@ -226,6 +286,10 @@ func (a *App) renderShellBody(c *ui.Context) {
 
 		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).FillHeight().Children(func() {
 			switch a.tab {
+			case tabQuests:
+				a.renderQuestsView(c)
+			case tabLeves:
+				a.renderLevesView(c)
 			case tabAchievements:
 				a.renderAchievementsView(c)
 			case tabDiff:
@@ -249,12 +313,22 @@ func (a *App) renderSidebar(c *ui.Context) {
 
 				achCnt := ""
 				itemCnt := ""
+				questCnt := ""
+				leveCnt := ""
 				if a.status != nil {
 					achCnt = formatInt(a.status.Stats.TotalAchievements)
 					itemCnt = formatInt(a.status.Stats.TotalItems)
+					questCnt = formatInt(a.status.Stats.TotalQuests)
+					leveCnt = formatInt(a.status.Stats.TotalLeves)
 				}
 				if kitSidebarItem(c, "nav-items", icoPackage, icoPackageFill, "物品", itemCnt, a.tab == tabWorkbench, false) {
 					a.navigateTab(tabWorkbench)
+				}
+				if kitSidebarItem(c, "nav-quests", icoScroll, icoScrollFill, "任务", questCnt, a.tab == tabQuests, false) {
+					a.navigateTab(tabQuests)
+				}
+				if kitSidebarItem(c, "nav-leves", icoClipboard, icoClipboardFill, "理符", leveCnt, a.tab == tabLeves, false) {
+					a.navigateTab(tabLeves)
 				}
 				if kitSidebarItem(c, "nav-achievements", icoTrophy, icoTrophyFill, "成就", achCnt, a.tab == tabAchievements, false) {
 					a.navigateTab(tabAchievements)
@@ -267,7 +341,7 @@ func (a *App) renderSidebar(c *ui.Context) {
 				if hasUpdate {
 					diffMeta = "有更新"
 				}
-				if kitSidebarItem(c, "nav-diff", icoCompare, icoCompare, "版本 Diff", diffMeta, a.tab == tabDiff, hasUpdate) {
+				if kitSidebarItem(c, "nav-diff", icoCompare, icoCompare, "版本对比", diffMeta, a.tab == tabDiff, hasUpdate) {
 					a.navigateTab(tabDiff)
 				}
 			})
@@ -490,7 +564,7 @@ func (a *App) renderItemListPane(c *ui.Context) {
 			}
 		})
 
-		// 2. 物品列表主体（清爽无胶囊堆砌：右侧以轻量点分文字呈现品级与来源）
+		// 2. 物品列表主体（清爽无胶囊堆砌：左下角仅显示类型，右下角仅显示品级）
 		if len(a.itemRes.Items) == 0 {
 			kitEmpty(c, icoSearch, "没有匹配的物品", "尝试更换关键词，或重置筛选条件。", func() {
 				if kitButton(c, "wb-empty-reset", "重置筛选", btnOpts{variant: btnOutline, size: btnSizeSm}) {
@@ -525,10 +599,7 @@ func (a *App) renderItemListPane(c *ui.Context) {
 									numTextf(c, "#%d", item.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
 								})
 								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-									sub := item.CategoryName
-									if item.NameEn != "" && item.NameEn != item.NameCn {
-										sub += " · " + item.NameEn
-									}
+									sub := nonEmptyStr(item.CategoryName, "其他")
 									ui.Text(c, sub).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
 
 									metaParts := buildItemRowMeta(item)
@@ -559,26 +630,9 @@ func (a *App) renderItemListPane(c *ui.Context) {
 	})
 }
 
-// buildItemRowMeta 生成物品列表行右侧的轻量元数据文本，避免满屏彩色胶囊堆砌。
+// buildItemRowMeta 生成物品列表行右下角的品级文本。
 func buildItemRowMeta(item gamedata.ItemSummary) string {
-	var tags []string
-	if item.IsCraftable {
-		tags = append(tags, "配方")
-	}
-	if item.IsGatherable {
-		tags = append(tags, "采集")
-	}
-	if item.IsPurchasable {
-		tags = append(tags, "商店")
-	}
-	if item.IsRetainerVenture {
-		tags = append(tags, "探险")
-	}
-	ilvl := fmt.Sprintf("i%d", item.ItemLevel)
-	if len(tags) == 0 {
-		return ilvl
-	}
-	return ilvl + " · " + strings.Join(tags, "/")
+	return fmt.Sprintf("iLv %d", item.ItemLevel)
 }
 
 func (a *App) renderAdvancedFilterDrawer(c *ui.Context) {

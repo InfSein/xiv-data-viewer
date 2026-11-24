@@ -2,10 +2,12 @@ package gamedata
 
 import (
 	"fmt"
+	"io/fs"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/InfSein/xiv-data-viewer/internal/config"
@@ -147,11 +149,29 @@ type Store struct {
 	ShopsByItem      map[int][]RawShopEntry
 	NpcNames         map[int]RawNpcName
 	NpcLocations     map[int]RawNpcLocation
+	LevelLocations   map[int]RawNpcLocation
 	TotalActiveShops int
 
 	// 雇员探险反向索引
 	RetainerVenturesByItem map[int][]RawRetainerVenture
 	TotalRetainerTasks     int
+
+	// 任务、理符与收藏品交易索引
+	Quests                   []QuestEntry
+	QuestByID                map[int]QuestEntry
+	QuestsByRewardItem       map[int][]ItemQuestSource
+	QuestSectionList         []QuestSectionInfo
+	QuestActorIDs            map[int][]int
+	EventItemNames           map[int]string
+	BNpcNames                map[int]string
+	EObjNames                map[int]string
+	Leves                    []LeveEntry
+	LeveByID                 map[int]LeveEntry
+	LevesByItem              map[int][]ItemLeveSource
+	LeveAssignmentTypes      []LeveAssignmentTypeInfo
+	CollectableTurnInsByItem map[int][]CollectableTurnInSource
+	CollectableRewardsByItem map[int][]CollectableRewardSource
+	TotalCollectables        int
 
 	// 预构建道具摘要索引与统计分类
 	ItemSummaries   []ItemSummary
@@ -164,6 +184,7 @@ type Store struct {
 	AchievementByID          map[int]AchievementEntry
 	AchievementsByRewardItem map[int][]AchievementEntry
 	AchievementKindList      []AchievementKindInfo
+	AchievementCategoryList  []AchievementCategoryInfo
 	TotalTitles              int
 }
 
@@ -183,8 +204,34 @@ func (s *Store) Close() error {
 	return firstErr
 }
 
-// LoadGameDataStore 并发读取已配置的本地 FF14 客户端数据并构建完整内存正反向索引。
+// LoadStage 表示游戏数据读取与索引构建的真实阶段。
+type LoadStage string
+
+const (
+	LoadStageSheets  LoadStage = "sheets"
+	LoadStageIndices LoadStage = "indices"
+)
+
+// LoadProgress 描述加载过程中的实时进度（由真实分表计数与索引阶段驱动）。
+type LoadProgress struct {
+	Stage   LoadStage
+	Done    int
+	Total   int
+	Message string
+}
+
+// LoadGameDataStore 并发读取已配置的本地 FF14 客户端数据（不含 schema 扩展表）。
 func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
+	return LoadGameDataStoreWithProgress(resolved, nil, nil)
+}
+
+// LoadGameDataStoreWithSchemas 并发读取已配置的本地 FF14 客户端数据，并在提供 schemasFS 时解析任务、理符与收藏品交易。
+func LoadGameDataStoreWithSchemas(resolved *config.ResolvedPaths, schemasFS fs.FS) (*Store, error) {
+	return LoadGameDataStoreWithProgress(resolved, schemasFS, nil)
+}
+
+// LoadGameDataStoreWithProgress 并发读取本地 FF14 客户端数据，并在各真实阶段回调进度。
+func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.FS, onProgress func(LoadProgress)) (*Store, error) {
 	if resolved == nil || (!resolved.HasCN() && !resolved.HasGlobal()) {
 		return nil, config.ErrNoClientConfigured
 	}
@@ -233,12 +280,37 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 		gilShopItems              map[int][]sqpack.SubRow
 		gcScripShopItems          map[int][]sqpack.SubRow
 		inclusionSeries           map[int][]sqpack.SubRow
+
+		// Schema 对齐表（任务 / 理符 / 收藏品）
+		questsPrimary, questsEn, questsJa                          *sqpack.SchemaSheet
+		journalGenres, journalCategories, journalSections          *sqpack.SchemaSheet
+		questClassJobRewards                                       *sqpack.SchemaSubrowSheet
+		questRewardOthers, eventIconTypes, paramGrows              *sqpack.SchemaSheet
+		beastTribes, beastRankBonuses, beastReputationRanks        *sqpack.SchemaSheet
+		grandCompanies, exVersions, mounts, actions, emotes        *sqpack.SchemaSheet
+		generalActions, instanceContents, contentFinderConditions  *sqpack.SchemaSheet
+		eobjNames                                                  *sqpack.SchemaSheet
+		levesPrimary, levesEn, levesJa                             *sqpack.SchemaSheet
+		craftLeves, gatheringLeves, gatheringLeveRoutes            *sqpack.SchemaSheet
+		battleLeves, companyLeves                                  *sqpack.SchemaSheet
+		leveRewardItems, leveRewardItemGroups, leveAssignmentTypes *sqpack.SchemaSheet
+		leveClients, towns, leveStrings                            *sqpack.SchemaSheet
+		gatheringLeveRules, battleLeveRules, companyLeveRules      *sqpack.SchemaSheet
+		eventItems, bnpcNames                                      *sqpack.SchemaSheet
+		collectablesShops, collectablesShopItemGroups              *sqpack.SchemaSheet
+		collectablesShopItems                                      *sqpack.SchemaSubrowSheet
+		collectablesShopRefines                                    *sqpack.SchemaSheet
+		collectablesShopRewardItems, collectablesShopRewardScrips  *sqpack.SchemaSheet
+		satisfactionNpcs, satisfactionRewards                      *sqpack.SchemaSheet
+		satisfactionSupplies                                       *sqpack.SchemaSubrowSheet
+		hwdSupplies, hwdRewards, hwdTerms                          *sqpack.SchemaSheet
 	)
 
 	var (
 		wg       sync.WaitGroup
 		errMu    sync.Mutex
 		firstErr error
+		tasks    []func()
 	)
 
 	setErr := func(name string, err error) {
@@ -257,16 +329,14 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 			*dst = make(map[int]sqpack.Row)
 			return
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		tasks = append(tasks, func() {
 			rows, err := sqpack.LoadSheetRows(reader, sheet, lang, cols)
 			if err != nil {
 				setErr(sheet, err)
 				return
 			}
 			*dst = rows
-		}()
+		})
 	}
 
 	loadSub := func(reader *sqpack.GameReader, sheet string, lang sqpack.Language, dst *map[int][]sqpack.SubRow) {
@@ -274,16 +344,14 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 			*dst = make(map[int][]sqpack.SubRow)
 			return
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		tasks = append(tasks, func() {
 			rows, err := sqpack.LoadSubrowSheet(reader, sheet, lang)
 			if err != nil {
 				setErr(sheet, err)
 				return
 			}
 			*dst = rows
-		}()
+		})
 	}
 
 	// 并发加载全量核心数据表
@@ -366,9 +434,144 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 		titlesEn = make(map[int]sqpack.Row)
 		titlesJa = make(map[int]sqpack.Row)
 	}
+	loadSchema := func(reader *sqpack.GameReader, sheet string, lang sqpack.Language, fields []string, dst **sqpack.SchemaSheet) {
+		if reader == nil || schemasFS == nil {
+			return
+		}
+		tasks = append(tasks, func() {
+			s, err := sqpack.LoadSheetWithSchema(reader, schemasFS, sheet, lang, fields)
+			if err != nil {
+				setErr(sheet, err)
+				return
+			}
+			*dst = s
+		})
+	}
+
+	loadSchemaSub := func(reader *sqpack.GameReader, sheet string, lang sqpack.Language, dst **sqpack.SchemaSubrowSheet) {
+		if reader == nil || schemasFS == nil {
+			return
+		}
+		tasks = append(tasks, func() {
+			s, err := sqpack.LoadSubrowSheetWithSchema(reader, schemasFS, sheet, lang)
+			if err != nil {
+				setErr(sheet, err)
+				return
+			}
+			*dst = s
+		})
+	}
+
 	loadSheet(primaryReader, "RetainerTask", sqpack.LangNone, nil, &retainerTasks)
 	loadSheet(primaryReader, "RetainerTaskNormal", sqpack.LangNone, nil, &retainerTaskNormals)
 	loadSheet(primaryReader, "RetainerTaskParameter", sqpack.LangNone, nil, &retainerTaskParameters)
+
+	if schemasFS != nil {
+		// 任务表与关联表
+		loadSchema(primaryReader, "Quest", primaryLang, questNeededFields, &questsPrimary)
+		if globalReader != nil {
+			if cnReader != nil {
+				loadSchema(globalReader, "Quest", sqpack.LangEnglish, []string{"Name"}, &questsEn)
+				loadSchema(globalReader, "Leve", sqpack.LangEnglish, []string{"Name"}, &levesEn)
+			}
+			loadSchema(globalReader, "Quest", sqpack.LangJapanese, []string{"Name"}, &questsJa)
+			loadSchema(globalReader, "Leve", sqpack.LangJapanese, []string{"Name"}, &levesJa)
+		}
+		loadSchema(primaryReader, "JournalGenre", primaryLang, []string{"Name", "Icon", "JournalCategory"}, &journalGenres)
+		loadSchema(primaryReader, "JournalCategory", primaryLang, []string{"Name", "JournalSection"}, &journalCategories)
+		loadSchema(primaryReader, "JournalSection", primaryLang, []string{"Name"}, &journalSections)
+		loadSchemaSub(primaryReader, "QuestClassJobReward", sqpack.LangNone, &questClassJobRewards)
+		loadSchema(primaryReader, "QuestRewardOther", primaryLang, []string{"Name", "Icon"}, &questRewardOthers)
+		loadSchema(primaryReader, "EventIconType", sqpack.LangNone, []string{"NpcIconAvailable"}, &eventIconTypes)
+		loadSchema(primaryReader, "ParamGrow", sqpack.LangNone, []string{"ExpToNext", "ScaledQuestXP"}, &paramGrows)
+		loadSchema(primaryReader, "BeastTribe", primaryLang, []string{"Name", "CurrencyItem", "BeastRankBonus"}, &beastTribes)
+		loadSchema(primaryReader, "BeastRankBonus", sqpack.LangNone, nil, &beastRankBonuses)
+		loadSchema(primaryReader, "BeastReputationRank", primaryLang, []string{"Name"}, &beastReputationRanks)
+		loadSchema(primaryReader, "GrandCompany", primaryLang, []string{"Singular"}, &grandCompanies)
+		loadSchema(primaryReader, "ExVersion", primaryLang, []string{"Name"}, &exVersions)
+		loadSchema(primaryReader, "Mount", primaryLang, []string{"Singular", "Icon"}, &mounts)
+		loadSchema(primaryReader, "Action", primaryLang, []string{"Name", "Icon"}, &actions)
+		loadSchema(primaryReader, "Emote", primaryLang, []string{"Name", "Icon"}, &emotes)
+		loadSchema(primaryReader, "GeneralAction", primaryLang, []string{"Name", "Icon"}, &generalActions)
+		loadSchema(primaryReader, "InstanceContent", sqpack.LangNone, []string{"ContentFinderCondition"}, &instanceContents)
+		loadSchema(primaryReader, "ContentFinderCondition", primaryLang, []string{"Name"}, &contentFinderConditions)
+		loadSchema(primaryReader, "EObjName", primaryLang, []string{"Singular"}, &eobjNames)
+
+		// 理符表与子表
+		loadSchema(primaryReader, "Leve", primaryLang, nil, &levesPrimary)
+		loadSchema(primaryReader, "CraftLeve", sqpack.LangNone, nil, &craftLeves)
+		loadSchema(primaryReader, "GatheringLeve", sqpack.LangNone, nil, &gatheringLeves)
+		loadSchema(primaryReader, "GatheringLeveRoute", sqpack.LangNone, nil, &gatheringLeveRoutes)
+		loadSchema(primaryReader, "BattleLeve", sqpack.LangNone, nil, &battleLeves)
+		loadSchema(primaryReader, "CompanyLeve", sqpack.LangNone, nil, &companyLeves)
+		loadSchema(primaryReader, "LeveRewardItem", sqpack.LangNone, nil, &leveRewardItems)
+		loadSchema(primaryReader, "LeveRewardItemGroup", sqpack.LangNone, nil, &leveRewardItemGroups)
+		loadSchema(primaryReader, "LeveAssignmentType", primaryLang, []string{"Name", "Icon"}, &leveAssignmentTypes)
+		loadSchema(primaryReader, "LeveClient", primaryLang, []string{"Name"}, &leveClients)
+		loadSchema(primaryReader, "Town", primaryLang, []string{"Name", "Icon"}, &towns)
+		loadSchema(primaryReader, "LeveString", primaryLang, []string{"Objective"}, &leveStrings)
+		loadSchema(primaryReader, "GatheringLeveRule", primaryLang, []string{"Rule"}, &gatheringLeveRules)
+		loadSchema(primaryReader, "BattleLeveRule", primaryLang, []string{"Rule"}, &battleLeveRules)
+		loadSchema(primaryReader, "CompanyLeveRule", primaryLang, nil, &companyLeveRules)
+		loadSchema(primaryReader, "EventItem", primaryLang, []string{"Singular", "Name", "Icon"}, &eventItems)
+		loadSchema(primaryReader, "BNpcName", primaryLang, []string{"Singular"}, &bnpcNames)
+
+		// 收藏品交易、老主顾与苍天街供货表
+		loadSchema(primaryReader, "CollectablesShop", primaryLang, nil, &collectablesShops)
+		loadSchemaSub(primaryReader, "CollectablesShopItem", sqpack.LangNone, &collectablesShopItems)
+		loadSchema(primaryReader, "CollectablesShopItemGroup", primaryLang, []string{"Name"}, &collectablesShopItemGroups)
+		loadSchema(primaryReader, "CollectablesShopRefine", sqpack.LangNone, nil, &collectablesShopRefines)
+		loadSchema(primaryReader, "CollectablesShopRewardItem", sqpack.LangNone, nil, &collectablesShopRewardItems)
+		loadSchema(primaryReader, "CollectablesShopRewardScrip", sqpack.LangNone, nil, &collectablesShopRewardScrips)
+		loadSchema(primaryReader, "SatisfactionNpc", sqpack.LangNone, nil, &satisfactionNpcs)
+		loadSchemaSub(primaryReader, "SatisfactionSupply", sqpack.LangNone, &satisfactionSupplies)
+		loadSchema(primaryReader, "SatisfactionSupplyReward", sqpack.LangNone, nil, &satisfactionRewards)
+		loadSchema(primaryReader, "HWDCrafterSupply", sqpack.LangNone, nil, &hwdSupplies)
+		loadSchema(primaryReader, "HWDCrafterSupplyReward", sqpack.LangNone, nil, &hwdRewards)
+		loadSchema(primaryReader, "HWDCrafterSupplyTerm", primaryLang, []string{"Name"}, &hwdTerms)
+	}
+
+	totalSheets := len(tasks)
+	var completedSheets atomic.Int32
+	var progressMu sync.Mutex
+	var lastEmit time.Time
+	emit := func(p LoadProgress, force bool) {
+		if onProgress == nil {
+			return
+		}
+		progressMu.Lock()
+		now := time.Now()
+		if !force && now.Sub(lastEmit) < 60*time.Millisecond {
+			progressMu.Unlock()
+			return
+		}
+		lastEmit = now
+		progressMu.Unlock()
+		onProgress(p)
+	}
+
+	emit(LoadProgress{
+		Stage:   LoadStageSheets,
+		Done:    0,
+		Total:   totalSheets,
+		Message: "正在读取游戏数据表...",
+	}, true)
+
+	wg.Add(totalSheets)
+	for _, fn := range tasks {
+		run := fn
+		go func() {
+			defer wg.Done()
+			run()
+			done := int(completedSheets.Add(1))
+			emit(LoadProgress{
+				Stage:   LoadStageSheets,
+				Done:    done,
+				Total:   totalSheets,
+				Message: "正在读取游戏数据表...",
+			}, done == totalSheets)
+		}()
+	}
 
 	wg.Wait()
 	if firstErr != nil {
@@ -381,11 +584,20 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 		return nil, firstErr
 	}
 
+	emit(LoadProgress{
+		Stage:   LoadStageIndices,
+		Done:    0,
+		Total:   4,
+		Message: "正在构建配方与采集索引...",
+	}, true)
+
 	// 仅国际服模式时，itemsPrimary 本身即为英文表，复用避免重复读取
 	if cnReader == nil && globalReader != nil {
 		itemsEn = itemsPrimary
 		achievementsEn = achievementsPrimary
 		titlesEn = titlesPrimary
+		questsEn = questsPrimary
+		levesEn = levesPrimary
 	}
 
 	// 构建基础字典映射
@@ -612,6 +824,13 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 		}
 	}
 
+	emit(LoadProgress{
+		Stage:   LoadStageIndices,
+		Done:    1,
+		Total:   4,
+		Message: "正在整理商店与雇员探险来源...",
+	}, true)
+
 	// 构建商店与雇员探险索引
 	shopIdx := buildShopIndices(shopLoaderInput{
 		itemsPrimary:        itemsPrimary,
@@ -634,10 +853,133 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 
 	retainerIdx := buildRetainerIndices(retainerTasks, retainerTaskNormals, retainerTaskParameters, classJobCategories)
 
+	tomestoneByIndex := make(map[int]int)
+	for _, row := range tomestonesItems {
+		itemID := row.IntAt(0)
+		idx := row.IntAt(2)
+		if itemID > 0 && idx > 0 {
+			tomestoneByIndex[idx] = itemID
+		}
+	}
+
+	itemMeta := func(itemID int) (string, int) {
+		if row, ok := itemsPrimary[itemID]; ok {
+			return row.StringAt(9), row.IntAt(10)
+		}
+		return "", 0
+	}
+
+	emit(LoadProgress{
+		Stage:   LoadStageIndices,
+		Done:    2,
+		Total:   4,
+		Message: "正在关联收藏品、任务与理符数据...",
+	}, true)
+
+	collectablesIdx := buildCollectablesData(collectablesLoaderInput{
+		shops:                  collectablesShops,
+		shopItems:              collectablesShopItems,
+		shopItemGroups:         collectablesShopItemGroups,
+		shopRefines:            collectablesShopRefines,
+		shopRewardItems:        collectablesShopRewardItems,
+		shopRewardScrips:       collectablesShopRewardScrips,
+		satisfactionNpcs:       satisfactionNpcs,
+		satisfactionSupplies:   satisfactionSupplies,
+		satisfactionRewards:    satisfactionRewards,
+		hwdSupplies:            hwdSupplies,
+		hwdRewards:             hwdRewards,
+		hwdTerms:               hwdTerms,
+		quests:                 questsPrimary,
+		collectablesShopToNPCs: shopIdx.CollectablesShopToNPCs,
+		npcNames:               shopIdx.NpcNames,
+		npcLocations:           shopIdx.NpcLocations,
+		levelLocations:         shopIdx.LevelLocations,
+		tomestoneByIndex:       tomestoneByIndex,
+		placeNames:             placeNames,
+		territoryTypes:         territoryTypes,
+		maps:                   maps,
+		itemMeta:               itemMeta,
+	})
+
+	questIdx := buildQuestData(questLoaderInput{
+		quests:                  questsPrimary,
+		questsEn:                questsEn,
+		questsJa:                questsJa,
+		journalGenres:           journalGenres,
+		journalCategories:       journalCategories,
+		journalSections:         journalSections,
+		questClassJobRewards:    questClassJobRewards,
+		questRewardOthers:       questRewardOthers,
+		eventIconTypes:          eventIconTypes,
+		paramGrows:              paramGrows,
+		beastTribes:             beastTribes,
+		beastRankBonuses:        beastRankBonuses,
+		beastReputationRanks:    beastReputationRanks,
+		grandCompanies:          grandCompanies,
+		exVersions:              exVersions,
+		mounts:                  mounts,
+		actions:                 actions,
+		emotes:                  emotes,
+		generalActions:          generalActions,
+		instanceContents:        instanceContents,
+		contentFinderConditions: contentFinderConditions,
+		eobjNames:               eobjNames,
+		npcNames:                shopIdx.NpcNames,
+		npcLocations:            shopIdx.NpcLocations,
+		levelLocations:          shopIdx.LevelLocations,
+		tomestoneByIndex:        tomestoneByIndex,
+		classJobs:               classJobs,
+		classJobCategories:      classJobCategories,
+		placeNames:              placeNames,
+		territoryTypes:          territoryTypes,
+		maps:                    maps,
+		itemMeta:                itemMeta,
+	})
+
 	cabinetIDs := make(map[int]struct{}, len(rawCabinets))
 	for _, row := range rawCabinets {
 		if id := row.IntAt(0); id > 0 {
 			cabinetIDs[id] = struct{}{}
+		}
+	}
+
+	eventItemNames := make(map[int]string)
+	if eventItems != nil {
+		for id, row := range eventItems.Rows {
+			if id <= 0 {
+				continue
+			}
+			name := strings.TrimSpace(eventItems.Str(row, "Singular"))
+			if name == "" {
+				name = strings.TrimSpace(eventItems.Str(row, "Name"))
+			}
+			if name != "" {
+				eventItemNames[id] = name
+			}
+		}
+	}
+
+	bnpcNameMap := make(map[int]string)
+	if bnpcNames != nil {
+		for id, row := range bnpcNames.Rows {
+			if id <= 0 {
+				continue
+			}
+			if name := strings.TrimSpace(bnpcNames.Str(row, "Singular")); name != "" {
+				bnpcNameMap[id] = name
+			}
+		}
+	}
+
+	eobjNameMap := make(map[int]string)
+	if eobjNames != nil {
+		for id, row := range eobjNames.Rows {
+			if id <= 0 {
+				continue
+			}
+			if name := strings.TrimSpace(eobjNames.Str(row, "Singular")); name != "" {
+				eobjNameMap[id] = name
+			}
 		}
 	}
 
@@ -697,29 +1039,31 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 		isMarketable := isTradable && row.IntAt(16) > 0
 
 		summary := ItemSummary{
-			ID:                 itemID,
-			NameCn:             namePrimary,
-			NameEn:             enName,
-			NameJa:             jaName,
-			IconID:             row.IntAt(10),
-			ItemLevel:          row.IntAt(11),
-			EquipLevel:         row.IntAt(40),
-			Rarity:             row.IntAt(12),
-			CategoryID:         catID,
-			CategoryName:       catName,
-			CategoryIconID:     catIconID,
-			PriceMid:           row.IntAt(25),
-			CanBeHQ:            row.BoolAt(27),
-			IsTradable:         isTradable,
-			IsMarketable:       isMarketable,
-			IsCraftable:        len(recipesByResult[itemID]) > 0,
-			IsGatherable:       isGatherable,
-			IsPurchasable:      isPurchasable,
-			IsGilShop:          isGilShop,
-			IsSpecialShop:      isSpecialShop,
-			IsRetainerVenture:  len(retainerIdx.VenturesByItem[itemID]) > 0,
-			HasEquipmentStats:  HasItemEquipmentStats(row),
-			UsedInRecipesCount: len(recipesByIngredient[itemID]),
+			ID:                  itemID,
+			NameCn:              namePrimary,
+			NameEn:              enName,
+			NameJa:              jaName,
+			IconID:              row.IntAt(10),
+			ItemLevel:           row.IntAt(11),
+			EquipLevel:          row.IntAt(40),
+			Rarity:              row.IntAt(12),
+			CategoryID:          catID,
+			CategoryName:        catName,
+			CategoryIconID:      catIconID,
+			PriceMid:            row.IntAt(25),
+			CanBeHQ:             row.BoolAt(27),
+			IsTradable:          isTradable,
+			IsMarketable:        isMarketable,
+			IsCraftable:         len(recipesByResult[itemID]) > 0,
+			IsGatherable:        isGatherable,
+			IsPurchasable:       isPurchasable,
+			IsGilShop:           isGilShop,
+			IsSpecialShop:       isSpecialShop,
+			IsRetainerVenture:   len(retainerIdx.VenturesByItem[itemID]) > 0,
+			IsCollectableTurnIn: len(collectablesIdx.turnInsByItem[itemID]) > 0,
+			IsCollectableReward: len(collectablesIdx.rewardsByItem[itemID]) > 0,
+			HasEquipmentStats:   HasItemEquipmentStats(row),
+			UsedInRecipesCount:  len(recipesByIngredient[itemID]),
 		}
 		itemSummaries = append(itemSummaries, summary)
 		itemSummaryByID[itemID] = summary
@@ -728,6 +1072,37 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 		}
 	}
 	sort.Slice(itemSummaries, func(i, j int) bool { return itemSummaries[i].ID < itemSummaries[j].ID })
+
+	leveIdx := buildLeveData(leveLoaderInput{
+		leves:                 levesPrimary,
+		levesEn:               levesEn,
+		levesJa:               levesJa,
+		craftLeves:            craftLeves,
+		gatheringLeves:        gatheringLeves,
+		gatheringLeveRoutes:   gatheringLeveRoutes,
+		battleLeves:           battleLeves,
+		companyLeves:          companyLeves,
+		leveRewardItems:       leveRewardItems,
+		leveRewardItemGroups:  leveRewardItemGroups,
+		leveAssignmentTypes:   leveAssignmentTypes,
+		leveClients:           leveClients,
+		towns:                 towns,
+		leveStrings:           leveStrings,
+		gatheringLeveRules:    gatheringLeveRules,
+		battleLeveRules:       battleLeveRules,
+		companyLeveRules:      companyLeveRules,
+		eventItems:            eventItems,
+		bnpcNames:             bnpcNames,
+		journalGenres:         journalGenres,
+		fishingSpots:          fishingSpots,
+		spearfishingNotebooks: spearfishingNotebooks,
+		levelLocations:        shopIdx.LevelLocations,
+		classJobCategories:    classJobCategories,
+		placeNames:            placeNames,
+		territoryTypes:        territoryTypes,
+		maps:                  maps,
+		itemSummaryByID:       itemSummaryByID,
+	})
 
 	var categoryList []ItemCategoryInfo
 	for id, info := range categories {
@@ -742,21 +1117,34 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 	}
 	sort.Slice(categoryList, func(i, j int) bool { return categoryList[i].ID < categoryList[j].ID })
 
+	emit(LoadProgress{
+		Stage:   LoadStageIndices,
+		Done:    3,
+		Total:   4,
+		Message: "正在生成成就与搜索索引...",
+	}, true)
+
 	// 解析成就分类、大类与称号表
-	achKinds := make(map[int]string)
+	type achKindDict struct {
+		name  string
+		order int
+	}
+	achKinds := make(map[int]achKindDict)
 	for id, row := range rawAchievementKinds {
 		if name := row.StringAt(0); name != "" {
-			achKinds[id] = name
+			achKinds[id] = achKindDict{name: name, order: row.IntAt(1)}
 		}
 	}
 	type achCatDict struct {
 		name   string
 		kindID int
+		order  int
 	}
 	achCats := make(map[int]achCatDict)
 	for id, row := range rawAchievementCategories {
 		if name := row.StringAt(0); name != "" {
-			achCats[id] = achCatDict{name: name, kindID: row.IntAt(1)}
+			// AchievementCategory 物理列序：0=Name, 1=AchievementKind, 4=Order
+			achCats[id] = achCatDict{name: name, kindID: row.IntAt(1), order: row.IntAt(4)}
 		}
 	}
 
@@ -771,6 +1159,7 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 	achievementByID := make(map[int]AchievementEntry, len(achievementsPrimary))
 	achievementsByRewardItem := make(map[int][]AchievementEntry)
 	kindCount := make(map[int]int)
+	catCount := make(map[int]int)
 
 	for achID, row := range achievementsPrimary {
 		if achID <= 0 {
@@ -785,7 +1174,7 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 		catID := row.IntAt(0)
 		catInfo := achCats[catID]
 		kindID := catInfo.kindID
-		kindName := achKinds[kindID]
+		kindName := achKinds[kindID].name
 		if kindName == "" {
 			kindName = "其他"
 		}
@@ -850,23 +1239,72 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 		if kindID > 0 {
 			kindCount[kindID]++
 		}
+		if catID > 0 {
+			catCount[catID]++
+		}
 		if rewardItemID > 0 {
 			achievementsByRewardItem[rewardItemID] = append(achievementsByRewardItem[rewardItemID], entry)
 		}
 	}
 	sort.Slice(achievements, func(i, j int) bool { return achievements[i].ID < achievements[j].ID })
 
+	// 按大类归集并依游戏内 Order 排序二级分类
+	catsByKind := make(map[int][]AchievementCategoryInfo)
+	for id, cat := range achCats {
+		cnt := catCount[id]
+		if cnt <= 0 || id <= 0 {
+			continue
+		}
+		kName := achKinds[cat.kindID].name
+		if kName == "" {
+			kName = "其他"
+		}
+		catsByKind[cat.kindID] = append(catsByKind[cat.kindID], AchievementCategoryInfo{
+			ID:       id,
+			KindID:   cat.kindID,
+			KindName: kName,
+			Name:     cat.name,
+			Count:    cnt,
+		})
+	}
+	for kID, list := range catsByKind {
+		sort.Slice(list, func(i, j int) bool {
+			oi, oj := achCats[list[i].ID].order, achCats[list[j].ID].order
+			if oi != oj {
+				return oi < oj
+			}
+			return list[i].ID < list[j].ID
+		})
+		catsByKind[kID] = list
+	}
+
 	var achievementKindList []AchievementKindInfo
-	for id, name := range achKinds {
+	for id, k := range achKinds {
 		if cnt := kindCount[id]; cnt > 0 {
 			achievementKindList = append(achievementKindList, AchievementKindInfo{
-				ID:    id,
-				Name:  name,
-				Count: cnt,
+				ID:         id,
+				Name:       k.name,
+				Count:      cnt,
+				Categories: catsByKind[id],
 			})
 		}
 	}
-	sort.Slice(achievementKindList, func(i, j int) bool { return achievementKindList[i].ID < achievementKindList[j].ID })
+	sort.Slice(achievementKindList, func(i, j int) bool {
+		oi, oj := achKinds[achievementKindList[i].ID].order, achKinds[achievementKindList[j].ID].order
+		if oi != oj {
+			return oi < oj
+		}
+		return achievementKindList[i].ID < achievementKindList[j].ID
+	})
+
+	var achievementCategoryList []AchievementCategoryInfo
+	for _, k := range achievementKindList {
+		achievementCategoryList = append(achievementCategoryList, k.Categories...)
+	}
+	// 兜底纳入未归属有效大类的二级分类
+	if orphanCats := catsByKind[0]; len(orphanCats) > 0 {
+		achievementCategoryList = append(achievementCategoryList, orphanCats...)
+	}
 
 	return &Store{
 		CNReader:                       cnReader,
@@ -920,9 +1358,25 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 		ShopsByItem:                    shopIdx.ShopsByItem,
 		NpcNames:                       shopIdx.NpcNames,
 		NpcLocations:                   shopIdx.NpcLocations,
+		LevelLocations:                 shopIdx.LevelLocations,
 		TotalActiveShops:               shopIdx.TotalActiveShops,
 		RetainerVenturesByItem:         retainerIdx.VenturesByItem,
 		TotalRetainerTasks:             retainerIdx.TotalRetainerTasks,
+		Quests:                         questIdx.quests,
+		QuestByID:                      questIdx.questByID,
+		QuestsByRewardItem:             questIdx.questsByRewardItem,
+		QuestSectionList:               questIdx.sectionList,
+		QuestActorIDs:                  questIdx.questActorIDs,
+		EventItemNames:                 eventItemNames,
+		BNpcNames:                      bnpcNameMap,
+		EObjNames:                      eobjNameMap,
+		Leves:                          leveIdx.leves,
+		LeveByID:                       leveIdx.leveByID,
+		LevesByItem:                    leveIdx.levesByItem,
+		LeveAssignmentTypes:            leveIdx.assignmentTypeList,
+		CollectableTurnInsByItem:       collectablesIdx.turnInsByItem,
+		CollectableRewardsByItem:       collectablesIdx.rewardsByItem,
+		TotalCollectables:              collectablesIdx.totalEntries,
 		ItemSummaries:                  itemSummaries,
 		ItemSummaryByID:                itemSummaryByID,
 		CategoryList:                   categoryList,
@@ -931,6 +1385,7 @@ func LoadGameDataStore(resolved *config.ResolvedPaths) (*Store, error) {
 		AchievementByID:                achievementByID,
 		AchievementsByRewardItem:       achievementsByRewardItem,
 		AchievementKindList:            achievementKindList,
+		AchievementCategoryList:        achievementCategoryList,
 		TotalTitles:                    totalTitles,
 	}, nil
 }

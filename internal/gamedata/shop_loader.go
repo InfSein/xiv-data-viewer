@@ -42,12 +42,14 @@ type RawNpcName struct {
 	Title string
 }
 
-// ShopIndices 汇总全量商店、NPC 名称与 NPC 坐标反向索引。
+// ShopIndices 汇总全量商店、收藏品商店关联、NPC 名称与坐标反向索引。
 type ShopIndices struct {
-	ShopsByItem      map[int][]RawShopEntry
-	NpcNames         map[int]RawNpcName
-	NpcLocations     map[int]RawNpcLocation
-	TotalActiveShops int
+	ShopsByItem            map[int][]RawShopEntry
+	CollectablesShopToNPCs map[int][]int
+	NpcNames               map[int]RawNpcName
+	NpcLocations           map[int]RawNpcLocation
+	LevelLocations         map[int]RawNpcLocation
+	TotalActiveShops       int
 }
 
 func resolveSpecialCurrencyID(rawCostID, useCurrencyType int, tomestoneByIndex map[int]int) int {
@@ -104,6 +106,7 @@ type shopLoaderInput struct {
 	inclusionSeries     map[int][]sqpack.SubRow
 	customTalks         map[int]sqpack.Row
 	levels              map[int]sqpack.Row
+	collectablesShops   map[int]sqpack.Row
 }
 
 // buildShopIndices 解析金币商店、特殊兑换、军票与部队战绩商店并建立 NPC 坐标反向索引。
@@ -122,27 +125,32 @@ func buildShopIndices(in shopLoaderInput) ShopIndices {
 		npcNames[npcID] = RawNpcName{Name: name, Title: title}
 	}
 
-	// 2. 从 Level 表提取 EventNpc (Type == 8) 的世界坐标与所属地图
+	// 2. 从 Level 表提取按 Level ID 和 EventNpc (Type == 8) 索引的世界坐标与所属地图
 	npcLocations := make(map[int]RawNpcLocation)
-	for _, row := range in.levels {
+	levelLocations := make(map[int]RawNpcLocation, len(in.levels))
+	for levelID, row := range in.levels {
+		territoryID := row.IntAt(9)
+		if territoryID <= 0 {
+			continue
+		}
+		loc := RawNpcLocation{
+			TerritoryID: territoryID,
+			MapID:       row.IntAt(7),
+			WorldX:      row.FloatAt(0),
+			WorldZ:      row.FloatAt(2),
+		}
+		levelLocations[levelID] = loc
 		if row.IntAt(5) != 8 {
 			continue
 		}
 		npcID := row.IntAt(6)
-		mapID := row.IntAt(7)
-		territoryID := row.IntAt(9)
-		if npcID <= 0 || territoryID <= 0 {
+		if npcID <= 0 {
 			continue
 		}
 		if _, exists := npcLocations[npcID]; exists {
 			continue
 		}
-		npcLocations[npcID] = RawNpcLocation{
-			TerritoryID: territoryID,
-			MapID:       mapID,
-			WorldX:      row.FloatAt(0),
-			WorldZ:      row.FloatAt(2),
-		}
+		npcLocations[npcID] = loc
 	}
 
 	// 3. 递归追踪 ENpcData 引用链（PreHandler / TopicSelect / InclusionShop / CustomTalk）
@@ -153,7 +161,11 @@ func buildShopIndices(in shopLoaderInput) ShopIndices {
 		if refID <= 0 {
 			return nil
 		}
-		isDirectShop := (refID >= 262144 && refID < 270000) || (refID >= 1769472 && refID < 1780000)
+		_, isCollectables := in.collectablesShops[refID]
+		isDirectShop := isCollectables ||
+			(refID >= 262144 && refID < 270000) ||
+			(refID >= 1769472 && refID < 1780000) ||
+			(refID >= 3866624 && refID < 3880000)
 		if isDirectShop {
 			if ctxTitle != "" {
 				if _, ok := shopFallbackNames[refID]; !ok {
@@ -449,10 +461,19 @@ func buildShopIndices(in shopLoaderInput) ShopIndices {
 		}
 	}
 
+	collectablesShopToNPCs := make(map[int][]int)
+	for shopID, npcs := range shopToNPCs {
+		if _, ok := in.collectablesShops[shopID]; ok || (shopID >= 3866624 && shopID < 3880000) {
+			collectablesShopToNPCs[shopID] = npcs
+		}
+	}
+
 	return ShopIndices{
-		ShopsByItem:      shopsByItem,
-		NpcNames:         npcNames,
-		NpcLocations:     npcLocations,
-		TotalActiveShops: len(activeShopIDs),
+		ShopsByItem:            shopsByItem,
+		CollectablesShopToNPCs: collectablesShopToNPCs,
+		NpcNames:               npcNames,
+		NpcLocations:           npcLocations,
+		LevelLocations:         levelLocations,
+		TotalActiveShops:       len(activeShopIDs),
 	}
 }

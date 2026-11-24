@@ -3,11 +3,9 @@ package exporter
 import (
 	"fmt"
 	"io/fs"
-	"sort"
 	"sync"
 
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
-	"gopkg.in/yaml.v3"
 )
 
 // ColumnMeta 表示对齐后的单列 CSV 元信息。
@@ -77,17 +75,6 @@ func FormatColumnType(colType uint16) string {
 	default:
 		return "unk"
 	}
-}
-
-type schemaYAMLDoc struct {
-	Name   string            `yaml:"name"`
-	Fields []schemaYAMLField `yaml:"fields"`
-}
-
-type schemaYAMLField struct {
-	Name   string            `yaml:"name"`
-	Count  int               `yaml:"count"`
-	Fields []schemaYAMLField `yaml:"fields"`
 }
 
 // SchemaManager 管理 EXDSchema YAML 结构文件并与 EXH 二进制列偏移动态对齐。
@@ -162,39 +149,14 @@ func (m *SchemaManager) GetSheetSchema(reader *sqpack.GameReader, sheetName stri
 		return nil, err
 	}
 
-	flatNames := m.loadAndFlattenSchema(sheetName)
+	flatNames, _ := sqpack.LoadSchemaFieldNames(m.schemasFS, sheetName)
+	aligned, _ := sqpack.AlignEXHColumns(exh, flatNames)
 
-	type colOrder struct {
-		origIdx int
-		offset  uint16
-		colType uint16
-	}
-	sorted := make([]colOrder, len(exh.Columns))
-	for i, c := range exh.Columns {
-		sorted[i] = colOrder{origIdx: i, offset: c.Offset, colType: c.Type}
-	}
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].offset != sorted[j].offset {
-			return sorted[i].offset < sorted[j].offset
-		}
-		if sorted[i].colType != sorted[j].colType {
-			return sorted[i].colType < sorted[j].colType
-		}
-		return sorted[i].origIdx < sorted[j].origIdx
-	})
-
-	nameByOrig := make(map[int]string, len(sorted))
-	for i, sc := range sorted {
-		if i < len(flatNames) {
-			nameByOrig[sc.origIdx] = flatNames[i]
-		}
-	}
-
-	cols := make([]ColumnMeta, len(exh.Columns))
-	for i, c := range exh.Columns {
+	cols := make([]ColumnMeta, len(aligned))
+	for i, c := range aligned {
 		cols[i] = ColumnMeta{
-			Index:  i,
-			Name:   nameByOrig[i],
+			Index:  c.Index,
+			Name:   c.Name,
 			Type:   FormatColumnType(c.Type),
 			Offset: c.Offset,
 		}
@@ -210,58 +172,6 @@ func (m *SchemaManager) GetSheetSchema(reader *sqpack.GameReader, sheetName stri
 	m.schemaCache[sheetName] = meta
 	m.mu.Unlock()
 	return meta, nil
-}
-
-func (m *SchemaManager) loadAndFlattenSchema(sheetName string) []string {
-	if m.schemasFS == nil {
-		return nil
-	}
-	raw, err := fs.ReadFile(m.schemasFS, sheetName+".yml")
-	if err != nil {
-		return nil
-	}
-	var doc schemaYAMLDoc
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return nil
-	}
-	var out []string
-	flattenFieldList(doc.Fields, &out, "")
-	return out
-}
-
-func flattenFieldList(fields []schemaYAMLField, result *[]string, prefix string) {
-	for _, f := range fields {
-		cnt := f.Count
-		if cnt <= 0 {
-			cnt = 1
-		}
-		fullName := f.Name
-		if prefix != "" {
-			if f.Name != "" {
-				fullName = prefix + "." + f.Name
-			} else {
-				fullName = prefix
-			}
-		}
-
-		if len(f.Fields) > 0 {
-			for c := 0; c < cnt; c++ {
-				itemPrefix := fullName
-				if cnt > 1 {
-					itemPrefix = fmt.Sprintf("%s[%d]", fullName, c)
-				}
-				flattenFieldList(f.Fields, result, itemPrefix)
-			}
-		} else {
-			for c := 0; c < cnt; c++ {
-				if cnt > 1 {
-					*result = append(*result, fmt.Sprintf("%s[%d]", fullName, c))
-				} else {
-					*result = append(*result, fullName)
-				}
-			}
-		}
-	}
 }
 
 func toLowerASCII(s string) string {
