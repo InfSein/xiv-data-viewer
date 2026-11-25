@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/InfSein/xiv-data-viewer/internal/config"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/egoist/mygo/ui"
@@ -58,7 +59,11 @@ func formatAppVersionTag(ver string) string {
 // renderBrandCaption 绘制左上角品牌图标、名称与右侧不加粗小字版本号。
 func (a *App) renderBrandCaption(c *ui.Context) {
 	t := themeOf(c)
-	ui.Icon(c, icoAppLogo).Size(iconMd, iconMd).TextColor(t.primary)
+	if bmp := appLogoBitmap(); bmp != nil {
+		ui.Image(c, bmp).Size(iconLg, iconLg).Fit(ui.Contain).Shrink(0)
+	} else {
+		ui.Icon(c, icoAppLogo).Size(iconMd, iconMd).TextColor(t.primary)
+	}
 	ui.Row(c).Gap(6).AlignItems(ui.Baseline).Children(func() {
 		ui.Text(c, appBrandTitle).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground).SingleLine()
 		if ver := formatAppVersionTag(a.appVersion); ver != "" {
@@ -576,6 +581,10 @@ func (a *App) renderShellBody(c *ui.Context) {
 				a.renderLevesView(c)
 			case tabAchievements:
 				a.renderAchievementsView(c)
+			case tabRecent:
+				a.renderRecentView(c)
+			case tabFavorites:
+				a.renderFavoritesView(c)
 			case tabDiff:
 				a.renderDiffView(c)
 			case tabChangelog:
@@ -618,6 +627,22 @@ func (a *App) renderSidebar(c *ui.Context) {
 				}
 				if kitSidebarItem(c, "nav-achievements", icoTrophy, icoTrophyFill, a.t("nav.achievements"), achCnt, a.tab == tabAchievements, false) {
 					a.navigateTab(tabAchievements)
+				}
+
+				ui.Text(c, a.t("nav.section.history")).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).Padding(14, 10, 4, 10)
+				recentCnt := ""
+				if cnt := len(a.records.Recent); cnt > 0 {
+					recentCnt = formatInt(cnt)
+				}
+				favCnt := ""
+				if cnt := len(a.records.Favorites); cnt > 0 {
+					favCnt = formatInt(cnt)
+				}
+				if kitSidebarItem(c, "nav-recent", icoClock, icoClockFill, a.t("nav.recent"), recentCnt, a.tab == tabRecent, false) {
+					a.navigateTab(tabRecent)
+				}
+				if kitSidebarItem(c, "nav-favorites", icoStar, icoStarFill, a.t("nav.favorites"), favCnt, a.tab == tabFavorites, false) {
+					a.navigateTab(tabFavorites)
 				}
 
 				ui.Text(c, a.t("nav.section.compare")).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).Padding(14, 10, 4, 10)
@@ -916,43 +941,9 @@ func (a *App) renderItemListPane(c *ui.Context) {
 				ui.Column(c).FillWidth().Padding(6, 8).Gap(2).Children(func() {
 					for _, item := range a.itemRes.Items {
 						isSel := item.ID == a.selectedItemID
-						row := ui.ButtonBase(c.Key(fmt.Sprintf("item-row-%d", item.ID))).
-							FillWidth().Padding(8, 10).Gap(10).Radius(t.radius.lg).
-							AlignItems(ui.Center).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-						switch {
-						case isSel && row.Hovered():
-							row.Background(t.tint(2.25))
-						case isSel:
-							row.Background(t.tint(1.75))
-						case row.Hovered():
-							row.Background(t.tint(1))
-						}
-						row.Children(func() {
-							a.drawGameIcon(c, item.IconID, false, 34, t.radius.md)
-							ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
-								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
-									fw := 500
-									if isSel {
-										fw = 600
-									}
-									ui.Text(c, item.NameCn).FontSize(t.text.sm).FontWeight(fw).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
-									numTextf(c, "#%d", item.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
-								})
-								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-									sub := nonEmptyStr(item.CategoryName, a.t("common.other"))
-									ui.Text(c, sub).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
-
-									metaParts := buildItemRowMeta(item)
-									numText(c, metaParts).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
-								})
-							})
-						})
-						if row.Clicked() {
+						fav := a.isFavorite(config.RecordKindItem, item.ID)
+						if a.renderItemListRow(c, fmt.Sprintf("item-row-%d", item.ID), item, isSel, fav, &a.scrollItemListToID) {
 							a.selectItem(item.ID)
-						}
-						if item.ID == a.scrollItemListToID {
-							row.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollCenter})
-							a.scrollItemListToID = 0
 						}
 					}
 				})
@@ -972,6 +963,52 @@ func (a *App) renderItemListPane(c *ui.Context) {
 			},
 		)
 	})
+}
+
+// renderItemListRow 绘制单条物品列表行（供「物品」工作台与「收藏」物品标签页复用）。
+func (a *App) renderItemListRow(c *ui.Context, key string, item gamedata.ItemSummary, isSel, favorited bool, scrollToID *int) bool {
+	t := themeOf(c)
+	row := ui.ButtonBase(c.Key(key)).
+		FillWidth().Padding(8, 10).Gap(10).Radius(t.radius.lg).
+		AlignItems(ui.Center).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+	switch {
+	case isSel && row.Hovered():
+		row.Background(t.tint(2.25))
+	case isSel:
+		row.Background(t.tint(1.75))
+	case row.Hovered():
+		row.Background(t.tint(1))
+	}
+	row.Children(func() {
+		a.drawGameIcon(c, item.IconID, false, 34, t.radius.md)
+		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
+			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
+				fw := 500
+				if isSel {
+					fw = 600
+				}
+				ui.Text(c, item.NameCn).FontSize(t.text.sm).FontWeight(fw).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
+				ui.Row(c).Gap(4).AlignItems(ui.Center).Shrink(0).Children(func() {
+					if favorited {
+						ui.Icon(c, icoStarFill).Size(11, 11).TextColor(t.attention)
+					}
+					numTextf(c, "#%d", item.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+				})
+			})
+			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
+				sub := nonEmptyStr(item.CategoryName, a.t("common.other"))
+				ui.Text(c, sub).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
+
+				metaParts := buildItemRowMeta(item)
+				numText(c, metaParts).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
+			})
+		})
+	})
+	if scrollToID != nil && item.ID == *scrollToID {
+		row.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollCenter})
+		*scrollToID = 0
+	}
+	return row.Clicked()
 }
 
 // buildItemRowMeta 生成物品列表行右下角的品级文本。

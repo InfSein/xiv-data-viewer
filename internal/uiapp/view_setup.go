@@ -305,10 +305,15 @@ func (a *App) renderSetupView(c *ui.Context) {
 						a.renderSetupLanguageBar(c)
 
 						// 1. 核心任务标题与一句话说明
-						ui.Column(c).FillWidth().Gap(6).Children(func() {
-							ui.Text(c, a.t("setup.title")).FontSize(t.text.x3l).FontWeight(600).LetterSpacing(-0.3).TextColor(t.foreground)
-							ui.Text(c, a.t("setup.subtitle")).
-								FontSize(t.text.sm).LineHeight(lineProse).TextColor(t.muted)
+						ui.Row(c).FillWidth().Gap(14).AlignItems(ui.Center).Children(func() {
+							if bmp := appLogoBitmap(); bmp != nil {
+								ui.Image(c, bmp).Size(48, 48).Fit(ui.Contain).Shrink(0)
+							}
+							ui.Column(c).Grow(1).Shrink(1).Gap(6).Children(func() {
+								ui.Text(c, a.t("setup.title")).FontSize(t.text.x3l).FontWeight(600).LetterSpacing(-0.3).TextColor(t.foreground)
+								ui.Text(c, a.t("setup.subtitle")).
+									FontSize(t.text.sm).LineHeight(lineProse).TextColor(t.muted)
+							})
 						})
 
 						// 2. 区服使用方式选择（明确单服与双服差异，消除“是否都要填”的困惑）

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-25
+
+### Added
+- **Recent History & Favorites**: Added a "History" section in the sidebar with "Recent" and "Favorites" pages. "Recent" tracks recently opened items, quests, and leves (up to 500 entries), while "Favorites" lets you star items, quests, leves, and achievements from their pages and browse them by category tabs.
+
+### Changed
+- **Item Detail Header**: Removed the old inline recent items bar from the item detail header (now consolidated into the "Recent" page) and permanently display the current item's ID, category, and item level instead.
+- **New App Icon**: Updated the application with a brand-new icon across the app window, taskbar, setup screen, update dialog, and top-left brand bar.
+
+### Fixed
+- **Quest List Ordering & Search**: Sorted quests by their in-game journal section, category, chapter, and storyline order so quests across expansion transitions or sharing the same level (such as *Shadowbringers*) no longer get pushed out of order or appear missing; exact title matches now appear first when searching quests.
+
 ## [2.2.0] - 2026-11-25
 
 ### Added

@@ -812,6 +812,92 @@ func kitIconButton(c *ui.Context, key any, ico *ui.SVG, tip string, o btnOpts) b
 	return b.Clicked()
 }
 
+// kitFavoriteToggleButton 绘制详情顶栏的「加入收藏 / 已收藏」切换按钮。
+func kitFavoriteToggleButton(c *ui.Context, key any, addLabel, addedLabel string, favorited bool) bool {
+	t := themeOf(c)
+	lbl := addLabel
+	ico := icoStar
+	if favorited {
+		lbl = addedLabel
+		ico = icoStarFill
+	}
+
+	b := ui.ButtonBase(c.Key(key)).Label(lbl).Height(28).PaddingX(10).Radius(t.radius.md).
+		Gap(5).Justify(ui.Center).AlignItems(ui.Center).
+		FontSize(t.text.xs).FontWeight(500).
+		Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+
+	hover := b.Hovered()
+	pressed := hover && b.Pressed()
+	fg := t.foreground
+	icoCol := t.muted
+
+	if favorited {
+		bg := t.warningBg
+		fg = t.warningText
+		icoCol = t.attention
+		if pressed {
+			bg = bg.Mix(t.attention, 0.18)
+		} else if hover {
+			bg = bg.Mix(t.attention, 0.10)
+		}
+		b.Background(bg).Border(hairline, t.warningBorder).TextColor(fg)
+	} else {
+		bg := t.background
+		if pressed {
+			bg = t.hover.Mix(t.foreground, 0.05)
+			icoCol = t.attention
+		} else if hover {
+			bg = t.hover
+			icoCol = t.attention
+		}
+		b.Background(bg).Border(strokeWidth, t.input).TextColor(fg)
+	}
+
+	b.Children(func() {
+		ui.Icon(c, ico).Size(iconSm, iconSm).Shrink(0).TextColor(icoCol)
+		ui.Text(c, lbl).FontSize(t.text.xs).FontWeight(500).TextColor(fg).SingleLine()
+	})
+	return b.Clicked()
+}
+
+// kitFavoriteStarIconButton 绘制表格或列表行内的紧凑星标收藏切换按钮。
+func kitFavoriteStarIconButton(c *ui.Context, key any, tip string, favorited bool) bool {
+	t := themeOf(c)
+	b := ui.ButtonBase(c.Key(key)).Label(tip).Size(28, 28).Radius(t.radius.md).
+		Center().Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+
+	hover := b.Hovered()
+	pressed := hover && b.Pressed()
+	ico := icoStar
+	fg := t.muted
+	if favorited {
+		ico = icoStarFill
+		fg = t.attention
+		if pressed {
+			b.Background(t.warningBg.Mix(t.attention, 0.18))
+		} else if hover {
+			b.Background(t.warningBg)
+		}
+	} else {
+		if pressed {
+			b.Background(t.tint(2))
+			fg = t.attention
+		} else if hover {
+			b.Background(t.tint(1))
+			fg = t.foreground
+		}
+	}
+
+	if tip != "" {
+		kitTooltip(c, b, tip)
+	}
+	b.Children(func() {
+		ui.Icon(c, ico).Size(iconMd, iconMd).TextColor(fg)
+	})
+	return b.Clicked()
+}
+
 func kitTooltip(c *ui.Context, anchor ui.Element, text string) {
 	t := themeOf(c)
 	ui.TooltipBase(c, anchor, func(tip ui.Element) {
@@ -1274,6 +1360,16 @@ var (
 	icoChangelog = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><polyline points="14 3 14 8 19 8"/><circle cx="9.2" cy="12.5" r="0.8" fill="currentColor"/><line x1="12" y1="12.5" x2="15.5" y2="12.5"/><circle cx="9.2" cy="16.5" r="0.8" fill="currentColor"/><line x1="12" y1="16.5" x2="15.5" y2="16.5"/></svg>`))
 
 	icoChangelogFill = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd"><path d="M14.2 2.5H7A2.5 2.5 0 0 0 4.5 5v14A2.5 2.5 0 0 0 7 21.5h10a2.5 2.5 0 0 0 2.5-2.5V7.8a1 1 0 0 0-.29-.7l-4.3-4.3a1 1 0 0 0-.71-.3Zm-.45 2.06L17.44 8.25H14.5a.75.75 0 0 1-.75-.75V4.56ZM9.2 11.65a.85.85 0 1 0 0 1.7.85.85 0 0 0 0-1.7Zm2.8.1a.75.75 0 0 0 0 1.5h3.5a.75.75 0 0 0 0-1.5H12Zm-2.8 3.9a.85.85 0 1 0 0 1.7.85.85 0 0 0 0-1.7Zm2.8.1a.75.75 0 0 0 0 1.5h3.5a.75.75 0 0 0 0-1.5H12Z"/></svg>`))
+
+	icoClock = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7.5 12 12 15.2 14"/></svg>`))
+
+	icoClockFill = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd"><path d="M12 2.25a9.75 9.75 0 1 0 0 19.5 9.75 9.75 0 0 0 0-19.5ZM12.75 7.5a.75.75 0 0 0-1.5 0V12c0 .25.13.48.34.62l3.2 2a.75.75 0 1 0 .8-1.27L12.75 11.58V7.5Z"/></svg>`))
+
+	icoStar = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 3.2 14.68 8.63 20.68 9.5 16.34 13.73 17.36 19.71 12 16.9 6.64 19.71 7.66 13.73 3.32 9.5 9.32 8.63 12 3.2"/></svg>`))
+
+	icoStarFill = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M11.1 2.74a1 1 0 0 1 1.8 0l2.38 4.82a1 1 0 0 0 .75.55l5.32.77a1 1 0 0 1 .55 1.7l-3.85 3.76a1 1 0 0 0-.29.88l.91 5.3a1 1 0 0 1-1.45 1.05l-4.76-2.5a1 1 0 0 0-.92 0l-4.76 2.5a1 1 0 0 1-1.45-1.05l.91-5.3a1 1 0 0 0-.29-.88L2.1 10.58a1 1 0 0 1 .55-1.7l5.32-.77a1 1 0 0 0 .75-.55l2.38-4.82Z"/></svg>`))
+
+	icoExternalLink = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M10 14 20 4"/><path d="M19 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/></svg>`))
 
 	icoGlobe = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3c2.5 2.6 4 5.7 4 9s-1.5 6.4-4 9c-2.5-2.6-4-5.7-4-9s1.5-6.4 4-9Z"/><line x1="3.6" y1="9" x2="20.4" y2="9"/><line x1="3.6" y1="15" x2="20.4" y2="15"/></svg>`))
 )

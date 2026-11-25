@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/InfSein/xiv-data-viewer/internal/config"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/egoist/mygo/ui"
 )
@@ -20,11 +21,12 @@ func (a *App) achFilterLabels() []string {
 
 const (
 	achColIDW     float32 = 50
-	achColNameW   float32 = 228
-	achColCatW    float32 = 112
+	achColNameW   float32 = 208
+	achColCatW    float32 = 104
 	achColPointsW float32 = 64
 	achColCondMin float32 = 88
-	achColRewardW float32 = 164
+	achColRewardW float32 = 148
+	achColFavW    float32 = 34
 )
 
 func (a *App) hasAchievementFilter() bool {
@@ -232,15 +234,7 @@ func (a *App) renderAchievementsView(c *ui.Context) {
 		})
 
 		// 2. 表头（紧凑列宽以兼容最小 1024px 窗口，避免挤占达成条件列）
-		ui.Row(c).FillWidth().Padding(8, 16).Background(t.card).
-			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Gap(10).Children(func() {
-			ui.Text(c, a.t("achievements.col_id")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColIDW).Shrink(0).TextAlign(ui.End)
-			ui.Text(c, a.t("achievements.col_name")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColNameW).Shrink(0)
-			ui.Text(c, a.t("achievements.col_category")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColCatW).Shrink(0)
-			ui.Text(c, a.t("achievements.col_points")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColPointsW).Shrink(0).TextAlign(ui.Center)
-			ui.Text(c, a.t("achievements.col_condition")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(achColCondMin)
-			ui.Text(c, a.t("achievements.col_reward")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColRewardW).Shrink(0)
-		})
+		a.renderAchievementTableHeader(c)
 
 		// 3. 成就列表行
 		if len(a.achRes.Items) == 0 {
@@ -250,54 +244,7 @@ func (a *App) renderAchievementsView(c *ui.Context) {
 				}
 			})
 		} else {
-			ui.Scroll(c.Key("ach-table-scroll")).TrackScroll(&a.achScroll).Grow(1).Shrink(1).Children(func() {
-				// 允许用户在表格数据区内自由框选与复制文字（不影响奖励道具按钮点击）
-				ui.Column(c).FillWidth().Selectable().Children(func() {
-					for i, ach := range a.achRes.Items {
-						if i > 0 {
-							kitSeparator(c, false).Margin(0, 16)
-						}
-						row := ui.Row(c.Key(fmt.Sprintf("ach-row-%d", ach.ID))).FillWidth().Padding(10, 16).Gap(10).
-							AlignItems(ui.Center).Transition(colorTransition(motionFast))
-						if row.Hovered() {
-							row.Background(t.tint(0.85))
-						}
-						row.Children(func() {
-							numTextf(c, "#%d", ach.ID).FontSize(t.text.micro).TextColor(t.muted).Width(achColIDW).Shrink(0).TextAlign(ui.End).SingleLine()
-
-							ui.Row(c).Width(achColNameW).Shrink(0).Gap(8).AlignItems(ui.Center).Children(func() {
-								a.drawGameIcon(c, ach.IconID, false, 28, t.radius.md)
-								ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
-									ui.Text(c, ach.NameCn).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground).SingleLine()
-									for _, sec := range a.secondaryDataLines(ach.NameCn, ach.NameJa, ach.NameEn) {
-										ui.Text(c, sec.text).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
-									}
-								})
-							})
-
-							// 分类：清爽双行纯文本，不再每行贴灰色药丸
-							ui.Column(c).Width(achColCatW).Shrink(0).Gap(1).Children(func() {
-								ui.Text(c, ach.KindName).FontSize(t.text.xs).TextColor(t.subdued).SingleLine()
-								ui.Text(c, ach.CategoryName).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
-							})
-
-							numTextf(c, "%d", ach.Points).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground).Width(achColPointsW).Shrink(0).TextAlign(ui.Center).SingleLine()
-
-							desc := ach.DescriptionCn
-							if desc == "" {
-								desc = "–"
-							}
-							ui.Text(c, desc).FontSize(t.text.xs).TextColor(t.subdued).Grow(1).Shrink(1).MinWidth(achColCondMin)
-
-							a.renderAchievementRewardCell(c, ach)
-						})
-						if ach.ID == a.scrollAchToID {
-							row.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollCenter})
-							a.scrollAchToID = 0
-						}
-					}
-				})
-			})
+			a.renderAchievementTableRows(c, "ach", a.achRes.Items, &a.achScroll, &a.scrollAchToID)
 		}
 
 		// 4. 分页底栏
@@ -312,5 +259,90 @@ func (a *App) renderAchievementsView(c *ui.Context) {
 				a.refreshAchievements()
 			},
 		)
+	})
+}
+
+func (a *App) renderAchievementTableHeader(c *ui.Context) {
+	t := themeOf(c)
+	ui.Row(c).FillWidth().Padding(8, 16).Background(t.card).
+		BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Gap(10).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, a.t("achievements.col_id")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColIDW).Shrink(0).TextAlign(ui.End)
+		ui.Text(c, a.t("achievements.col_name")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColNameW).Shrink(0)
+		ui.Text(c, a.t("achievements.col_category")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColCatW).Shrink(0)
+		ui.Text(c, a.t("achievements.col_points")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColPointsW).Shrink(0).TextAlign(ui.Center)
+		ui.Text(c, a.t("achievements.col_condition")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(achColCondMin)
+		ui.Text(c, a.t("achievements.col_reward")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColRewardW).Shrink(0)
+		ui.Box(c).Width(achColFavW).Shrink(0).Center().Children(func() {
+			ui.Icon(c, icoStar).Size(iconSm, iconSm).TextColor(t.muted)
+		})
+	})
+}
+
+func (a *App) renderAchievementTableRows(
+	c *ui.Context,
+	keyPrefix string,
+	items []gamedata.AchievementEntry,
+	scroll *ui.ScrollState,
+	scrollToID *int,
+) {
+	t := themeOf(c)
+	ui.Scroll(c.Key(keyPrefix + "-table-scroll")).TrackScroll(scroll).Grow(1).Shrink(1).Children(func() {
+		// 允许用户在表格数据区内自由框选与复制文字（不影响奖励道具与收藏按钮点击）
+		ui.Column(c).FillWidth().Selectable().Children(func() {
+			for i, ach := range items {
+				if i > 0 {
+					kitSeparator(c, false).Margin(0, 16)
+				}
+				row := ui.Row(c.Key(fmt.Sprintf("%s-row-%d", keyPrefix, ach.ID))).FillWidth().Padding(10, 16).Gap(10).
+					AlignItems(ui.Center).Transition(colorTransition(motionFast))
+				if row.Hovered() {
+					row.Background(t.tint(0.85))
+				}
+				row.Children(func() {
+					numTextf(c, "#%d", ach.ID).FontSize(t.text.micro).TextColor(t.muted).Width(achColIDW).Shrink(0).TextAlign(ui.End).SingleLine()
+
+					ui.Row(c).Width(achColNameW).Shrink(0).Gap(8).AlignItems(ui.Center).Children(func() {
+						a.drawGameIcon(c, ach.IconID, false, 28, t.radius.md)
+						ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
+							ui.Text(c, ach.NameCn).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground).SingleLine()
+							for _, sec := range a.secondaryDataLines(ach.NameCn, ach.NameJa, ach.NameEn) {
+								ui.Text(c, sec.text).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+							}
+						})
+					})
+
+					// 分类：清爽双行纯文本，不再每行贴灰色药丸
+					ui.Column(c).Width(achColCatW).Shrink(0).Gap(1).Children(func() {
+						ui.Text(c, ach.KindName).FontSize(t.text.xs).TextColor(t.subdued).SingleLine()
+						ui.Text(c, ach.CategoryName).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+					})
+
+					numTextf(c, "%d", ach.Points).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground).Width(achColPointsW).Shrink(0).TextAlign(ui.Center).SingleLine()
+
+					desc := ach.DescriptionCn
+					if desc == "" {
+						desc = "–"
+					}
+					ui.Text(c, desc).FontSize(t.text.xs).TextColor(t.subdued).Grow(1).Shrink(1).MinWidth(achColCondMin)
+
+					a.renderAchievementRewardCell(c, ach)
+
+					ui.Box(c).Width(achColFavW).Shrink(0).Center().Children(func() {
+						fav := a.isFavorite(config.RecordKindAchievement, ach.ID)
+						tip := a.tf("favorites.add_tip", "name", ach.NameCn)
+						if fav {
+							tip = a.tf("favorites.remove_tip", "name", ach.NameCn)
+						}
+						if kitFavoriteStarIconButton(c, fmt.Sprintf("%s-fav-%d", keyPrefix, ach.ID), tip, fav) {
+							a.toggleFavorite(config.RecordKindAchievement, ach.ID)
+						}
+					})
+				})
+				if scrollToID != nil && ach.ID == *scrollToID {
+					row.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollCenter})
+					*scrollToID = 0
+				}
+			}
+		})
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,15 +55,16 @@ const (
 	tabQuests
 	tabLeves
 	tabAchievements
+	tabRecent
+	tabFavorites
 	tabDiff
 	tabChangelog
 	tabSettings
 )
 
-type historyEntry struct {
-	id     int
-	nameCn string
-	iconID int
+type recordKey struct {
+	kind config.RecordKind
+	id   int
 }
 
 // MapMarkerData 描述地图预览弹窗所需的区域、坐标与贴图路径。
@@ -130,6 +132,15 @@ type App struct {
 	saveRunning bool
 	saveDone    chan struct{}
 
+	// 最近浏览（上限 500 条）与收藏名单及异步落盘队列
+	records        config.UserRecords
+	favSet         map[recordKey]bool
+	saveRecMu      sync.Mutex
+	saveRecNext    config.UserRecords
+	saveRecPending bool
+	saveRecRunning bool
+	saveRecDone    chan struct{}
+
 	// 配置与引导/设置表单草稿
 	cfg              config.AppConfig
 	lang             i18n.Lang
@@ -179,7 +190,6 @@ type App struct {
 	activeRecipeIdx    int
 	copiedItemID       int
 	copiedUntil        time.Time
-	history            []historyEntry
 	detailScroll       ui.ScrollState
 	itemListScroll     ui.ScrollState
 	scrollItemListToID int
@@ -215,6 +225,65 @@ type App struct {
 	achRes        gamedata.AchievementSearchResponse
 	achScroll     ui.ScrollState
 	scrollAchToID int
+
+	// 「最近」视图状态
+	recentFilter            string // all|item|quest|leve
+	recentQueryQ            string
+	recentPage              int
+	recentPageStr           string
+	recentListScroll        ui.ScrollState
+	recentSelectedKind      config.RecordKind
+	recentSelectedID        int
+	recentItemDetail        *gamedata.ItemDetail
+	recentItemRecipeIdx     int
+	recentItemScroll        ui.ScrollState
+	recentQuest             *gamedata.QuestEntry
+	recentQuestText         *gamedata.QuestTextData
+	recentQuestTextLoading  bool
+	recentQuestTextSeq      uint64
+	recentQuestSummaryOpen  bool
+	recentQuestDialogueOpen bool
+	recentQuestScroll       ui.ScrollState
+	recentLeve              *gamedata.LeveEntry
+	recentLeveScroll        ui.ScrollState
+
+	// 「收藏」视图状态
+	favTab               string // item|quest|leve|achievement
+	favItemQ             string
+	favItemSort          string // added|id_asc|id_desc|ilvl_desc
+	favItemPage          int
+	favItemPageStr       string
+	favItemScroll        ui.ScrollState
+	favSelectedItemID    int
+	favItemDetail        *gamedata.ItemDetail
+	favItemRecipeIdx     int
+	favItemDetailScroll  ui.ScrollState
+	favQuestQ            string
+	favQuestFilter       string // all|msq|feature|repeatable|with_item
+	favQuestPage         int
+	favQuestPageStr      string
+	favQuestScroll       ui.ScrollState
+	favSelectedQuestID   int
+	favQuest             *gamedata.QuestEntry
+	favQuestText         *gamedata.QuestTextData
+	favQuestTextLoading  bool
+	favQuestTextSeq      uint64
+	favQuestSummaryOpen  bool
+	favQuestDialogueOpen bool
+	favQuestDetailScroll ui.ScrollState
+	favLeveQ             string
+	favLeveKind          string // all|craft|gathering|battle|company
+	favLevePage          int
+	favLevePageStr       string
+	favLeveScroll        ui.ScrollState
+	favSelectedLeveID    int
+	favLeve              *gamedata.LeveEntry
+	favLeveDetailScroll  ui.ScrollState
+	favAchQ              string
+	favAchFilter         string // all|with_title|with_item
+	favAchPage           int
+	favAchPageStr        string
+	favAchScroll         ui.ScrollState
 
 	// 版本 Diff 视图状态
 	diffFromVer string
@@ -286,6 +355,7 @@ const (
 func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 	ensureDefaultFonts()
 	cfg, _ := config.LoadAppConfig(dataDir)
+	records, _ := config.LoadUserRecords(dataDir)
 	initLang := i18n.LangZH
 	if cfg.Language != "" {
 		initLang = i18n.NormalizeLang(cfg.Language)
@@ -299,6 +369,7 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 		sidebarW:        sidebarDefWidth,
 		listW:           itemListDefWidth,
 		cfg:             cfg,
+		records:         records,
 		lang:            initLang,
 		setupMode:       inferSetupMode(cfg.CNPath, cfg.GlobalPath, initLang),
 		draftCNPath:     cfg.CNPath,
@@ -333,6 +404,22 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 			PageSize: 30,
 		},
 		achPageStr:         "1",
+		recentFilter:       "all",
+		recentPage:         1,
+		recentPageStr:      "1",
+		favTab:             "item",
+		favItemSort:        "added",
+		favItemPage:        1,
+		favItemPageStr:     "1",
+		favQuestFilter:     "all",
+		favQuestPage:       1,
+		favQuestPageStr:    "1",
+		favLeveKind:        "all",
+		favLevePage:        1,
+		favLevePageStr:     "1",
+		favAchFilter:       "all",
+		favAchPage:         1,
+		favAchPageStr:      "1",
 		diffFilter:         "all",
 		diffEntity:         "all",
 		diffPage:           1,
@@ -353,6 +440,7 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 			CurrentVersion: appVersion,
 		}),
 	}
+	a.rebuildFavIndex()
 
 	// 判断是否已有有效配置：首次启动或路径无效时停留在路径引导页
 	if resolved, err := config.ValidateAndResolve(cfg); err != nil {
@@ -452,6 +540,104 @@ func (a *App) flushConfigSave() {
 	a.saveMu.Unlock()
 	if running && done != nil {
 		<-done
+	}
+}
+
+func (a *App) rebuildFavIndex() {
+	m := make(map[recordKey]bool, len(a.records.Favorites))
+	for _, r := range a.records.Favorites {
+		m[recordKey{kind: r.Kind, id: r.ID}] = true
+	}
+	a.favSet = m
+}
+
+func (a *App) saveRecordsAsync() {
+	recCopy := config.UserRecords{
+		Recent:    slices.Clone(a.records.Recent),
+		Favorites: slices.Clone(a.records.Favorites),
+	}
+	if a.win == nil {
+		_ = config.SaveUserRecords(a.dataDir, recCopy)
+		return
+	}
+	a.saveRecMu.Lock()
+	a.saveRecNext = recCopy
+	a.saveRecPending = true
+	if !a.saveRecRunning {
+		a.saveRecRunning = true
+		done := make(chan struct{})
+		a.saveRecDone = done
+		go func() {
+			defer close(done)
+			for {
+				a.saveRecMu.Lock()
+				if !a.saveRecPending {
+					a.saveRecRunning = false
+					a.saveRecMu.Unlock()
+					return
+				}
+				r := a.saveRecNext
+				a.saveRecPending = false
+				a.saveRecMu.Unlock()
+				_ = config.SaveUserRecords(a.dataDir, r)
+			}
+		}()
+	}
+	a.saveRecMu.Unlock()
+}
+
+func (a *App) flushRecordsSave() {
+	a.saveRecMu.Lock()
+	done := a.saveRecDone
+	running := a.saveRecRunning
+	a.saveRecMu.Unlock()
+	if running && done != nil {
+		<-done
+	}
+}
+
+func (a *App) isFavorite(kind config.RecordKind, id int) bool {
+	if id <= 0 || a.favSet == nil {
+		return false
+	}
+	return a.favSet[recordKey{kind: kind, id: id}]
+}
+
+func (a *App) toggleFavorite(kind config.RecordKind, id int) bool {
+	fav, changed := a.records.ToggleFavorite(kind, id, time.Now())
+	if !changed {
+		return fav
+	}
+	a.rebuildFavIndex()
+	a.saveRecordsAsync()
+	if !fav {
+		a.syncFavoritesSelectionAfterRemoval(kind, id)
+	}
+	return fav
+}
+
+func (a *App) recordRecent(kind config.RecordKind, id int) {
+	if a.records.RecordRecent(kind, id, time.Now()) {
+		if a.tab != tabRecent {
+			a.recentSelectedKind = ""
+			a.recentSelectedID = 0
+		}
+		a.saveRecordsAsync()
+	}
+}
+
+func (a *App) clearRecent() {
+	if a.records.ClearRecent() {
+		a.recentSelectedKind = ""
+		a.recentSelectedID = 0
+		a.recentItemDetail = nil
+		a.recentQuest = nil
+		a.recentQuestText = nil
+		a.recentQuestTextLoading = false
+		a.recentLeve = nil
+		a.recentPage = 1
+		a.recentPageStr = "1"
+		a.saveRecordsAsync()
 	}
 }
 
@@ -604,6 +790,7 @@ func (a *App) Close() {
 		a.updateCancel = nil
 	}
 	a.flushConfigSave()
+	a.flushRecordsSave()
 	a.resetLangCacheAndReaders()
 }
 
@@ -648,11 +835,16 @@ func (a *App) switchTabSideEffects(next activeTab) {
 	a.statusPopoverOpen = false
 	a.globalSearchOpen = false
 	a.focusPageSearch = false
-	if next == tabSettings {
+	switch next {
+	case tabSettings:
 		a.draftCNPath = a.cfg.CNPath
 		a.draftGlobalPath = a.cfg.GlobalPath
 		a.draftError = ""
 		a.draftNotice = ""
+	case tabRecent:
+		a.ensureRecentSelection()
+	case tabFavorites:
+		a.ensureFavoriteSelection()
 	}
 }
 
@@ -925,9 +1117,9 @@ func (a *App) activateLangState(state *langSessionCache, preserveSelection bool)
 	a.refreshItemList()
 	a.refreshQuests()
 	if preserveSelection && prevQuestID > 0 && a.service.GetQuestDetail(prevQuestID) != nil {
-		a.jumpToQuest(prevQuestID)
+		a.jumpToQuestInternal(prevQuestID, false)
 	} else if len(a.questRes.Items) > 0 {
-		a.selectQuest(a.questRes.Items[0].ID)
+		a.selectQuestInternal(a.questRes.Items[0].ID, false)
 	} else {
 		a.selectedQuestID = 0
 		a.selectedQuest = nil
@@ -935,9 +1127,9 @@ func (a *App) activateLangState(state *langSessionCache, preserveSelection bool)
 
 	a.refreshLeves()
 	if preserveSelection && prevLeveID > 0 && a.service.GetLeveDetail(prevLeveID) != nil {
-		a.jumpToLeve(prevLeveID)
+		a.jumpToLeveInternal(prevLeveID, false)
 	} else if len(a.leveRes.Items) > 0 {
-		a.selectLeve(a.leveRes.Items[0].ID)
+		a.selectLeveInternal(a.leveRes.Items[0].ID, false)
 	} else {
 		a.selectedLeveID = 0
 		a.selectedLeve = nil
@@ -945,16 +1137,18 @@ func (a *App) activateLangState(state *langSessionCache, preserveSelection bool)
 	a.refreshAchievements()
 
 	if preserveSelection && prevItemID > 0 && a.service.GetItemDetail(prevItemID) != nil {
-		a.jumpToItem(prevItemID)
+		a.jumpToItemInternal(prevItemID, false)
 		a.detailScroll.Y = prevDetailScroll
 	} else if a.service.GetItemDetail(44099) != nil {
-		a.selectItem(44099)
+		a.selectItemInternal(44099, false)
 	} else if len(a.itemRes.Items) > 0 {
-		a.selectItem(a.itemRes.Items[0].ID)
+		a.selectItemInternal(a.itemRes.Items[0].ID, false)
 	} else {
 		a.selectedItemID = 0
 		a.selectedDetail = nil
 	}
+
+	a.refreshRecentAndFavoriteDetails()
 
 	a.diffToVer = vst.CurrentVersion
 	a.diffFromVer = vst.PreviousVersion
@@ -1166,6 +1360,10 @@ func (a *App) refreshItemList() {
 }
 
 func (a *App) selectItem(itemID int) {
+	a.selectItemInternal(itemID, true)
+}
+
+func (a *App) selectItemInternal(itemID int, record bool) {
 	if a.service == nil || itemID <= 0 {
 		return
 	}
@@ -1178,15 +1376,9 @@ func (a *App) selectItem(itemID int) {
 	a.activeRecipeIdx = 0
 	a.detailScroll.Y = 0
 
-	// 更新最近浏览足迹（最多保留 10 条）
-	next := make([]historyEntry, 0, 10)
-	next = append(next, historyEntry{id: detail.ID, nameCn: detail.NameCn, iconID: detail.IconID})
-	for _, h := range a.history {
-		if h.id != detail.ID && len(next) < 10 {
-			next = append(next, h)
-		}
+	if record {
+		a.recordRecent(config.RecordKindItem, itemID)
 	}
-	a.history = next
 }
 
 func (a *App) locateItemInList(itemID int) {
@@ -1227,10 +1419,14 @@ func (a *App) locateItemInList(itemID int) {
 }
 
 func (a *App) jumpToItem(itemID int) {
+	a.jumpToItemInternal(itemID, true)
+}
+
+func (a *App) jumpToItemInternal(itemID int, record bool) {
 	if a.service == nil || itemID <= 0 {
 		return
 	}
-	a.selectItem(itemID)
+	a.selectItemInternal(itemID, record)
 	a.locateItemInList(itemID)
 }
 
@@ -1249,7 +1445,44 @@ func (a *App) refreshQuests() {
 	a.questListScroll.Y = 0
 }
 
+func (a *App) loadQuestTextAsync(
+	questID int,
+	seqPtr *uint64,
+	loadingPtr *bool,
+	isStillSelected func() bool,
+	onLoaded func(*gamedata.QuestTextData),
+) {
+	*seqPtr++
+	seq := *seqPtr
+	svc := a.service
+	if svc == nil || questID <= 0 {
+		*loadingPtr = false
+		onLoaded(nil)
+		return
+	}
+	if a.win == nil {
+		*loadingPtr = false
+		onLoaded(svc.GetQuestText(questID))
+		return
+	}
+	*loadingPtr = true
+	go func() {
+		txt := svc.GetQuestText(questID)
+		a.win.Update(func() {
+			if *seqPtr != seq || !isStillSelected() {
+				return
+			}
+			*loadingPtr = false
+			onLoaded(txt)
+		})
+	}()
+}
+
 func (a *App) selectQuest(questID int) {
+	a.selectQuestInternal(questID, true)
+}
+
+func (a *App) selectQuestInternal(questID int, record bool) {
 	if a.service == nil || questID <= 0 {
 		return
 	}
@@ -1265,27 +1498,17 @@ func (a *App) selectQuest(questID int) {
 	a.questDialogueOpen = false
 	a.selectedQuestText = nil
 
-	a.questTextSeq++
-	seq := a.questTextSeq
-	svc := a.service
-
-	if a.win == nil {
-		a.questTextLoading = false
-		a.selectedQuestText = svc.GetQuestText(questID)
-		return
+	if record {
+		a.recordRecent(config.RecordKindQuest, questID)
 	}
 
-	a.questTextLoading = true
-	go func() {
-		txt := svc.GetQuestText(questID)
-		a.win.Update(func() {
-			if a.questTextSeq != seq || a.selectedQuestID != questID {
-				return
-			}
-			a.questTextLoading = false
-			a.selectedQuestText = txt
-		})
-	}()
+	a.loadQuestTextAsync(
+		questID,
+		&a.questTextSeq,
+		&a.questTextLoading,
+		func() bool { return a.selectedQuestID == questID },
+		func(txt *gamedata.QuestTextData) { a.selectedQuestText = txt },
+	)
 }
 
 func (a *App) locateQuestInList(questID int) {
@@ -1319,10 +1542,14 @@ func (a *App) locateQuestInList(questID int) {
 }
 
 func (a *App) jumpToQuest(questID int) {
+	a.jumpToQuestInternal(questID, true)
+}
+
+func (a *App) jumpToQuestInternal(questID int, record bool) {
 	if a.service == nil || questID <= 0 {
 		return
 	}
-	a.selectQuest(questID)
+	a.selectQuestInternal(questID, record)
 	a.locateQuestInList(questID)
 }
 
@@ -1342,6 +1569,10 @@ func (a *App) refreshLeves() {
 }
 
 func (a *App) selectLeve(leveID int) {
+	a.selectLeveInternal(leveID, true)
+}
+
+func (a *App) selectLeveInternal(leveID int, record bool) {
 	if a.service == nil || leveID <= 0 {
 		return
 	}
@@ -1352,6 +1583,9 @@ func (a *App) selectLeve(leveID int) {
 	a.selectedLeveID = leveID
 	a.selectedLeve = detail
 	a.leveDetailScroll.Y = 0
+	if record {
+		a.recordRecent(config.RecordKindLeve, leveID)
+	}
 }
 
 func (a *App) locateLeveInList(leveID int) {
@@ -1383,10 +1617,14 @@ func (a *App) locateLeveInList(leveID int) {
 }
 
 func (a *App) jumpToLeve(leveID int) {
+	a.jumpToLeveInternal(leveID, true)
+}
+
+func (a *App) jumpToLeveInternal(leveID int, record bool) {
 	if a.service == nil || leveID <= 0 {
 		return
 	}
-	a.selectLeve(leveID)
+	a.selectLeveInternal(leveID, record)
 	a.locateLeveInList(leveID)
 }
 

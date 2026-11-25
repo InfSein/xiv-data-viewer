@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -2602,5 +2603,419 @@ func TestChangelogSidebarButtonAndStructuredView(t *testing.T) {
 	ttMin := ui.NewTester(app.View, 1024, 640)
 	if !ttMin.HasText("Changelog") || !ttMin.HasText("v2.1.0") {
 		t.Fatalf("最小视口深色模式下更新日志渲染异常: %v", ttMin.Texts())
+	}
+}
+
+func TestHistoryRecentAndFavoritesWorkflow(t *testing.T) {
+	dataDir := t.TempDir()
+	app := newZHApp(t, dataDir)
+	defer app.Close()
+
+	// 准备包含 520 个物品、2 个任务、2 个理符、2 个成就的测试仓库，覆盖 500 条上限与分页
+	itemsPrimary := make(map[int]sqpack.Row, 520)
+	itemSummaries := make([]gamedata.ItemSummary, 0, 520)
+	itemSummaryByID := make(map[int]gamedata.ItemSummary, 520)
+	for i := 1; i <= 520; i++ {
+		var name string
+		switch i {
+		case 2:
+			name = "精金矿"
+		case 3:
+			name = "星光苹果馅饼"
+		case 20:
+			name = "秘银矿"
+		default:
+			name = "测试素材-" + strconv.Itoa(i)
+		}
+		row := make(sqpack.Row, 95)
+		row[9] = name
+		row[8] = "测试描述：" + name
+		row[20] = 99
+		row[26] = 10
+		itemsPrimary[i] = row
+		sum := gamedata.ItemSummary{
+			ID:           i,
+			NameCn:       name,
+			NameJa:       "アイテム-" + strconv.Itoa(i),
+			NameEn:       "Item-" + strconv.Itoa(i),
+			CategoryName: "食材",
+			ItemLevel:    100 + i,
+		}
+		if i == 3 {
+			sum.NameJa = "アップルパイ"
+			sum.NameEn = "Apple Tart"
+			sum.CategoryName = "食品"
+		}
+		itemSummaries = append(itemSummaries, sum)
+		itemSummaryByID[i] = sum
+	}
+
+	quests := []gamedata.QuestEntry{
+		{
+			ID:            65536,
+			InternalID:    "Msq001",
+			NameCn:        "启程之日",
+			NameJa:        "旅立ちの日",
+			NameEn:        "Coming to Gridania",
+			IconID:        gamedata.QuestIconMSQ,
+			SectionID:     0,
+			SectionName:   "主线任务",
+			GenreName:     "第七星历主线",
+			ExpansionName: "重生之境",
+			Level:         15,
+			IsMSQ:         true,
+			IssuerName:    "缪恩",
+			GilReward:     600,
+			ExpReward:     2400,
+		},
+		{
+			ID:          65537,
+			InternalID:  "Sub002",
+			NameCn:      "甜品试吃会",
+			NameJa:      "試食会",
+			NameEn:      "Sweet Tasting",
+			IconID:      gamedata.QuestIconSide,
+			SectionID:   1,
+			SectionName: "支线任务",
+			GenreName:   "乌尔达哈支线",
+			Level:       20,
+			GilReward:   300,
+		},
+	}
+	questByID := map[int]gamedata.QuestEntry{
+		65536: quests[0],
+		65537: quests[1],
+	}
+
+	leves := []gamedata.LeveEntry{
+		{
+			ID:                 201,
+			NameCn:             "大量制作：甜点委托",
+			NameJa:             "大口依頼：菓子",
+			NameEn:             "Bulk Dessert",
+			LeveKind:           "craft",
+			LeveKindLabel:      "制作理符",
+			AssignmentTypeName: "大量筹备",
+			ClassJobLevel:      98,
+			TownName:           "图莱尤拉",
+			ExpReward:          850000,
+			GilReward:          2400,
+			TurnInItems: []gamedata.LeveTurnInItem{{
+				ItemID:   3,
+				ItemName: "星光苹果馅饼",
+				Count:    3,
+			}},
+		},
+		{
+			ID:                 202,
+			NameCn:             "采集委托：秘银矿",
+			NameJa:             "採集依頼：ミスリル",
+			NameEn:             "Fieldwork Mythril",
+			LeveKind:           "gathering",
+			LeveKindLabel:      "采集理符",
+			AssignmentTypeName: "筹备",
+			ClassJobLevel:      45,
+			TownName:           "沙之家",
+			ExpReward:          12000,
+		},
+	}
+	leveByID := map[int]gamedata.LeveEntry{
+		201: leves[0],
+		202: leves[1],
+	}
+
+	achs := []gamedata.AchievementEntry{
+		{
+			ID:               1001,
+			NameCn:           "胜利的荣光1",
+			NameJa:           "勝利の栄光1",
+			NameEn:           "To Crush Your Enemies I",
+			DescriptionCn:    "在副本中取得胜利",
+			Points:           10,
+			KindID:           1,
+			KindName:         "战斗",
+			CategoryID:       1,
+			CategoryName:     "整体",
+			TitleID:          10,
+			TitleMasculineCn: "沙场勇将",
+		},
+		{
+			ID:               1002,
+			NameCn:           "美食鉴赏家",
+			NameJa:           "美食家",
+			NameEn:           "Gourmet",
+			DescriptionCn:    "品尝大量料理",
+			Points:           20,
+			KindID:           2,
+			KindName:         "道具",
+			CategoryID:       2,
+			CategoryName:     "制作",
+			RewardItemID:     3,
+			RewardItemNameCn: "星光苹果馅饼",
+		},
+	}
+
+	store := &gamedata.Store{
+		PrimaryVersion:  "2026.11.01",
+		ItemsPrimary:    itemsPrimary,
+		ItemSummaries:   itemSummaries,
+		ItemSummaryByID: itemSummaryByID,
+		Quests:          quests,
+		QuestByID:       questByID,
+		Leves:           leves,
+		LeveByID:        leveByID,
+		Achievements:    achs,
+		AchievementByID: map[int]gamedata.AchievementEntry{1001: achs[0], 1002: achs[1]},
+		TotalTitles:     1,
+	}
+
+	svc := gamedata.NewService(store)
+	st := svc.GetSystemStatus()
+	langCache := &langSessionCache{
+		service: svc,
+		status:  st,
+	}
+	// 通过 activateLangState 模拟初始载入默认选中，不应污染「最近」记录
+	app.mode = modeReady
+	app.tab = tabWorkbench
+	app.activateLangState(langCache, false)
+	if len(app.records.Recent) != 0 {
+		t.Fatalf("启动默认初始化选中不应写入最近记录，实际 len=%d", len(app.records.Recent))
+	}
+
+	tt := ui.NewTester(app.View, 1366, 768)
+
+	// 1. 验证侧栏存在「历史」分组及下属「最近」「收藏」两个菜单，且位于「成就」之下、「对比」之上
+	histHdr, okHist := tt.Find("历史")
+	recentNav, okRec := tt.Find("最近")
+	favNav, okFav := tt.Find("收藏")
+	achNav, okAch := tt.Find("成就")
+	cmpHdr, okCmp := tt.Find("对比")
+	if !okHist || !okRec || !okFav || !okAch || !okCmp {
+		t.Fatalf("侧栏缺少历史菜单组或最近/收藏菜单: hist=%v rec=%v fav=%v ach=%v cmp=%v", okHist, okRec, okFav, okAch, okCmp)
+	}
+	if !(achNav.Y < histHdr.Y && histHdr.Y < recentNav.Y && recentNav.Y < favNav.Y && favNav.Y < cmpHdr.Y) {
+		t.Fatalf("侧栏「历史」菜单位置异常: ach=%+v hist=%+v rec=%+v fav=%+v cmp=%+v", achNav, histHdr, recentNav, favNav, cmpHdr)
+	}
+
+	// 2. 在物品/任务/理符/成就界面实际点击浏览与收藏按钮
+	if err := tt.Click("星光苹果馅饼"); err != nil {
+		t.Fatalf("点击物品行失败: %v", err)
+	}
+	if err := tt.Click("精金矿"); err != nil {
+		t.Fatalf("点击物品行失败: %v", err)
+	}
+	// 打开多个物品后，物品详情顶部栏不应再显示旧版「最近」快捷标签，而是常驻显示物品 ID 与基本信息
+	if !tt.HasText("物品 #2") || !tt.HasText("· 食材 · 品级 102") {
+		t.Fatalf("物品详情顶部栏应常驻显示物品 ID 与基本信息: %v", tt.Texts())
+	}
+	if r, ok := tt.Find("星光苹果馅饼"); ok && r.X >= app.sidebarW+app.listW {
+		t.Fatalf("物品详情顶部栏不应再显示旧版最近浏览按钮: rect=%+v", r)
+	}
+	if err := tt.Click("星光苹果馅饼"); err != nil {
+		t.Fatalf("点击物品行失败: %v", err)
+	}
+	if !tt.HasText("物品 #3") || !tt.HasText("· 食品 · 品级 103") {
+		t.Fatalf("物品详情顶部栏应常驻显示当前物品 #3 ID 与基本信息: %v", tt.Texts())
+	}
+	if err := tt.Click("加入收藏"); err != nil {
+		t.Fatalf("点击物品加入收藏失败: %v", err)
+	}
+	if !app.isFavorite(config.RecordKindItem, 3) || !tt.HasText("已收藏") {
+		t.Fatalf("物品 #3 收藏状态未更新")
+	}
+
+	// 切换至任务页，点击任务并收藏
+	if err := tt.Click("任务"); err != nil {
+		t.Fatalf("切换至任务页失败: %v", err)
+	}
+	if err := tt.Click("启程之日"); err != nil {
+		t.Fatalf("点击任务行失败: %v", err)
+	}
+	if err := tt.Click("加入收藏"); err != nil {
+		t.Fatalf("点击任务加入收藏失败: %v", err)
+	}
+	if !app.isFavorite(config.RecordKindQuest, 65536) {
+		t.Fatalf("任务 #65536 收藏状态未更新")
+	}
+
+	// 切换至理符页，点击理符并收藏
+	if err := tt.Click("理符"); err != nil {
+		t.Fatalf("切换至理符页失败: %v", err)
+	}
+	if err := tt.Click("大量制作：甜点委托"); err != nil {
+		t.Fatalf("点击理符行失败: %v", err)
+	}
+	if err := tt.Click("加入收藏"); err != nil {
+		t.Fatalf("点击理符加入收藏失败: %v", err)
+	}
+	if !app.isFavorite(config.RecordKindLeve, 201) {
+		t.Fatalf("理符 #201 收藏状态未更新")
+	}
+
+	// 切换至成就页，点击成就星标按钮收藏「美食鉴赏家」
+	if err := tt.Click("成就"); err != nil {
+		t.Fatalf("切换至成就页失败: %v", err)
+	}
+	if err := tt.Click("收藏 美食鉴赏家"); err != nil {
+		t.Fatalf("点击成就收藏按钮失败: %v", err)
+	}
+	if !app.isFavorite(config.RecordKindAchievement, 1002) {
+		t.Fatalf("成就 #1002 收藏状态未更新")
+	}
+
+	// 3. 验证「最近」界面：记录了刚刚打开过的物品/任务/理符，点击切换详情，且支持类型筛选与 Ctrl+F 搜索
+	if err := tt.Click("最近"); err != nil {
+		t.Fatalf("切换至最近页面失败: %v", err)
+	}
+	if app.tab != tabRecent {
+		t.Fatalf("期望位于 tabRecent，实际: %v", app.tab)
+	}
+	if len(app.records.Recent) != 4 {
+		t.Fatalf("期望最近记录 4 条（去重后的物品/任务/理符），实际: %d (%+v)", len(app.records.Recent), app.records.Recent)
+	}
+	// 默认选中最新打开的理符 #201
+	if app.recentSelectedKind != config.RecordKindLeve || app.recentSelectedID != 201 || !tt.HasText("随机奖励道具池") && !tt.HasText("需要交纳道具") {
+		t.Fatalf("最近页面应默认展示最新打开的理符详情: kind=%s id=%d", app.recentSelectedKind, app.recentSelectedID)
+	}
+	// 点击列表中的「启程之日」，右侧应展示任务详情且不打乱最近列表顺序
+	if err := tt.Click("启程之日"); err != nil {
+		t.Fatalf("在最近页面点击任务失败: %v", err)
+	}
+	if app.recentSelectedKind != config.RecordKindQuest || app.recentSelectedID != 65536 || !tt.HasText("缪恩") {
+		t.Fatalf("最近页面切换查看任务详情失败: kind=%s id=%d", app.recentSelectedKind, app.recentSelectedID)
+	}
+	if app.records.Recent[0].Kind != config.RecordKindLeve || app.records.Recent[0].ID != 201 {
+		t.Fatalf("在最近页面内点选条目不应重排最近列表顺序: %+v", app.records.Recent)
+	}
+	// 点击在任务页打开按钮
+	if err := tt.Click("在任务页打开"); err != nil {
+		t.Fatalf("点击在任务页打开按钮失败: %v", err)
+	}
+	if app.tab != tabQuests || app.selectedQuestID != 65536 {
+		t.Fatalf("点击在任务页打开未跳转到任务页: tab=%v qid=%d", app.tab, app.selectedQuestID)
+	}
+
+	// 4. 验证「最近」500 条上限与页内筛选/搜索/清空
+	for i := 1; i <= 515; i++ {
+		app.selectItem(i)
+	}
+	if len(app.records.Recent) != config.MaxRecentRecords {
+		t.Fatalf("最近记录上限应严格为 %d，实际: %d", config.MaxRecentRecords, len(app.records.Recent))
+	}
+	if err := tt.Click("最近"); err != nil {
+		t.Fatalf("回到最近页面失败: %v", err)
+	}
+	if !tt.HasText("500 / 500") {
+		t.Fatalf("最近页面应显示 500 / 500 数量上限状态: %v", tt.Texts())
+	}
+	// 验证超出 500 条上限时最早的记录（如 #3）已被淘汰，而 #20（秘银矿）仍在列表中
+	if slices.ContainsFunc(app.records.Recent, func(r config.HistoryRecord) bool {
+		return r.Kind == config.RecordKindItem && r.ID == 3
+	}) {
+		t.Fatalf("超出 500 条上限后最早的物品 #3 应被淘汰")
+	}
+	tt.Key(ui.Cmd, ui.KeyF)
+	if !tt.Focused("搜索最近记录") {
+		t.Fatalf("Ctrl+F 未聚焦最近页内搜索框")
+	}
+	tt.Type("秘银矿")
+	if !tt.HasText("秘银矿") {
+		t.Fatalf("最近页面搜索过滤异常，未找到保留的 #20 秘银矿: %v", tt.Texts())
+	}
+	if r, ok := tt.Find("测试素材-515"); ok && r.X < app.sidebarW+app.listW {
+		t.Fatalf("最近页面左侧列表过滤后不应仍显示被过滤条目测试素材-515: rect=%+v", r)
+	}
+	if err := tt.Click("重置"); err != nil {
+		t.Fatalf("重置最近页面搜索失败: %v", err)
+	}
+	if err := tt.Click("清空"); err != nil {
+		t.Fatalf("点击清空最近记录失败: %v", err)
+	}
+	if len(app.records.Recent) != 0 || !tt.HasText("暂无最近浏览记录") {
+		t.Fatalf("清空最近记录后应展示空状态: len=%d texts=%v", len(app.records.Recent), tt.Texts())
+	}
+
+	// 5. 验证「收藏」界面内的 4 个 tab（物品/任务/理符/成就）与对应详情/表格视图
+	if err := tt.Click("收藏"); err != nil {
+		t.Fatalf("切换至收藏页面失败: %v", err)
+	}
+	if app.tab != tabFavorites {
+		t.Fatalf("期望位于 tabFavorites，实际: %v", app.tab)
+	}
+	for _, wantTab := range []string{"收藏物品", "收藏任务", "收藏理符", "收藏成就"} {
+		if _, ok := tt.Find(wantTab); !ok {
+			t.Fatalf("收藏页面缺少 tab %q: %v", wantTab, tt.Texts())
+		}
+	}
+	if app.favTab != "item" || !tt.HasText("星光苹果馅饼") || !tt.HasText("测试描述：星光苹果馅饼") {
+		t.Fatalf("收藏物品 tab 未展示与物品页一致的列表与详情: favTab=%q texts=%v", app.favTab, tt.Texts())
+	}
+
+	if err := tt.Click("收藏任务"); err != nil {
+		t.Fatalf("点击收藏任务 tab 失败: %v", err)
+	}
+	if app.favTab != "quest" || !tt.HasText("启程之日") || !tt.HasText("第七星历主线") {
+		t.Fatalf("收藏任务 tab 未展示任务详情: favTab=%q texts=%v", app.favTab, tt.Texts())
+	}
+
+	if err := tt.Click("收藏理符"); err != nil {
+		t.Fatalf("点击收藏理符 tab 失败: %v", err)
+	}
+	if app.favTab != "leve" || !tt.HasText("大量制作：甜点委托") || !tt.HasText("需要交纳道具") {
+		t.Fatalf("收藏理符 tab 未展示理符详情: favTab=%q texts=%v", app.favTab, tt.Texts())
+	}
+
+	if err := tt.Click("收藏成就"); err != nil {
+		t.Fatalf("点击收藏成就 tab 失败: %v", err)
+	}
+	if app.favTab != "achievement" || !tt.HasText("奖励称号 / 道具") || !tt.HasText("美食鉴赏家") || tt.HasText("胜利的荣光1") {
+		t.Fatalf("收藏成就 tab 未展示与成就页一致的表格视图: favTab=%q texts=%v", app.favTab, tt.Texts())
+	}
+
+	// 验证取消收藏后立即更新收藏列表
+	if err := tt.Click("取消收藏 美食鉴赏家"); err != nil {
+		t.Fatalf("在收藏成就页面取消收藏失败: %v", err)
+	}
+	if app.isFavorite(config.RecordKindAchievement, 1002) || !tt.HasText("还没有收藏的成就") {
+		t.Fatalf("取消唯一收藏成就后应显示空状态: fav=%v texts=%v", app.isFavorite(config.RecordKindAchievement, 1002), tt.Texts())
+	}
+
+	// 6. 验证多语言与最小视口 1024×640 深色模式渲染正常
+	app.SetLanguage(i18n.LangEN)
+	tt.Frame()
+	if !tt.HasText("Favorites") || !tt.HasText("History") {
+		t.Fatalf("英语模式下历史/收藏菜单文案未切换: %v", tt.Texts())
+	}
+	app.SetLanguage(i18n.LangJA)
+	tt.Frame()
+	if !tt.HasText("お気に入り") || !tt.HasText("履歴") {
+		t.Fatalf("日语模式下历史/收藏菜单文案未切换: %v", tt.Texts())
+	}
+
+	app.SetLanguage(i18n.LangZH)
+	app.favTab = "item"
+	app.SetThemeMode("dark")
+	ttMin := ui.NewTester(app.View, 1024, 640)
+	if !ttMin.HasText("收藏") || !ttMin.HasText("星光苹果馅饼") {
+		t.Fatalf("1024x640 深色模式下收藏页面渲染异常: %v", ttMin.Texts())
+	}
+	app.tab = tabRecent
+	ttMin.Frame()
+	if !ttMin.HasText("最近") {
+		t.Fatalf("1024x640 深色模式下最近页面渲染异常: %v", ttMin.Texts())
+	}
+
+	// 7. 验证重启应用后从本地 history.json 恢复收藏名单
+	app2 := newZHApp(t, dataDir)
+	defer app2.Close()
+	if !app2.isFavorite(config.RecordKindItem, 3) ||
+		!app2.isFavorite(config.RecordKindQuest, 65536) ||
+		!app2.isFavorite(config.RecordKindLeve, 201) ||
+		app2.isFavorite(config.RecordKindAchievement, 1002) {
+		t.Fatalf("重启后持久化收藏状态恢复不一致: %+v", app2.records.Favorites)
+	}
+	if len(app2.records.Recent) != 0 {
+		t.Fatalf("重启后已清空的最近记录仍应为空: %+v", app2.records.Recent)
 	}
 }

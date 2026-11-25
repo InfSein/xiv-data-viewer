@@ -367,17 +367,22 @@ func (a *App) renderUpdateModal(c *ui.Context) {
 		ui.Row(c).FillWidth().Padding(16, 20, 12, 20).
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).
 			Justify(ui.SpaceBetween).AlignItems(ui.Start).Gap(12).Children(func() {
-			ui.Column(c).Gap(3).Grow(1).Shrink(1).Children(func() {
-				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, a.t("update.modal_title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground)
-					switch a.updateState {
-					case updateAvailable:
-						drawPill(c, a.t("update.available_badge"), pillAccent)
-					case updateReady:
-						drawPill(c, a.t("update.ready_badge"), pillPositive)
-					}
+			ui.Row(c).Gap(10).AlignItems(ui.Center).Grow(1).Shrink(1).Children(func() {
+				if bmp := appLogoBitmap(); bmp != nil {
+					ui.Image(c, bmp).Size(34, 34).Fit(ui.Contain).Shrink(0)
+				}
+				ui.Column(c).Gap(3).Grow(1).Shrink(1).Children(func() {
+					ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+						ui.Text(c, a.t("update.modal_title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground)
+						switch a.updateState {
+						case updateAvailable:
+							drawPill(c, a.t("update.available_badge"), pillAccent)
+						case updateReady:
+							drawPill(c, a.t("update.ready_badge"), pillPositive)
+						}
+					})
+					numText(c, a.tf("update.current_version", "version", curVer)).FontSize(t.text.xs).TextColor(t.muted)
 				})
-				numText(c, a.tf("update.current_version", "version", curVer)).FontSize(t.text.xs).TextColor(t.muted)
 			})
 			if kitIconButton(c, "upd-close-top", icoClose, a.t("common.close"), btnOpts{variant: btnGhost, size: btnSizeSm, disabled: isDownloading}) {
 				a.closeUpdateModal()
