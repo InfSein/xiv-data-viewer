@@ -2620,7 +2620,7 @@ func TestHistoryRecentAndFavoritesWorkflow(t *testing.T) {
 		switch i {
 		case 2:
 			name = "精金矿"
-		case 10:
+		case 3:
 			name = "星光苹果馅饼"
 		case 20:
 			name = "秘银矿"
@@ -2641,7 +2641,7 @@ func TestHistoryRecentAndFavoritesWorkflow(t *testing.T) {
 			CategoryName: "食材",
 			ItemLevel:    100 + i,
 		}
-		if i == 10 {
+		if i == 3 {
 			sum.NameJa = "アップルパイ"
 			sum.NameEn = "Apple Tart"
 			sum.CategoryName = "食品"
@@ -2701,7 +2701,7 @@ func TestHistoryRecentAndFavoritesWorkflow(t *testing.T) {
 			ExpReward:          850000,
 			GilReward:          2400,
 			TurnInItems: []gamedata.LeveTurnInItem{{
-				ItemID:   10,
+				ItemID:   3,
 				ItemName: "星光苹果馅饼",
 				Count:    3,
 			}},
@@ -2750,7 +2750,7 @@ func TestHistoryRecentAndFavoritesWorkflow(t *testing.T) {
 			KindName:         "道具",
 			CategoryID:       2,
 			CategoryName:     "制作",
-			RewardItemID:     10,
+			RewardItemID:     3,
 			RewardItemNameCn: "星光苹果馅饼",
 		},
 	}
@@ -2815,14 +2815,14 @@ func TestHistoryRecentAndFavoritesWorkflow(t *testing.T) {
 	if err := tt.Click("星光苹果馅饼"); err != nil {
 		t.Fatalf("点击物品行失败: %v", err)
 	}
-	if !tt.HasText("物品 #10") || !tt.HasText("· 食品 · 品级 110") {
-		t.Fatalf("物品详情顶部栏应常驻显示当前物品 #10 ID 与基本信息: %v", tt.Texts())
+	if !tt.HasText("物品 #3") || !tt.HasText("· 食品 · 品级 103") {
+		t.Fatalf("物品详情顶部栏应常驻显示当前物品 #3 ID 与基本信息: %v", tt.Texts())
 	}
 	if err := tt.Click("加入收藏"); err != nil {
 		t.Fatalf("点击物品加入收藏失败: %v", err)
 	}
-	if !app.isFavorite(config.RecordKindItem, 10) || !tt.HasText("已收藏") {
-		t.Fatalf("物品 #10 收藏状态未更新")
+	if !app.isFavorite(config.RecordKindItem, 3) || !tt.HasText("已收藏") {
+		t.Fatalf("物品 #3 收藏状态未更新")
 	}
 
 	// 切换至任务页，点击任务并收藏
@@ -2909,7 +2909,12 @@ func TestHistoryRecentAndFavoritesWorkflow(t *testing.T) {
 	if !tt.HasText("500 / 500") {
 		t.Fatalf("最近页面应显示 500 / 500 数量上限状态: %v", tt.Texts())
 	}
-	// 验证超出 500 条上限时最早的记录（如 #10）已被淘汰，而 #20（秘银矿）仍在列表中
+	// 验证超出 500 条上限时最早的记录（如 #3）已被淘汰，而 #20（秘银矿）仍在列表中
+	if slices.ContainsFunc(app.records.Recent, func(r config.HistoryRecord) bool {
+		return r.Kind == config.RecordKindItem && r.ID == 3
+	}) {
+		t.Fatalf("超出 500 条上限后最早的物品 #3 应被淘汰")
+	}
 	tt.Key(ui.Cmd, ui.KeyF)
 	if !tt.Focused("搜索最近记录") {
 		t.Fatalf("Ctrl+F 未聚焦最近页内搜索框")
@@ -3004,7 +3009,7 @@ func TestHistoryRecentAndFavoritesWorkflow(t *testing.T) {
 	// 7. 验证重启应用后从本地 history.json 恢复收藏名单
 	app2 := newZHApp(t, dataDir)
 	defer app2.Close()
-	if !app2.isFavorite(config.RecordKindItem, 10) ||
+	if !app2.isFavorite(config.RecordKindItem, 3) ||
 		!app2.isFavorite(config.RecordKindQuest, 65536) ||
 		!app2.isFavorite(config.RecordKindLeve, 201) ||
 		app2.isFavorite(config.RecordKindAchievement, 1002) {
