@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/InfSein/xiv-data-viewer/internal/config"
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -73,17 +74,18 @@ func (a *App) diagnosePathCached(raw string) pathDiagnosis {
 	if a.pathDiagCache == nil {
 		a.pathDiagCache = make(map[string]cachedPathDiag)
 	}
+	cacheKey := string(a.Language()) + "\x00" + norm
 	now := time.Now()
-	if cached, ok := a.pathDiagCache[norm]; ok && now.Sub(cached.checkedAt) < pathDiagTTL {
+	if cached, ok := a.pathDiagCache[cacheKey]; ok && now.Sub(cached.checkedAt) < pathDiagTTL {
 		return cached.diag
 	}
-	diag := diagnoseClientPath(norm)
-	a.pathDiagCache[norm] = cachedPathDiag{diag: diag, checkedAt: now}
+	diag := a.diagnoseClientPath(norm)
+	a.pathDiagCache[cacheKey] = cachedPathDiag{diag: diag, checkedAt: now}
 	return diag
 }
 
 // diagnoseClientPath 以严格只读方式校验目录，并在路径有误时生成玩家可理解的恢复建议。
-func diagnoseClientPath(rawPath string) pathDiagnosis {
+func (a *App) diagnoseClientPath(rawPath string) pathDiagnosis {
 	cleaned := normalizeUserPathInput(rawPath)
 	if cleaned == "" {
 		return pathDiagnosis{status: pathEmpty}
@@ -107,20 +109,20 @@ func diagnoseClientPath(rawPath string) pathDiagnosis {
 			return pathDiagnosis{
 				status:    pathInvalid,
 				cleanPath: cleaned,
-				detail:    "找不到这个路径，请检查是否拼写有误，或点击「选择文件夹」重新定位。",
+				detail:    a.t("setup.diag_not_found"),
 			}
 		}
 		if errors.Is(statErr, os.ErrPermission) {
 			return pathDiagnosis{
 				status:    pathInvalid,
 				cleanPath: cleaned,
-				detail:    "没有权限访问这个文件夹，请检查文件夹读取权限。",
+				detail:    a.t("setup.diag_permission"),
 			}
 		}
 		return pathDiagnosis{
 			status:    pathInvalid,
 			cleanPath: cleaned,
-			detail:    "无法读取该路径，请确认这是一个本地磁盘上的游戏文件夹。",
+			detail:    a.t("setup.diag_unreadable"),
 		}
 	}
 
@@ -132,7 +134,7 @@ func diagnoseClientPath(rawPath string) pathDiagnosis {
 				return pathDiagnosis{
 					status:         pathInvalid,
 					cleanPath:      cleaned,
-					detail:         "这里填入的是单个文件，游戏目录应选择它所在的游戏安装文件夹。",
+					detail:         a.t("setup.diag_file_found"),
 					suggestedPath:  info.RootPath,
 					suggestedLabel: filepath.Base(info.RootPath),
 				}
@@ -141,7 +143,7 @@ func diagnoseClientPath(rawPath string) pathDiagnosis {
 		return pathDiagnosis{
 			status:    pathInvalid,
 			cleanPath: cleaned,
-			detail:    "这里填入的是单个文件，请选择《最终幻想14》的安装文件夹。",
+			detail:    a.t("setup.diag_file_invalid"),
 		}
 	}
 
@@ -155,12 +157,12 @@ func diagnoseClientPath(rawPath string) pathDiagnosis {
 		if info, err := config.ValidateClientPath(cand, ""); err == nil && info != nil {
 			base := strings.ToLower(filepath.Base(cleaned))
 			parentBase := strings.ToLower(filepath.Base(parent))
-			msg := "当前选到了游戏内部子文件夹，请改为外层的游戏安装根目录。"
+			msg := a.t("setup.diag_sub_folder")
 			switch {
 			case base == "boot" || base == "sdo" || base == "rail_files":
-				msg = "当前选中的是启动器文件夹，请返回上一级选择整个游戏安装根目录。"
+				msg = a.t("setup.diag_boot_folder")
 			case base == "sqpack" || parentBase == "sqpack":
-				msg = "当前选到了较深层的资源子目录，请返回外层的游戏安装根目录。"
+				msg = a.t("setup.diag_deep_folder")
 			}
 			return pathDiagnosis{
 				status:         pathInvalid,
@@ -179,13 +181,13 @@ func diagnoseClientPath(rawPath string) pathDiagnosis {
 			return pathDiagnosis{
 				status:    pathInvalid,
 				cleanPath: cleaned,
-				detail:    "没有读取该文件夹的权限，请检查系统访问权限。",
+				detail:    a.t("setup.diag_dir_perm"),
 			}
 		}
 		return pathDiagnosis{
 			status:    pathInvalid,
 			cleanPath: cleaned,
-			detail:    "无法读取该文件夹内容，请重新选择游戏安装目录。",
+			detail:    a.t("setup.diag_dir_unreadable"),
 		}
 	}
 
@@ -203,7 +205,7 @@ func diagnoseClientPath(rawPath string) pathDiagnosis {
 			return pathDiagnosis{
 				status:         pathInvalid,
 				cleanPath:      cleaned,
-				detail:         fmt.Sprintf("当前是外层目录，里面包含游戏文件夹「%s」，点击右侧按钮可直接切换。", entry.Name()),
+				detail:         a.tf("setup.diag_parent_found", "name", entry.Name()),
 				suggestedPath:  info.RootPath,
 				suggestedLabel: entry.Name(),
 			}
@@ -213,28 +215,77 @@ func diagnoseClientPath(rawPath string) pathDiagnosis {
 	return pathDiagnosis{
 		status:    pathInvalid,
 		cleanPath: cleaned,
-		detail:    "这个文件夹里没有检测到《最终幻想14》完整游戏数据，请确认其中包含「game」文件夹。",
+		detail:    a.t("setup.diag_missing_game"),
 	}
 }
 
-func friendlyConfigError(err error, cfg config.AppConfig) string {
+func (a *App) friendlyConfigError(err error, cfg config.AppConfig) string {
 	if errors.Is(err, config.ErrNoClientConfigured) {
-		return "请先选择一个有效的游戏安装目录。"
+		return a.t("setup.err_none")
 	}
 	if cn := normalizeUserPathInput(cfg.CNPath); cn != "" {
-		if d := diagnoseClientPath(cn); d.status == pathInvalid {
-			return "国服游戏目录无效：" + d.detail
+		if d := a.diagnoseClientPath(cn); d.status == pathInvalid {
+			return a.tf("setup.err_cn", "detail", d.detail)
 		}
 	}
 	if gl := normalizeUserPathInput(cfg.GlobalPath); gl != "" {
-		if d := diagnoseClientPath(gl); d.status == pathInvalid {
-			return "国际服游戏目录无效：" + d.detail
+		if d := a.diagnoseClientPath(gl); d.status == pathInvalid {
+			return a.tf("setup.err_global", "detail", d.detail)
 		}
 	}
-	return "无法读取指定的游戏目录，请检查文件夹是否完整且可读取。"
+	return a.t("setup.err_generic")
 }
 
-// renderSetupView 渲染初次启动选目录页：单画布聚焦布局、区服模式引导、拖拽填入与非术语化纠错。
+// renderLanguageSegmentedBar 绘制 简体中文 / 日本語 / English 三语言切换分段控件。
+func (a *App) renderLanguageSegmentedBar(c *ui.Context, keyPrefix string, compact bool) {
+	t := themeOf(c)
+	curLang := a.Language()
+	h := float32(28)
+	padX := float32(10)
+	if compact {
+		h = 26
+		padX = 8
+	}
+	ui.Row(c.Key(keyPrefix + "-track")).Padding(3).Gap(3).Radius(t.radius.md).Background(t.tint(1.1)).AlignItems(ui.Center).Shrink(0).Children(func() {
+		for _, opt := range i18n.SupportedLangs {
+			active := curLang == opt.Code
+			btn := ui.ButtonBase(c.Key(keyPrefix + "-" + string(opt.Code))).Label(opt.Autonym).
+				Height(h).PaddingX(padX).Radius(t.radius.sm).
+				Justify(ui.Center).AlignItems(ui.Center).
+				Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+			if active {
+				btn.Background(t.background).Border(hairline, t.border)
+			} else if btn.Hovered() {
+				btn.Background(t.tint(0.75))
+			}
+			btn.Children(func() {
+				fg := t.muted
+				fw := 500
+				if active {
+					fg = t.foreground
+					fw = 600
+				} else if btn.Hovered() {
+					fg = t.subdued
+				}
+				ui.Text(c, opt.Autonym).FontSize(t.text.xs).FontWeight(fw).TextColor(fg).SingleLine()
+			})
+			if btn.Clicked() && !active {
+				a.SetLanguage(opt.Code)
+			}
+		}
+	})
+}
+
+func (a *App) renderSetupLanguageBar(c *ui.Context) {
+	t := themeOf(c)
+	hintKey := "lang.secondary_hint_" + string(a.Language())
+	ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(12).Children(func() {
+		ui.Text(c, a.t(hintKey)).FontSize(t.text.xs).TextColor(t.muted).Shrink(1).SingleLine()
+		a.renderLanguageSegmentedBar(c, "setup-lang", true)
+	})
+}
+
+// renderSetupView 渲染初次启动选目录页：单画布聚焦布局、语言设置、区服模式引导、拖拽填入与非术语化纠错。
 func (a *App) renderSetupView(c *ui.Context) {
 	t := themeOf(c)
 	a.renderBareTitleBar(c, true)
@@ -250,10 +301,13 @@ func (a *App) renderSetupView(c *ui.Context) {
 					Justify(ui.Center).AlignItems(ui.Center).
 					Padding(28, 32).Children(func() {
 					ui.Column(c).FillWidth().MaxWidth(600).Gap(22).Children(func() {
+						// 0. 欢迎界面语言设置栏（首次打开自动匹配系统语言，也支持直接手动切换）
+						a.renderSetupLanguageBar(c)
+
 						// 1. 核心任务标题与一句话说明
 						ui.Column(c).FillWidth().Gap(6).Children(func() {
-							ui.Text(c, "选择 FF14 游戏目录").FontSize(t.text.x3l).FontWeight(600).LetterSpacing(-0.3).TextColor(t.foreground)
-							ui.Text(c, "支持仅读取国服、仅读取国际服或双服对照查询；所有游戏文件仅以只读方式打开，不会改动任何内容。").
+							ui.Text(c, a.t("setup.title")).FontSize(t.text.x3l).FontWeight(600).LetterSpacing(-0.3).TextColor(t.foreground)
+							ui.Text(c, a.t("setup.subtitle")).
 								FontSize(t.text.sm).LineHeight(lineProse).TextColor(t.muted)
 						})
 
@@ -277,11 +331,11 @@ func (a *App) renderSetupView(c *ui.Context) {
 								a.renderSetupPathBlock(
 									c,
 									"setup-cn",
-									"国服游戏目录",
-									"D:\\Games\\最终幻想XIV（粘贴路径，或把文件夹拖到这里）",
-									"通常选择包含「game」和「boot」两个子文件夹的目录（如「最终幻想XIV」；直接选其中的「game」文件夹也可以）。",
+									a.t("setup.cn_dir_title"),
+									a.t("setup.cn_dir_placeholder"),
+									a.t("setup.cn_dir_guide"),
 									&a.draftCNPath,
-									"选择 FF14 国服游戏目录",
+									a.t("setup.cn_dialog_title"),
 									cnDiag,
 								)
 							}
@@ -292,11 +346,11 @@ func (a *App) renderSetupView(c *ui.Context) {
 								a.renderSetupPathBlock(
 									c,
 									"setup-global",
-									"国际服游戏目录",
-									"D:\\Games\\FINAL FANTASY XIV Online（粘贴路径，或把文件夹拖到这里）",
-									"通常选择「FINAL FANTASY XIV Online」或「FINAL FANTASY XIV - A Realm Reborn」安装文件夹（直接选「game」文件夹也可以）。",
+									a.t("setup.global_dir_title"),
+									a.t("setup.global_dir_placeholder"),
+									a.t("setup.global_dir_guide"),
 									&a.draftGlobalPath,
-									"选择 FF14 国际服游戏目录",
+									a.t("setup.global_dialog_title"),
 									glDiag,
 								)
 							}
@@ -311,11 +365,11 @@ func (a *App) renderSetupView(c *ui.Context) {
 						glReady := !showGlobal || glDiag.status == pathValid
 						canSubmit := cnReady && glReady
 
-						summaryTxt, summaryCol := setupSubmitSummary(t, showCN, showGlobal, cnDiag, glDiag)
+						summaryTxt, summaryCol := a.setupSubmitSummary(t, showCN, showGlobal, cnDiag, glDiag)
 						ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(16).Children(func() {
 							numText(c, summaryTxt).FontSize(t.text.xs).TextColor(summaryCol).Grow(1).Shrink(1)
 
-							if kitButton(c, "setup-start-btn", "读取并进入工作台", btnOpts{
+							if kitButton(c, "setup-start-btn", a.t("setup.start_btn"), btnOpts{
 								variant:  btnDefault,
 								size:     btnSizeMd,
 								disabled: !canSubmit,
@@ -335,7 +389,7 @@ func (a *App) renderSetupView(c *ui.Context) {
 						// 5. 静默底栏：配置保存位置
 						ui.Row(c).FillWidth().Padding(14, 0, 0, 0).
 							BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).Children(func() {
-							ui.Text(c, "配置文件："+config.ConfigFilePath(a.dataDir)).
+							ui.Text(c, a.t("setup.config_path_prefix")+config.ConfigFilePath(a.dataDir)).
 								FontSize(t.text.micro).TextColor(t.muted).Selectable().Grow(1).Shrink(1)
 						})
 					})
@@ -355,18 +409,18 @@ func (a *App) renderSetupModeSelector(c *ui.Context) {
 	options := []modeOption{
 		{
 			mode:  setupModeCN,
-			label: "仅国服",
-			desc:  "只需选择一个国服游戏目录，即可使用全部中文道具、制作配方、采集坐标与版本对比功能。",
+			label: a.t("setup.mode_cn"),
+			desc:  a.t("setup.mode_cn_desc"),
 		},
 		{
 			mode:  setupModeGlobal,
-			label: "仅国际服",
-			desc:  "只需选择一个国际服游戏目录，条目名称将以英文显示，并支持导出英、日、德、法多语数据。",
+			label: a.t("setup.mode_global"),
+			desc:  a.t("setup.mode_global_desc"),
 		},
 		{
 			mode:  setupModeBoth,
-			label: "国服 + 国际服",
-			desc:  "以国服简体中文为主数据，同时关联国际服英文和日文名称，适合双语对照查名与导出。",
+			label: a.t("setup.mode_both"),
+			desc:  a.t("setup.mode_both_desc"),
 		},
 	}
 
@@ -379,7 +433,7 @@ func (a *App) renderSetupModeSelector(c *ui.Context) {
 	}
 
 	ui.Column(c).FillWidth().Gap(8).Children(func() {
-		ui.Text(c, "选择你的游玩区服").FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
+		ui.Text(c, a.t("setup.mode_heading")).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
 
 		ui.Row(c.Key("setup-mode-track")).FillWidth().Padding(3).Gap(3).
 			Radius(t.radius.lg).Background(t.tint(1.1)).AlignItems(ui.Center).Children(func() {
@@ -407,6 +461,7 @@ func (a *App) renderSetupModeSelector(c *ui.Context) {
 				})
 				if btn.Clicked() && !active {
 					a.setupMode = opt.mode
+					a.setupModeTouched = true
 					a.draftError = ""
 				}
 			}
@@ -450,12 +505,12 @@ func (a *App) renderSetupPathBlock(
 			ui.Text(c, title).FontSize(t.text.sm).FontWeight(600).TextColor(t.foreground)
 			switch diag.status {
 			case pathValid:
-				drawPill(c, "已识别 · v"+diag.version, pillPositive)
+				drawPill(c, a.tf("setup.pill_valid", "version", diag.version), pillPositive)
 			case pathInvalid:
-				drawPill(c, "目录需调整", pillNegative)
+				drawPill(c, a.t("setup.pill_invalid"), pillNegative)
 			default:
 				if dropWrap.FileDragOver() {
-					drawPill(c, "松开填入此目录", pillAccent)
+					drawPill(c, a.t("setup.pill_drop"), pillAccent)
 				}
 			}
 		})
@@ -474,7 +529,7 @@ func (a *App) renderSetupPathBlock(
 					a.invalidatePathDiag()
 				}
 			})
-			if kitButton(c, keyPrefix+"-browse", "选择文件夹", btnOpts{
+			if kitButton(c, keyPrefix+"-browse", a.t("common.browse"), btnOpts{
 				variant: btnOutline,
 				size:    btnSizeMd,
 				icon:    icoFolder,
@@ -492,9 +547,9 @@ func (a *App) renderSetupPathBlock(
 		// 上下文反馈行：未填时给玩家易懂引导；有效时确认版本；无效时明确告知原因与一键改选
 		switch diag.status {
 		case pathValid:
-			msg := fmt.Sprintf("目录有效 · 客户端版本 v%s · 只读访问已就绪", diag.version)
+			msg := a.tf("setup.valid_msg", "version", diag.version)
 			if diag.pickedGameDir {
-				msg = fmt.Sprintf("已自动定位游戏根目录：%s（v%s）", diag.rootPath, diag.version)
+				msg = a.tf("setup.valid_auto_root", "root", diag.rootPath, "version", diag.version)
 			}
 			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 				ui.Icon(c, icoCheck).Size(iconSm, iconSm).Shrink(0).TextColor(t.successText)
@@ -507,7 +562,7 @@ func (a *App) renderSetupPathBlock(
 					ui.Text(c, diag.detail).FontSize(t.text.xs).LineHeight(lineProse).TextColor(t.dangerText).Grow(1).Shrink(1)
 				})
 				if diag.suggestedPath != "" {
-					btnText := "改选「" + diag.suggestedLabel + "」"
+					btnText := a.tf("setup.fix_btn", "name", diag.suggestedLabel)
 					if kitButton(c, keyPrefix+"-fix-btn", btnText, btnOpts{variant: btnSecondary, size: btnSizeXs}) {
 						*val = diag.suggestedPath
 						a.draftError = ""
@@ -522,23 +577,27 @@ func (a *App) renderSetupPathBlock(
 	})
 }
 
-func setupSubmitSummary(t uiTokens, showCN, showGlobal bool, cnDiag, glDiag pathDiagnosis) (string, ui.Color) {
+func (a *App) setupSubmitSummary(t uiTokens, showCN, showGlobal bool, cnDiag, glDiag pathDiagnosis) (string, ui.Color) {
 	switch {
 	case showCN && showGlobal:
 		if cnDiag.status == pathValid && glDiag.status == pathValid {
-			return fmt.Sprintf("即将只读加载：国服 v%s · 国际服 v%s", cnDiag.version, glDiag.version), t.subdued
+			return a.tf("setup.summary_both_ready", "cn", cnDiag.version, "global", glDiag.version), t.subdued
 		}
-		return "请分别选择有效的国服和国际服目录，或切换为单服模式", t.muted
+		return a.t("setup.summary_both_wait"), t.muted
 	case showCN:
 		if cnDiag.status == pathValid {
-			return fmt.Sprintf("即将只读加载：国服 v%s（简体中文）", cnDiag.version), t.subdued
+			return a.tf("setup.summary_cn_ready", "cn", cnDiag.version), t.subdued
 		}
-		return "请选择国服游戏目录后继续", t.muted
+		return a.t("setup.summary_cn_wait"), t.muted
 	default:
 		if glDiag.status == pathValid {
-			return fmt.Sprintf("即将只读加载：国际服 v%s（英文主界面）", glDiag.version), t.subdued
+			langLabel := i18n.OptionOf(a.Language()).Autonym
+			if a.Language() == i18n.LangZH {
+				langLabel = i18n.OptionOf(i18n.LangEN).Autonym
+			}
+			return a.tf("setup.summary_global_ready", "global", glDiag.version, "lang", langLabel), t.subdued
 		}
-		return "请选择国际服游戏目录后继续", t.muted
+		return a.t("setup.summary_global_wait"), t.muted
 	}
 }
 
@@ -575,10 +634,10 @@ func (a *App) renderLoadingView(c *ui.Context) {
 
 	var clientParts []string
 	if a.loadingCNVer != "" {
-		clientParts = append(clientParts, "国服 v"+a.loadingCNVer)
+		clientParts = append(clientParts, a.t("shell.server_cn")+" v"+a.loadingCNVer)
 	}
 	if a.loadingGlobalVer != "" {
-		clientParts = append(clientParts, "国际服 v"+a.loadingGlobalVer)
+		clientParts = append(clientParts, a.t("shell.server_global")+" v"+a.loadingGlobalVer)
 	}
 	clientSummary := strings.Join(clientParts, " · ")
 
@@ -593,10 +652,10 @@ func (a *App) renderLoadingView(c *ui.Context) {
 						ui.Column(c).FillWidth().Gap(6).Children(func() {
 							ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(10).Children(func() {
 								ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-									ui.Spinner(c).FontSize(18).TextColor(t.primary).Label("正在加载")
-									ui.Text(c, "正在读取本地游戏数据").FontSize(t.text.xl).FontWeight(600).TextColor(t.foreground)
+									ui.Spinner(c).FontSize(18).TextColor(t.primary).Label(a.t("loading.spinner"))
+									ui.Text(c, a.t("loading.title")).FontSize(t.text.xl).FontWeight(600).TextColor(t.foreground)
 								})
-								drawPill(c, "只读模式", pillPositive)
+								drawPill(c, a.t("common.readonly_mode"), pillPositive)
 							})
 							if clientSummary != "" {
 								numText(c, clientSummary).FontSize(t.text.xs).TextColor(t.muted)
@@ -608,7 +667,7 @@ func (a *App) renderLoadingView(c *ui.Context) {
 							ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(12).Children(func() {
 								statusTxt := a.loadingStatusTxt
 								if statusTxt == "" {
-									statusTxt = "正在准备数据读取..."
+									statusTxt = a.t("loading.preparing")
 								}
 								ui.Text(c, statusTxt).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
 								numTextf(c, "%.0f%% · %.1fs", pct, elapsedSec).FontSize(t.text.xs).TextColor(t.muted).Shrink(0)
@@ -622,40 +681,40 @@ func (a *App) renderLoadingView(c *ui.Context) {
 						})
 
 						// 3. 三阶段真实进度清单
-						sheetsMeta := "等待中"
+						sheetsMeta := a.t("loading.waiting")
 						switch {
 						case a.loadStage > loadStageSheets && a.loadSheetsTotal > 0:
-							sheetsMeta = fmt.Sprintf("已完成 %d 张", a.loadSheetsTotal)
+							sheetsMeta = a.tf("loading.done_count", "total", fmt.Sprintf("%d", a.loadSheetsTotal))
 						case a.loadStage > loadStageSheets:
-							sheetsMeta = "已完成"
+							sheetsMeta = a.t("loading.done")
 						case a.loadSheetsTotal > 0:
-							sheetsMeta = fmt.Sprintf("%d / %d 张表", a.loadSheetsDone, a.loadSheetsTotal)
+							sheetsMeta = a.tf("loading.sheets_progress", "done", fmt.Sprintf("%d", a.loadSheetsDone), "total", fmt.Sprintf("%d", a.loadSheetsTotal))
 						default:
-							sheetsMeta = "读取中..."
+							sheetsMeta = a.t("loading.reading")
 						}
 
-						indicesMeta := "等待中"
+						indicesMeta := a.t("loading.waiting")
 						switch {
 						case a.loadStage > loadStageIndices:
-							indicesMeta = "已完成"
+							indicesMeta = a.t("loading.done")
 						case a.loadStage == loadStageIndices:
-							indicesMeta = fmt.Sprintf("第 %d / %d 步", min(a.loadIndexStep+1, max(1, a.loadIndexTotal)), max(1, a.loadIndexTotal))
+							indicesMeta = a.tf("loading.step_progress", "step", fmt.Sprintf("%d", min(a.loadIndexStep+1, max(1, a.loadIndexTotal))), "total", fmt.Sprintf("%d", max(1, a.loadIndexTotal)))
 						}
 
-						snapshotMeta := "等待中"
+						snapshotMeta := a.t("loading.waiting")
 						if a.loadStage == loadStageSnapshot {
-							snapshotMeta = "校验中..."
+							snapshotMeta = a.t("loading.verifying")
 						}
 
 						kitCard(c, ui.Column(c).FillWidth().Clip(), toneCard).Children(func() {
-							drawLoadingStageRow(c, "读取游戏原始数据表", sheetsMeta, a.loadStage == loadStageSheets, a.loadStage > loadStageSheets)
+							drawLoadingStageRow(c, a.t("loading.stage_sheets"), sheetsMeta, a.loadStage == loadStageSheets, a.loadStage > loadStageSheets)
 							kitSeparator(c, false).Margin(0, 16)
-							drawLoadingStageRow(c, "构建物品、配方与任务索引", indicesMeta, a.loadStage == loadStageIndices, a.loadStage > loadStageIndices)
+							drawLoadingStageRow(c, a.t("loading.stage_indices"), indicesMeta, a.loadStage == loadStageIndices, a.loadStage > loadStageIndices)
 							kitSeparator(c, false).Margin(0, 16)
-							drawLoadingStageRow(c, "校验本地版本快照", snapshotMeta, a.loadStage == loadStageSnapshot, false)
+							drawLoadingStageRow(c, a.t("loading.stage_snapshot"), snapshotMeta, a.loadStage == loadStageSnapshot, false)
 						})
 
-						ui.Text(c, "所有文件均从本地硬盘只读解析，通常只需数秒钟即可完成。").
+						ui.Text(c, a.t("loading.footnote")).
 							FontSize(t.text.xs).TextColor(t.muted)
 					})
 				})
@@ -701,7 +760,7 @@ func drawLoadingStageRow(c *ui.Context, title, status string, active, done bool)
 	})
 }
 
-// renderSettingsView 渲染居中设置页：外观主题、客户端路径、CSV 导出与运行状态。
+// renderSettingsView 渲染居中设置页：语言与外观、客户端路径、CSV 导出与运行状态。
 func (a *App) renderSettingsView(c *ui.Context) {
 	t := themeOf(c)
 	kitPanel(c, a.panelRadius(c)).Fill().Children(func() {
@@ -710,22 +769,32 @@ func (a *App) renderSettingsView(c *ui.Context) {
 				ui.Column(c).FillWidth().MaxWidth(720).Gap(22).Children(func() {
 					// 页面主标题
 					ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Baseline).Gap(12).Children(func() {
-						ui.Text(c, "设置").FontSize(t.text.x3l).FontWeight(600).LetterSpacing(-0.3).TextColor(t.foreground)
+						ui.Text(c, a.t("settings.title")).FontSize(t.text.x3l).FontWeight(600).LetterSpacing(-0.3).TextColor(t.foreground)
 						numText(c, "v"+a.appVersion).FontSize(t.text.xs).TextColor(t.muted)
 					})
 
-					// 1. 外观主题设置
-					drawSettingsSection(c, "外观", "",
+					// 1. 语言与外观设置
+					langDesc := a.t("lang.desc") + " · " + a.t("lang.secondary_hint_"+string(a.Language()))
+					drawSettingsSection(c, a.t("settings.section_appearance"), "",
 						func() {
 							ui.Row(c).FillWidth().Padding(14, 16).Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(16).Children(func() {
 								ui.Column(c).Gap(2).Grow(1).Shrink(1).Children(func() {
-									ui.Text(c, "界面主题").FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
-									ui.Text(c, "选择浅色、深色或自动跟随系统").FontSize(t.text.xs).TextColor(t.muted)
+									ui.Text(c, a.t("lang.label")).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
+									ui.Text(c, langDesc).FontSize(t.text.xs).TextColor(t.muted)
+								})
+								a.renderLanguageSegmentedBar(c, "settings-lang", false)
+							})
+						},
+						func() {
+							ui.Row(c).FillWidth().Padding(14, 16).Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(16).Children(func() {
+								ui.Column(c).Gap(2).Grow(1).Shrink(1).Children(func() {
+									ui.Text(c, a.t("settings.theme_title")).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
+									ui.Text(c, a.t("settings.theme_desc")).FontSize(t.text.xs).TextColor(t.muted)
 								})
 								ui.Row(c).Gap(10).Shrink(0).Children(func() {
-									a.renderThemeTile(c, "system", "跟随系统")
-									a.renderThemeTile(c, "light", "浅色")
-									a.renderThemeTile(c, "dark", "深色")
+									a.renderThemeTile(c, "system", a.t("settings.theme_system"))
+									a.renderThemeTile(c, "light", a.t("settings.theme_light"))
+									a.renderThemeTile(c, "dark", a.t("settings.theme_dark"))
 								})
 							})
 						},
@@ -734,15 +803,15 @@ func (a *App) renderSettingsView(c *ui.Context) {
 					// 2. FF14 游戏客户端路径配置
 					pathDirty := normalizeUserPathInput(a.draftCNPath) != strings.TrimSpace(a.cfg.CNPath) ||
 						normalizeUserPathInput(a.draftGlobalPath) != strings.TrimSpace(a.cfg.GlobalPath)
-					drawSettingsSection(c, "FF14 游戏客户端", "保存后将重新读取本地数据；所有游戏文件保持只读。",
+					drawSettingsSection(c, a.t("settings.section_clients"), a.t("settings.clients_footnote"),
 						func() {
 							ui.Column(c).FillWidth().Padding(14, 16).Children(func() {
-								a.renderSinglePathInput(c, "settings-cn", "国服客户端路径 (CN)", "提供简体中文与国服数据", "例如：D:\\Games\\最终幻想XIV", &a.draftCNPath, "选择 FF14 国服客户端目录")
+								a.renderSinglePathInput(c, "settings-cn", a.t("settings.cn_label"), a.t("settings.cn_hint"), a.t("settings.cn_placeholder"), &a.draftCNPath, a.t("settings.cn_dialog"))
 							})
 						},
 						func() {
 							ui.Column(c).FillWidth().Padding(14, 16).Children(func() {
-								a.renderSinglePathInput(c, "settings-global", "国际服客户端路径 (Global)", "提供英/日/德/法多语言数据", "例如：D:\\Games\\FINAL FANTASY XIV Online", &a.draftGlobalPath, "选择 FF14 国际服客户端目录")
+								a.renderSinglePathInput(c, "settings-global", a.t("settings.global_label"), a.t("settings.global_hint"), a.t("settings.global_placeholder"), &a.draftGlobalPath, a.t("settings.global_dialog"))
 							})
 						},
 						func() {
@@ -754,15 +823,15 @@ func (a *App) renderSettingsView(c *ui.Context) {
 									kitAlert(c, toneSuccess, a.draftNotice)
 								}
 								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
-									if kitButton(c, "settings-revert-btn", "撤销修改", btnOpts{variant: btnGhost, size: btnSizeSm, disabled: !pathDirty}) {
+									if kitButton(c, "settings-revert-btn", a.t("settings.revert"), btnOpts{variant: btnGhost, size: btnSizeSm, disabled: !pathDirty}) {
 										a.draftCNPath = a.cfg.CNPath
 										a.draftGlobalPath = a.cfg.GlobalPath
 										a.draftError = ""
-										a.draftNotice = "已恢复当前生效的路径配置。"
+										a.draftNotice = a.t("settings.reverted")
 										a.invalidatePathDiag()
 									}
 									canSave := pathDirty && (normalizeUserPathInput(a.draftCNPath) != "" || normalizeUserPathInput(a.draftGlobalPath) != "")
-									if kitButton(c, "settings-save-btn", "保存并重新加载", btnOpts{variant: btnDefault, size: btnSizeSm, disabled: !canSave}) {
+									if kitButton(c, "settings-save-btn", a.t("settings.save_reload"), btnOpts{variant: btnDefault, size: btnSizeSm, disabled: !canSave}) {
 										a.SaveAndReloadPaths(a.draftCNPath, a.draftGlobalPath)
 									}
 								})
@@ -771,14 +840,14 @@ func (a *App) renderSettingsView(c *ui.Context) {
 					)
 
 					// 3. 数据工具
-					drawSettingsSection(c, "数据工具", "",
+					drawSettingsSection(c, a.t("settings.section_tools"), "",
 						func() {
 							ui.Row(c).FillWidth().Padding(14, 16).Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(16).Children(func() {
 								ui.Column(c).Gap(2).Grow(1).Shrink(1).Children(func() {
-									ui.Text(c, "导出全量游戏 CSV").FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
-									ui.Text(c, "将全部游戏数据表导出为标准 CSV 文件或 Zip 压缩包").FontSize(t.text.xs).TextColor(t.muted)
+									ui.Text(c, a.t("settings.export_title")).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
+									ui.Text(c, a.t("settings.export_desc")).FontSize(t.text.xs).TextColor(t.muted)
 								})
-								if kitButton(c, "settings-open-export", "导出游戏 CSV", btnOpts{variant: btnOutline, size: btnSizeSm, icon: icoDownload}) {
+								if kitButton(c, "settings-open-export", a.t("settings.export_btn"), btnOpts{variant: btnOutline, size: btnSizeSm, icon: icoDownload}) {
 									a.openExportModal()
 								}
 							})
@@ -786,30 +855,34 @@ func (a *App) renderSettingsView(c *ui.Context) {
 					)
 
 					// 4. 运行状态与本地目录
-					cnState := "未配置"
+					cnState := a.t("settings.state_unconfigured")
 					if a.status != nil && a.status.HasCN {
-						cnState = fmt.Sprintf("已加载 · v%s", a.status.CNVersion)
+						cnState = a.tf("settings.state_loaded", "version", a.status.CNVersion)
 					}
-					glState := "未配置"
+					glState := a.t("settings.state_unconfigured")
 					if a.status != nil && a.status.HasGlobal {
-						glState = fmt.Sprintf("已加载 · v%s", a.status.GlobalVersion)
+						glState = a.tf("settings.state_loaded", "version", a.status.GlobalVersion)
 					}
 					statsText := "–"
 					if a.status != nil {
-						statsText = fmt.Sprintf("%s 物品 · %s 配方 · %s 采集 · %s 成就（%d ms）",
-							formatInt(a.status.Stats.TotalItems),
-							formatInt(a.status.Stats.TotalRecipes),
-							formatInt(a.status.Stats.GatherableItems),
-							formatInt(a.status.Stats.TotalAchievements),
-							a.status.Stats.LoadTimeMs,
+						statsText = a.tf("settings.stats_summary",
+							"items", formatInt(a.status.Stats.TotalItems),
+							"recipes", formatInt(a.status.Stats.TotalRecipes),
+							"gather", formatInt(a.status.Stats.GatherableItems),
+							"ach", formatInt(a.status.Stats.TotalAchievements),
+							"ms", fmt.Sprintf("%d", a.status.Stats.LoadTimeMs),
 						)
 					}
-					drawSettingsSection(c, "运行状态与存储", "",
-						func() { drawSettingKVRow(c, "国服客户端", cnState) },
-						func() { drawSettingKVRow(c, "国际服客户端", glState) },
-						func() { drawSettingKVRow(c, "数据概览", statsText) },
-						func() { drawSettingKVRow(c, "配置文件路径", config.ConfigFilePath(a.dataDir)) },
-						func() { drawSettingKVRow(c, "版本快照目录", filepath.Join(a.dataDir, "backups")) },
+					backupDirDisp := filepath.Join(a.dataDir, "backups")
+					if a.versionStatus != nil && a.versionStatus.BackupDir != "" {
+						backupDirDisp = a.versionStatus.BackupDir
+					}
+					drawSettingsSection(c, a.t("settings.section_status"), "",
+						func() { drawSettingKVRow(c, a.t("settings.kv_cn"), cnState) },
+						func() { drawSettingKVRow(c, a.t("settings.kv_global"), glState) },
+						func() { drawSettingKVRow(c, a.t("settings.kv_overview"), statsText) },
+						func() { drawSettingKVRow(c, a.t("settings.kv_config_path"), config.ConfigFilePath(a.dataDir)) },
+						func() { drawSettingKVRow(c, a.t("settings.kv_backup_dir"), backupDirDisp) },
 					)
 				})
 			})
@@ -942,11 +1015,11 @@ func (a *App) renderSinglePathInput(
 			})
 			switch diag.status {
 			case pathValid:
-				drawPill(c, "已识别 · v"+diag.version, pillPositive)
+				drawPill(c, a.tf("setup.pill_valid", "version", diag.version), pillPositive)
 			case pathInvalid:
-				drawPill(c, "目录需调整", pillNegative)
+				drawPill(c, a.t("setup.pill_invalid"), pillNegative)
 			default:
-				drawPill(c, "未填写", pillOutline)
+				drawPill(c, a.t("setup.pill_empty"), pillOutline)
 			}
 		})
 
@@ -960,7 +1033,7 @@ func (a *App) renderSinglePathInput(
 					a.invalidatePathDiag()
 				}
 			})
-			if kitButton(c, keyPrefix+"-browse", "选择文件夹", btnOpts{variant: btnOutline, size: btnSizeMd, icon: icoFolder}) {
+			if kitButton(c, keyPrefix+"-browse", a.t("common.browse"), btnOpts{variant: btnOutline, size: btnSizeMd, icon: icoFolder}) {
 				cur := normalizeUserPathInput(*val)
 				a.pickDirectoryAsync(dialogTitle, cur, func(picked string) {
 					*val = picked
@@ -975,7 +1048,7 @@ func (a *App) renderSinglePathInput(
 			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(10).Children(func() {
 				ui.Text(c, diag.detail).FontSize(t.text.xs).TextColor(t.dangerText).Grow(1).Shrink(1)
 				if diag.suggestedPath != "" {
-					if kitButton(c, keyPrefix+"-fix", "改选「"+diag.suggestedLabel+"」", btnOpts{variant: btnSecondary, size: btnSizeXs}) {
+					if kitButton(c, keyPrefix+"-fix", a.tf("setup.fix_btn", "name", diag.suggestedLabel), btnOpts{variant: btnSecondary, size: btnSizeXs}) {
 						*val = diag.suggestedPath
 						a.draftError = ""
 						a.draftNotice = ""

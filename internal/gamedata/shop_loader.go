@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
@@ -90,6 +91,7 @@ func resolveSpecialCurrencyID(rawCostID, useCurrencyType int, tomestoneByIndex m
 }
 
 type shopLoaderInput struct {
+	appLang             i18n.Lang
 	itemsPrimary        map[int]sqpack.Row
 	gilShops            map[int]sqpack.Row
 	gilShopItems        map[int][]sqpack.SubRow
@@ -111,6 +113,7 @@ type shopLoaderInput struct {
 
 // buildShopIndices 解析金币商店、特殊兑换、军票与部队战绩商店并建立 NPC 坐标反向索引。
 func buildShopIndices(in shopLoaderInput) ShopIndices {
+	in.appLang = resolveAppLang(in.appLang)
 	// 1. 解析 NPC 名称与头衔
 	npcNames := make(map[int]RawNpcName, len(in.enpcResidents))
 	for npcID, row := range in.enpcResidents {
@@ -296,7 +299,7 @@ func buildShopIndices(in shopLoaderInput) ShopIndices {
 			shopName = shopFallbackNames[shopID]
 		}
 		if shopName == "" {
-			shopName = "金币道具商店"
+			shopName = i18n.T(in.appLang, "gamedata.shop.gil_name")
 		}
 		npcIDs := shopToNPCs[shopID]
 
@@ -316,13 +319,13 @@ func buildShopIndices(in shopLoaderInput) ShopIndices {
 			addEntry(itemID, RawShopEntry{
 				ShopID:        shopID,
 				ShopType:      "gil",
-				ShopTypeLabel: "金币商店",
+				ShopTypeLabel: i18n.T(in.appLang, "gamedata.shop.gil_label"),
 				ShopName:      shopName,
 				ReceiveAmount: 1,
 				ReceiveHQ:     false,
 				Costs: []RawShopCost{{
 					ItemID: 1,
-					NameCn: "金币",
+					NameCn: i18n.T(in.appLang, "gamedata.shop.gil_currency"),
 					IconID: 65002,
 					Amount: priceMid,
 				}},
@@ -349,7 +352,7 @@ func buildShopIndices(in shopLoaderInput) ShopIndices {
 			shopName = shopFallbackNames[shopID]
 		}
 		if shopName == "" {
-			shopName = "特殊兑换商店"
+			shopName = i18n.T(in.appLang, "gamedata.shop.special_name")
 		}
 		useCurrencyType := row.IntAt(2041)
 		npcIDs := shopToNPCs[shopID]
@@ -387,7 +390,7 @@ func buildShopIndices(in shopLoaderInput) ShopIndices {
 				addEntry(recvItemID, RawShopEntry{
 					ShopID:        shopID,
 					ShopType:      "special",
-					ShopTypeLabel: "特殊兑换",
+					ShopTypeLabel: i18n.T(in.appLang, "gamedata.shop.special_label"),
 					ShopName:      shopName,
 					ReceiveAmount: recvAmount,
 					ReceiveHQ:     recvHQ,
@@ -403,17 +406,17 @@ func buildShopIndices(in shopLoaderInput) ShopIndices {
 		if parentID <= 0 {
 			continue
 		}
-		gcName := "大国防联军军票商店"
+		gcName := i18n.T(in.appLang, "gamedata.shop.gc_default")
 		sealItemID := 20
 		switch {
 		case parentID >= 1 && parentID <= 12:
-			gcName = "黑涡团军票商店"
+			gcName = i18n.T(in.appLang, "gamedata.shop.gc_maelstrom")
 			sealItemID = 20
 		case parentID >= 13 && parentID <= 24:
-			gcName = "双蛇党军票商店"
+			gcName = i18n.T(in.appLang, "gamedata.shop.gc_adder")
 			sealItemID = 21
 		case parentID >= 25:
-			gcName = "恒辉队军票商店"
+			gcName = i18n.T(in.appLang, "gamedata.shop.gc_flames")
 			sealItemID = 22
 		}
 		for _, sub := range subrows {
@@ -425,7 +428,7 @@ func buildShopIndices(in shopLoaderInput) ShopIndices {
 			addEntry(itemID, RawShopEntry{
 				ShopID:        1441792 + parentID,
 				ShopType:      "gc",
-				ShopTypeLabel: "军票商店",
+				ShopTypeLabel: i18n.T(in.appLang, "gamedata.shop.gc_label"),
 				ShopName:      gcName,
 				ReceiveAmount: 1,
 				Costs:         []RawShopCost{{ItemID: sealItemID, Amount: costAmount}},
@@ -437,7 +440,7 @@ func buildShopIndices(in shopLoaderInput) ShopIndices {
 	for shopID, row := range in.fccShops {
 		shopName := row.StringAt(0)
 		if shopName == "" {
-			shopName = "部队战绩交易"
+			shopName = i18n.T(in.appLang, "gamedata.shop.fcc_name")
 		}
 		for i := 0; i < 10; i++ {
 			itemID := row.IntAt(1 + i)
@@ -448,12 +451,12 @@ func buildShopIndices(in shopLoaderInput) ShopIndices {
 			addEntry(itemID, RawShopEntry{
 				ShopID:        shopID,
 				ShopType:      "fcc",
-				ShopTypeLabel: "部队战绩",
+				ShopTypeLabel: i18n.T(in.appLang, "gamedata.shop.fcc_label"),
 				ShopName:      shopName,
 				ReceiveAmount: 1,
 				Costs: []RawShopCost{{
 					ItemID: 0,
-					NameCn: "部队战绩",
+					NameCn: i18n.T(in.appLang, "gamedata.shop.fcc_label"),
 					IconID: 65016,
 					Amount: costAmount,
 				}},

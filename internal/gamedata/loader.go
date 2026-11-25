@@ -3,6 +3,7 @@ package gamedata
 import (
 	"fmt"
 	"io/fs"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -11,20 +12,27 @@ import (
 	"time"
 
 	"github.com/InfSein/xiv-data-viewer/internal/config"
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
-var equipSlotNames = []string{
-	"主手", "副手", "头部", "身体", "手部", "腰部", "腿部", "脚部",
-	"耳饰", "颈部", "腕部", "戒指", "戒指", "灵魂水晶",
+var equipSlotKeys = []string{
+	"gamedata.slot.main_hand", "gamedata.slot.off_hand", "gamedata.slot.head", "gamedata.slot.body",
+	"gamedata.slot.hands", "gamedata.slot.waist", "gamedata.slot.legs", "gamedata.slot.feet",
+	"gamedata.slot.earrings", "gamedata.slot.necklace", "gamedata.slot.bracelets", "gamedata.slot.ring",
+	"gamedata.slot.ring", "gamedata.slot.soul_crystal",
 }
 
 func formatEquipSlotCategory(row sqpack.Row) string {
+	return formatEquipSlotCategoryForLang(row, i18n.LangZH)
+}
+
+func formatEquipSlotCategoryForLang(row sqpack.Row, appLang i18n.Lang) string {
 	var slots []string
-	limit := min(len(row), len(equipSlotNames))
+	limit := min(len(row), len(equipSlotKeys))
 	for i := 0; i < limit; i++ {
 		if row.IntAt(i) > 0 {
-			name := equipSlotNames[i]
+			name := i18n.T(appLang, equipSlotKeys[i])
 			if !slices.Contains(slots, name) {
 				slots = append(slots, name)
 			}
@@ -102,6 +110,8 @@ type Store struct {
 	CNPath         string
 	GlobalPath     string
 	LoadTimeMs     int64
+	AppLang        i18n.Lang
+	PrimaryLang    sqpack.Language
 
 	// 核心原始表与字典映射
 	ItemsPrimary        map[int]sqpack.Row
@@ -186,10 +196,166 @@ type Store struct {
 	AchievementKindList      []AchievementKindInfo
 	AchievementCategoryList  []AchievementCategoryInfo
 	TotalTitles              int
+
+	sharedReaders bool
+	langNone      *rawLangNoneSheets
+	langPrimary   *rawPrimaryLangSheets
 }
 
-// Close 释放所有底层的 SqPack 只读句柄。
+type rawLangNoneSheets struct {
+	rawEquipSlots                map[int]sqpack.Row
+	rawRepairResources           map[int]sqpack.Row
+	itemActions                  map[int]sqpack.Row
+	itemFoods                    map[int]sqpack.Row
+	recipes                      map[int]sqpack.Row
+	recipeLevelTables            map[int]sqpack.Row
+	gatheringItems               map[int]sqpack.Row
+	gatheringItemPointSubrows    map[int][]sqpack.SubRow
+	gatheringPoints              map[int]sqpack.Row
+	gatheringPointBases          map[int]sqpack.Row
+	exportedGatheringPoints      map[int]sqpack.Row
+	gatheringPointTransients     map[int]sqpack.Row
+	gatheringRarePopTimeTables   map[int]sqpack.Row
+	rawGatheringItemLevels       map[int]sqpack.Row
+	territoryTypes               map[int]sqpack.Row
+	maps                         map[int]sqpack.Row
+	spearfishingNotebooks        map[int]sqpack.Row
+	gilShopItems                 map[int][]sqpack.SubRow
+	gcScripShopItems             map[int][]sqpack.SubRow
+	tomestonesItems              map[int]sqpack.Row
+	enpcBases                    map[int]sqpack.Row
+	preHandlers                  map[int]sqpack.Row
+	inclusionShops               map[int]sqpack.Row
+	inclusionSeries              map[int][]sqpack.SubRow
+	customTalks                  map[int]sqpack.Row
+	levels                       map[int]sqpack.Row
+	rawCabinets                  map[int]sqpack.Row
+	retainerTasks                map[int]sqpack.Row
+	retainerTaskNormals          map[int]sqpack.Row
+	retainerTaskParameters       map[int]sqpack.Row
+	questClassJobRewards         *sqpack.SchemaSubrowSheet
+	eventIconTypes               *sqpack.SchemaSheet
+	paramGrows                   *sqpack.SchemaSheet
+	beastRankBonuses             *sqpack.SchemaSheet
+	instanceContents             *sqpack.SchemaSheet
+	craftLeves                   *sqpack.SchemaSheet
+	gatheringLeves               *sqpack.SchemaSheet
+	gatheringLeveRoutes          *sqpack.SchemaSheet
+	battleLeves                  *sqpack.SchemaSheet
+	companyLeves                 *sqpack.SchemaSheet
+	leveRewardItems              *sqpack.SchemaSheet
+	leveRewardItemGroups         *sqpack.SchemaSheet
+	collectablesShopItems        *sqpack.SchemaSubrowSheet
+	collectablesShopRefines      *sqpack.SchemaSheet
+	collectablesShopRewardItems  *sqpack.SchemaSheet
+	collectablesShopRewardScrips *sqpack.SchemaSheet
+	satisfactionNpcs             *sqpack.SchemaSheet
+	satisfactionSupplies         *sqpack.SchemaSubrowSheet
+	satisfactionRewards          *sqpack.SchemaSheet
+	hwdSupplies                  *sqpack.SchemaSheet
+	hwdRewards                   *sqpack.SchemaSheet
+}
+
+type rawPrimaryLangSheets struct {
+	itemsPrimary               map[int]sqpack.Row
+	itemsCn                    map[int]sqpack.Row
+	itemsEn                    map[int]sqpack.Row
+	itemsJa                    map[int]sqpack.Row
+	rawCategories              map[int]sqpack.Row
+	rawClassJobs               map[int]sqpack.Row
+	rawClassJobCategories      map[int]sqpack.Row
+	rawBaseParams              map[int]sqpack.Row
+	rawCraftTypes              map[int]sqpack.Row
+	rawSecretBooks             map[int]sqpack.Row
+	rawGatheringTypes          map[int]sqpack.Row
+	rawGatheringSubCategories  map[int]sqpack.Row
+	rawPlaceNames              map[int]sqpack.Row
+	fishingSpots               map[int]sqpack.Row
+	fishParameters             map[int]sqpack.Row
+	spearfishingItems          map[int]sqpack.Row
+	gilShops                   map[int]sqpack.Row
+	specialShops               map[int]sqpack.Row
+	fccShops                   map[int]sqpack.Row
+	enpcResidents              map[int]sqpack.Row
+	topicSelects               map[int]sqpack.Row
+	inclusionCategories        map[int]sqpack.Row
+	achievementsPrimary        map[int]sqpack.Row
+	achievementsCn             map[int]sqpack.Row
+	achievementsEn             map[int]sqpack.Row
+	achievementsJa             map[int]sqpack.Row
+	rawAchievementCategories   map[int]sqpack.Row
+	rawAchievementKinds        map[int]sqpack.Row
+	titlesPrimary              map[int]sqpack.Row
+	titlesEn                   map[int]sqpack.Row
+	titlesJa                   map[int]sqpack.Row
+	questsPrimary              *sqpack.SchemaSheet
+	questsCn                   *sqpack.SchemaSheet
+	questsEn                   *sqpack.SchemaSheet
+	questsJa                   *sqpack.SchemaSheet
+	journalGenres              *sqpack.SchemaSheet
+	journalCategories          *sqpack.SchemaSheet
+	journalSections            *sqpack.SchemaSheet
+	questRewardOthers          *sqpack.SchemaSheet
+	beastTribes                *sqpack.SchemaSheet
+	beastReputationRanks       *sqpack.SchemaSheet
+	grandCompanies             *sqpack.SchemaSheet
+	exVersions                 *sqpack.SchemaSheet
+	mounts                     *sqpack.SchemaSheet
+	actions                    *sqpack.SchemaSheet
+	emotes                     *sqpack.SchemaSheet
+	generalActions             *sqpack.SchemaSheet
+	contentFinderConditions    *sqpack.SchemaSheet
+	eobjNames                  *sqpack.SchemaSheet
+	levesPrimary               *sqpack.SchemaSheet
+	levesCn                    *sqpack.SchemaSheet
+	levesEn                    *sqpack.SchemaSheet
+	levesJa                    *sqpack.SchemaSheet
+	leveAssignmentTypes        *sqpack.SchemaSheet
+	leveClients                *sqpack.SchemaSheet
+	towns                      *sqpack.SchemaSheet
+	leveStrings                *sqpack.SchemaSheet
+	gatheringLeveRules         *sqpack.SchemaSheet
+	battleLeveRules            *sqpack.SchemaSheet
+	companyLeveRules           *sqpack.SchemaSheet
+	eventItems                 *sqpack.SchemaSheet
+	bnpcNames                  *sqpack.SchemaSheet
+	collectablesShops          *sqpack.SchemaSheet
+	collectablesShopItemGroups *sqpack.SchemaSheet
+	hwdTerms                   *sqpack.SchemaSheet
+}
+
+// StoreLoadOptions 控制 GameDataStore 的加载选项，支持多语言切换时复用只读档案句柄与语言无关表。
+type StoreLoadOptions struct {
+	AppLang       i18n.Lang
+	BaseStore     *Store
+	SharedReaders bool
+	OnProgress    func(LoadProgress)
+}
+
+// DataVersion 返回当前主数据语言对应客户端的版本号，用于版本快照目录与对比隔离。
+func (s *Store) DataVersion() string {
+	if s == nil {
+		return ""
+	}
+	if s.PrimaryLang == sqpack.LangJapanese || s.PrimaryLang == sqpack.LangEnglish {
+		if s.GlobalVersion != "" {
+			return s.GlobalVersion
+		}
+	}
+	if s.PrimaryVersion != "" {
+		return s.PrimaryVersion
+	}
+	if s.CNVersion != "" {
+		return s.CNVersion
+	}
+	return s.GlobalVersion
+}
+
+// Close 释放所有由当前 Store 独占打开的底层 SqPack 只读句柄。
 func (s *Store) Close() error {
+	if s == nil || s.sharedReaders {
+		return nil
+	}
 	var firstErr error
 	if s.CNReader != nil {
 		if err := s.CNReader.Close(); err != nil && firstErr == nil {
@@ -230,37 +396,97 @@ func LoadGameDataStoreWithSchemas(resolved *config.ResolvedPaths, schemasFS fs.F
 	return LoadGameDataStoreWithProgress(resolved, schemasFS, nil)
 }
 
-// LoadGameDataStoreWithProgress 并发读取本地 FF14 客户端数据，并在各真实阶段回调进度。
+// LoadGameDataStoreWithProgress 并发读取本地 FF14 客户端数据，并在各真实阶段回调进度（默认简体中文界面语言）。
 func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.FS, onProgress func(LoadProgress)) (*Store, error) {
+	return LoadGameDataStoreForLang(resolved, schemasFS, i18n.LangZH, onProgress)
+}
+
+// LoadGameDataStoreForLang 按指定界面语言并发读取本地 FF14 客户端数据，并在各真实阶段回调进度。
+func LoadGameDataStoreForLang(resolved *config.ResolvedPaths, schemasFS fs.FS, appLang i18n.Lang, onProgress func(LoadProgress)) (*Store, error) {
+	return LoadGameDataStoreWithOptions(resolved, schemasFS, StoreLoadOptions{
+		AppLang:    appLang,
+		OnProgress: onProgress,
+	})
+}
+
+// LoadGameDataStoreWithOptions 按给定选项加载客户端数据，支持在切换语言时复用只读档案句柄与语言无关表。
+func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.FS, opts StoreLoadOptions) (*Store, error) {
 	if resolved == nil || (!resolved.HasCN() && !resolved.HasGlobal()) {
 		return nil, config.ErrNoClientConfigured
 	}
 
+	appLang := i18n.NormalizeLang(string(opts.AppLang))
+	onProgress := opts.OnProgress
+	base := opts.BaseStore
 	startTime := time.Now()
 
 	var cnReader, globalReader *sqpack.GameReader
+	var openedCN, openedGlobal bool
 	var cnVer, globalVer, cnPath, globalPath string
 	if resolved.HasCN() {
-		cnReader = sqpack.NewGameReader(resolved.CN.GamePath)
 		cnVer = resolved.CN.Version
 		cnPath = resolved.CN.RootPath
+		if base != nil && base.CNReader != nil && base.CNPath == cnPath {
+			cnReader = base.CNReader
+		} else {
+			cnReader = sqpack.NewGameReader(resolved.CN.GamePath)
+			openedCN = true
+		}
 	}
 	if resolved.HasGlobal() {
-		globalReader = sqpack.NewGameReader(resolved.Global.GamePath)
 		globalVer = resolved.Global.Version
 		globalPath = resolved.Global.RootPath
+		if base != nil && base.GlobalReader != nil && base.GlobalPath == globalPath {
+			globalReader = base.GlobalReader
+		} else {
+			globalReader = sqpack.NewGameReader(resolved.Global.GamePath)
+			openedGlobal = true
+		}
 	}
 
-	// 确定主数据读取器与主语言（优先国服中文，仅国际服时使用国际服英文为主语言）
-	primaryReader := cnReader
-	primaryLang := sqpack.LangChineseSimplified
-	if primaryReader == nil {
-		primaryReader = globalReader
-		primaryLang = sqpack.LangEnglish
+	texCache := (*sqpack.TextureCache)(nil)
+	if base != nil && base.TextureCache != nil {
+		texCache = base.TextureCache
+	} else {
+		texCache = sqpack.NewTextureCache(1000)
 	}
+
+	// 根据界面语言选择主数据读取器与主语言，缺失对应客户端时回退至可用客户端
+	var primaryReader *sqpack.GameReader
+	var primaryLang sqpack.Language
+	switch appLang {
+	case i18n.LangJA:
+		if globalReader != nil {
+			primaryReader = globalReader
+			primaryLang = sqpack.LangJapanese
+		} else {
+			primaryReader = cnReader
+			primaryLang = sqpack.LangChineseSimplified
+		}
+	case i18n.LangEN:
+		if globalReader != nil {
+			primaryReader = globalReader
+			primaryLang = sqpack.LangEnglish
+		} else {
+			primaryReader = cnReader
+			primaryLang = sqpack.LangChineseSimplified
+		}
+	default:
+		if cnReader != nil {
+			primaryReader = cnReader
+			primaryLang = sqpack.LangChineseSimplified
+		} else {
+			primaryReader = globalReader
+			primaryLang = sqpack.LangEnglish
+		}
+	}
+
+	reuseNone := base != nil && base.PrimaryReader == primaryReader && base.langNone != nil
+	reusePrim := reuseNone && base.PrimaryLang == primaryLang && base.langPrimary != nil &&
+		base.CNReader == cnReader && base.GlobalReader == globalReader
 
 	var (
-		itemsPrimary, itemsEn, itemsJa                                                map[int]sqpack.Row
+		itemsPrimary, itemsCn, itemsEn, itemsJa                                       map[int]sqpack.Row
 		rawCategories, rawClassJobs, rawClassJobCategories, rawBaseParams             map[int]sqpack.Row
 		rawEquipSlots, rawRepairResources, itemActions, itemFoods                     map[int]sqpack.Row
 		recipes, recipeLevelTables, rawCraftTypes, rawSecretBooks                     map[int]sqpack.Row
@@ -271,7 +497,7 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		gilShops, specialShops, fccShops, tomestonesItems                             map[int]sqpack.Row
 		enpcResidents, enpcBases, topicSelects, preHandlers                           map[int]sqpack.Row
 		inclusionShops, inclusionCategories, customTalks, levels, rawCabinets         map[int]sqpack.Row
-		achievementsPrimary, achievementsEn, achievementsJa                           map[int]sqpack.Row
+		achievementsPrimary, achievementsCn, achievementsEn, achievementsJa           map[int]sqpack.Row
 		rawAchievementCategories, rawAchievementKinds                                 map[int]sqpack.Row
 		titlesPrimary, titlesEn, titlesJa                                             map[int]sqpack.Row
 		retainerTasks, retainerTaskNormals, retainerTaskParameters                    map[int]sqpack.Row
@@ -282,7 +508,7 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		inclusionSeries           map[int][]sqpack.SubRow
 
 		// Schema 对齐表（任务 / 理符 / 收藏品）
-		questsPrimary, questsEn, questsJa                          *sqpack.SchemaSheet
+		questsPrimary, questsCn, questsEn, questsJa                *sqpack.SchemaSheet
 		journalGenres, journalCategories, journalSections          *sqpack.SchemaSheet
 		questClassJobRewards                                       *sqpack.SchemaSubrowSheet
 		questRewardOthers, eventIconTypes, paramGrows              *sqpack.SchemaSheet
@@ -290,7 +516,7 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		grandCompanies, exVersions, mounts, actions, emotes        *sqpack.SchemaSheet
 		generalActions, instanceContents, contentFinderConditions  *sqpack.SchemaSheet
 		eobjNames                                                  *sqpack.SchemaSheet
-		levesPrimary, levesEn, levesJa                             *sqpack.SchemaSheet
+		levesPrimary, levesCn, levesEn, levesJa                    *sqpack.SchemaSheet
 		craftLeves, gatheringLeves, gatheringLeveRoutes            *sqpack.SchemaSheet
 		battleLeves, companyLeves                                  *sqpack.SchemaSheet
 		leveRewardItems, leveRewardItemGroups, leveAssignmentTypes *sqpack.SchemaSheet
@@ -307,7 +533,6 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 	)
 
 	var (
-		wg       sync.WaitGroup
 		errMu    sync.Mutex
 		firstErr error
 		tasks    []func()
@@ -354,86 +579,6 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		})
 	}
 
-	// 并发加载全量核心数据表
-	loadSheet(primaryReader, "Item", primaryLang, nil, &itemsPrimary)
-	if globalReader != nil {
-		if cnReader != nil {
-			loadSheet(globalReader, "Item", sqpack.LangEnglish, []int{8, 9}, &itemsEn)
-		}
-		loadSheet(globalReader, "Item", sqpack.LangJapanese, []int{8, 9}, &itemsJa)
-	} else {
-		itemsEn = make(map[int]sqpack.Row)
-		itemsJa = make(map[int]sqpack.Row)
-	}
-
-	loadSheet(primaryReader, "ItemUICategory", primaryLang, nil, &rawCategories)
-	loadSheet(primaryReader, "ClassJob", primaryLang, nil, &rawClassJobs)
-	loadSheet(primaryReader, "ClassJobCategory", primaryLang, nil, &rawClassJobCategories)
-	loadSheet(primaryReader, "BaseParam", primaryLang, nil, &rawBaseParams)
-	loadSheet(primaryReader, "EquipSlotCategory", sqpack.LangNone, nil, &rawEquipSlots)
-	loadSheet(primaryReader, "ItemRepairResource", sqpack.LangNone, nil, &rawRepairResources)
-	loadSheet(primaryReader, "ItemAction", sqpack.LangNone, nil, &itemActions)
-	loadSheet(primaryReader, "ItemFood", sqpack.LangNone, nil, &itemFoods)
-	loadSheet(primaryReader, "Recipe", sqpack.LangNone, nil, &recipes)
-	loadSheet(primaryReader, "RecipeLevelTable", sqpack.LangNone, nil, &recipeLevelTables)
-	loadSheet(primaryReader, "CraftType", primaryLang, nil, &rawCraftTypes)
-	loadSheet(primaryReader, "SecretRecipeBook", primaryLang, nil, &rawSecretBooks)
-	loadSheet(primaryReader, "GatheringItem", sqpack.LangNone, nil, &gatheringItems)
-	loadSub(primaryReader, "GatheringItemPoint", sqpack.LangNone, &gatheringItemPointSubrows)
-	loadSheet(primaryReader, "GatheringPoint", sqpack.LangNone, nil, &gatheringPoints)
-	loadSheet(primaryReader, "GatheringPointBase", sqpack.LangNone, nil, &gatheringPointBases)
-	loadSheet(primaryReader, "ExportedGatheringPoint", sqpack.LangNone, nil, &exportedGatheringPoints)
-	loadSheet(primaryReader, "GatheringPointTransient", sqpack.LangNone, nil, &gatheringPointTransients)
-	loadSheet(primaryReader, "GatheringRarePopTimeTable", sqpack.LangNone, nil, &gatheringRarePopTimeTables)
-	loadSheet(primaryReader, "GatheringItemLevelConvertTable", sqpack.LangNone, nil, &rawGatheringItemLevels)
-	loadSheet(primaryReader, "GatheringType", primaryLang, nil, &rawGatheringTypes)
-	loadSheet(primaryReader, "GatheringSubCategory", primaryLang, nil, &rawGatheringSubCategories)
-	loadSheet(primaryReader, "TerritoryType", sqpack.LangNone, nil, &territoryTypes)
-	loadSheet(primaryReader, "PlaceName", primaryLang, nil, &rawPlaceNames)
-	loadSheet(primaryReader, "Map", sqpack.LangNone, nil, &maps)
-	loadSheet(primaryReader, "FishingSpot", primaryLang, nil, &fishingSpots)
-	loadSheet(primaryReader, "FishParameter", primaryLang, nil, &fishParameters)
-	loadSheet(primaryReader, "SpearfishingItem", primaryLang, nil, &spearfishingItems)
-	loadSheet(primaryReader, "SpearfishingNotebook", sqpack.LangNone, nil, &spearfishingNotebooks)
-	loadSheet(primaryReader, "GilShop", primaryLang, nil, &gilShops)
-	loadSub(primaryReader, "GilShopItem", sqpack.LangNone, &gilShopItems)
-	loadSheet(primaryReader, "SpecialShop", primaryLang, nil, &specialShops)
-	loadSub(primaryReader, "GCScripShopItem", sqpack.LangNone, &gcScripShopItems)
-	loadSheet(primaryReader, "FccShop", primaryLang, nil, &fccShops)
-	loadSheet(primaryReader, "TomestonesItem", sqpack.LangNone, nil, &tomestonesItems)
-	loadSheet(primaryReader, "ENpcResident", primaryLang, nil, &enpcResidents)
-	loadSheet(primaryReader, "ENpcBase", sqpack.LangNone, nil, &enpcBases)
-	loadSheet(primaryReader, "TopicSelect", primaryLang, nil, &topicSelects)
-	loadSheet(primaryReader, "PreHandler", sqpack.LangNone, nil, &preHandlers)
-	loadSheet(primaryReader, "InclusionShop", sqpack.LangNone, nil, &inclusionShops)
-	loadSheet(primaryReader, "InclusionShopCategory", primaryLang, nil, &inclusionCategories)
-	loadSub(primaryReader, "InclusionShopSeries", sqpack.LangNone, &inclusionSeries)
-	loadSheet(primaryReader, "CustomTalk", sqpack.LangNone, nil, &customTalks)
-	loadSheet(primaryReader, "Level", sqpack.LangNone, nil, &levels)
-	loadSheet(primaryReader, "Cabinet", sqpack.LangNone, nil, &rawCabinets)
-
-	loadSheet(primaryReader, "Achievement", primaryLang, nil, &achievementsPrimary)
-	if globalReader != nil {
-		if cnReader != nil {
-			loadSheet(globalReader, "Achievement", sqpack.LangEnglish, []int{1, 2}, &achievementsEn)
-		}
-		loadSheet(globalReader, "Achievement", sqpack.LangJapanese, []int{1, 2}, &achievementsJa)
-	} else {
-		achievementsEn = make(map[int]sqpack.Row)
-		achievementsJa = make(map[int]sqpack.Row)
-	}
-	loadSheet(primaryReader, "AchievementCategory", primaryLang, nil, &rawAchievementCategories)
-	loadSheet(primaryReader, "AchievementKind", primaryLang, nil, &rawAchievementKinds)
-	loadSheet(primaryReader, "Title", primaryLang, nil, &titlesPrimary)
-	if globalReader != nil {
-		if cnReader != nil {
-			loadSheet(globalReader, "Title", sqpack.LangEnglish, []int{0, 1}, &titlesEn)
-		}
-		loadSheet(globalReader, "Title", sqpack.LangJapanese, []int{0, 1}, &titlesJa)
-	} else {
-		titlesEn = make(map[int]sqpack.Row)
-		titlesJa = make(map[int]sqpack.Row)
-	}
 	loadSchema := func(reader *sqpack.GameReader, sheet string, lang sqpack.Language, fields []string, dst **sqpack.SchemaSheet) {
 		if reader == nil || schemasFS == nil {
 			return
@@ -462,73 +607,296 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		})
 	}
 
-	loadSheet(primaryReader, "RetainerTask", sqpack.LangNone, nil, &retainerTasks)
-	loadSheet(primaryReader, "RetainerTaskNormal", sqpack.LangNone, nil, &retainerTaskNormals)
-	loadSheet(primaryReader, "RetainerTaskParameter", sqpack.LangNone, nil, &retainerTaskParameters)
-
-	if schemasFS != nil {
-		// 任务表与关联表
-		loadSchema(primaryReader, "Quest", primaryLang, questNeededFields, &questsPrimary)
-		if globalReader != nil {
-			if cnReader != nil {
-				loadSchema(globalReader, "Quest", sqpack.LangEnglish, []string{"Name"}, &questsEn)
-				loadSchema(globalReader, "Leve", sqpack.LangEnglish, []string{"Name"}, &levesEn)
-			}
-			loadSchema(globalReader, "Quest", sqpack.LangJapanese, []string{"Name"}, &questsJa)
-			loadSchema(globalReader, "Leve", sqpack.LangJapanese, []string{"Name"}, &levesJa)
+	// 1. 语言无关 (LangNone) 原始表：同客户端下直接复用已加载快照，避免重复解压
+	if reuseNone {
+		bn := base.langNone
+		rawEquipSlots = bn.rawEquipSlots
+		rawRepairResources = bn.rawRepairResources
+		itemActions = bn.itemActions
+		itemFoods = bn.itemFoods
+		recipes = bn.recipes
+		recipeLevelTables = bn.recipeLevelTables
+		gatheringItems = bn.gatheringItems
+		gatheringItemPointSubrows = bn.gatheringItemPointSubrows
+		gatheringPoints = bn.gatheringPoints
+		gatheringPointBases = bn.gatheringPointBases
+		exportedGatheringPoints = bn.exportedGatheringPoints
+		gatheringPointTransients = bn.gatheringPointTransients
+		gatheringRarePopTimeTables = bn.gatheringRarePopTimeTables
+		rawGatheringItemLevels = bn.rawGatheringItemLevels
+		territoryTypes = bn.territoryTypes
+		maps = bn.maps
+		spearfishingNotebooks = bn.spearfishingNotebooks
+		gilShopItems = bn.gilShopItems
+		gcScripShopItems = bn.gcScripShopItems
+		tomestonesItems = bn.tomestonesItems
+		enpcBases = bn.enpcBases
+		preHandlers = bn.preHandlers
+		inclusionShops = bn.inclusionShops
+		inclusionSeries = bn.inclusionSeries
+		customTalks = bn.customTalks
+		levels = bn.levels
+		rawCabinets = bn.rawCabinets
+		retainerTasks = bn.retainerTasks
+		retainerTaskNormals = bn.retainerTaskNormals
+		retainerTaskParameters = bn.retainerTaskParameters
+		questClassJobRewards = bn.questClassJobRewards
+		eventIconTypes = bn.eventIconTypes
+		paramGrows = bn.paramGrows
+		beastRankBonuses = bn.beastRankBonuses
+		instanceContents = bn.instanceContents
+		craftLeves = bn.craftLeves
+		gatheringLeves = bn.gatheringLeves
+		gatheringLeveRoutes = bn.gatheringLeveRoutes
+		battleLeves = bn.battleLeves
+		companyLeves = bn.companyLeves
+		leveRewardItems = bn.leveRewardItems
+		leveRewardItemGroups = bn.leveRewardItemGroups
+		collectablesShopItems = bn.collectablesShopItems
+		collectablesShopRefines = bn.collectablesShopRefines
+		collectablesShopRewardItems = bn.collectablesShopRewardItems
+		collectablesShopRewardScrips = bn.collectablesShopRewardScrips
+		satisfactionNpcs = bn.satisfactionNpcs
+		satisfactionSupplies = bn.satisfactionSupplies
+		satisfactionRewards = bn.satisfactionRewards
+		hwdSupplies = bn.hwdSupplies
+		hwdRewards = bn.hwdRewards
+	} else {
+		loadSheet(primaryReader, "EquipSlotCategory", sqpack.LangNone, nil, &rawEquipSlots)
+		loadSheet(primaryReader, "ItemRepairResource", sqpack.LangNone, nil, &rawRepairResources)
+		loadSheet(primaryReader, "ItemAction", sqpack.LangNone, nil, &itemActions)
+		loadSheet(primaryReader, "ItemFood", sqpack.LangNone, nil, &itemFoods)
+		loadSheet(primaryReader, "Recipe", sqpack.LangNone, nil, &recipes)
+		loadSheet(primaryReader, "RecipeLevelTable", sqpack.LangNone, nil, &recipeLevelTables)
+		loadSheet(primaryReader, "GatheringItem", sqpack.LangNone, nil, &gatheringItems)
+		loadSub(primaryReader, "GatheringItemPoint", sqpack.LangNone, &gatheringItemPointSubrows)
+		loadSheet(primaryReader, "GatheringPoint", sqpack.LangNone, nil, &gatheringPoints)
+		loadSheet(primaryReader, "GatheringPointBase", sqpack.LangNone, nil, &gatheringPointBases)
+		loadSheet(primaryReader, "ExportedGatheringPoint", sqpack.LangNone, nil, &exportedGatheringPoints)
+		loadSheet(primaryReader, "GatheringPointTransient", sqpack.LangNone, nil, &gatheringPointTransients)
+		loadSheet(primaryReader, "GatheringRarePopTimeTable", sqpack.LangNone, nil, &gatheringRarePopTimeTables)
+		loadSheet(primaryReader, "GatheringItemLevelConvertTable", sqpack.LangNone, nil, &rawGatheringItemLevels)
+		loadSheet(primaryReader, "TerritoryType", sqpack.LangNone, nil, &territoryTypes)
+		loadSheet(primaryReader, "Map", sqpack.LangNone, nil, &maps)
+		loadSheet(primaryReader, "SpearfishingNotebook", sqpack.LangNone, nil, &spearfishingNotebooks)
+		loadSub(primaryReader, "GilShopItem", sqpack.LangNone, &gilShopItems)
+		loadSub(primaryReader, "GCScripShopItem", sqpack.LangNone, &gcScripShopItems)
+		loadSheet(primaryReader, "TomestonesItem", sqpack.LangNone, nil, &tomestonesItems)
+		loadSheet(primaryReader, "ENpcBase", sqpack.LangNone, nil, &enpcBases)
+		loadSheet(primaryReader, "PreHandler", sqpack.LangNone, nil, &preHandlers)
+		loadSheet(primaryReader, "InclusionShop", sqpack.LangNone, nil, &inclusionShops)
+		loadSub(primaryReader, "InclusionShopSeries", sqpack.LangNone, &inclusionSeries)
+		loadSheet(primaryReader, "CustomTalk", sqpack.LangNone, nil, &customTalks)
+		loadSheet(primaryReader, "Level", sqpack.LangNone, nil, &levels)
+		loadSheet(primaryReader, "Cabinet", sqpack.LangNone, nil, &rawCabinets)
+		loadSheet(primaryReader, "RetainerTask", sqpack.LangNone, nil, &retainerTasks)
+		loadSheet(primaryReader, "RetainerTaskNormal", sqpack.LangNone, nil, &retainerTaskNormals)
+		loadSheet(primaryReader, "RetainerTaskParameter", sqpack.LangNone, nil, &retainerTaskParameters)
+		if schemasFS != nil {
+			loadSchemaSub(primaryReader, "QuestClassJobReward", sqpack.LangNone, &questClassJobRewards)
+			loadSchema(primaryReader, "EventIconType", sqpack.LangNone, []string{"NpcIconAvailable"}, &eventIconTypes)
+			loadSchema(primaryReader, "ParamGrow", sqpack.LangNone, []string{"ExpToNext", "ScaledQuestXP"}, &paramGrows)
+			loadSchema(primaryReader, "BeastRankBonus", sqpack.LangNone, nil, &beastRankBonuses)
+			loadSchema(primaryReader, "InstanceContent", sqpack.LangNone, []string{"ContentFinderCondition"}, &instanceContents)
+			loadSchema(primaryReader, "CraftLeve", sqpack.LangNone, nil, &craftLeves)
+			loadSchema(primaryReader, "GatheringLeve", sqpack.LangNone, nil, &gatheringLeves)
+			loadSchema(primaryReader, "GatheringLeveRoute", sqpack.LangNone, nil, &gatheringLeveRoutes)
+			loadSchema(primaryReader, "BattleLeve", sqpack.LangNone, nil, &battleLeves)
+			loadSchema(primaryReader, "CompanyLeve", sqpack.LangNone, nil, &companyLeves)
+			loadSchema(primaryReader, "LeveRewardItem", sqpack.LangNone, nil, &leveRewardItems)
+			loadSchema(primaryReader, "LeveRewardItemGroup", sqpack.LangNone, nil, &leveRewardItemGroups)
+			loadSchemaSub(primaryReader, "CollectablesShopItem", sqpack.LangNone, &collectablesShopItems)
+			loadSchema(primaryReader, "CollectablesShopRefine", sqpack.LangNone, nil, &collectablesShopRefines)
+			loadSchema(primaryReader, "CollectablesShopRewardItem", sqpack.LangNone, nil, &collectablesShopRewardItems)
+			loadSchema(primaryReader, "CollectablesShopRewardScrip", sqpack.LangNone, nil, &collectablesShopRewardScrips)
+			loadSchema(primaryReader, "SatisfactionNpc", sqpack.LangNone, nil, &satisfactionNpcs)
+			loadSchemaSub(primaryReader, "SatisfactionSupply", sqpack.LangNone, &satisfactionSupplies)
+			loadSchema(primaryReader, "SatisfactionSupplyReward", sqpack.LangNone, nil, &satisfactionRewards)
+			loadSchema(primaryReader, "HWDCrafterSupply", sqpack.LangNone, nil, &hwdSupplies)
+			loadSchema(primaryReader, "HWDCrafterSupplyReward", sqpack.LangNone, nil, &hwdRewards)
 		}
-		loadSchema(primaryReader, "JournalGenre", primaryLang, []string{"Name", "Icon", "JournalCategory"}, &journalGenres)
-		loadSchema(primaryReader, "JournalCategory", primaryLang, []string{"Name", "JournalSection"}, &journalCategories)
-		loadSchema(primaryReader, "JournalSection", primaryLang, []string{"Name"}, &journalSections)
-		loadSchemaSub(primaryReader, "QuestClassJobReward", sqpack.LangNone, &questClassJobRewards)
-		loadSchema(primaryReader, "QuestRewardOther", primaryLang, []string{"Name", "Icon"}, &questRewardOthers)
-		loadSchema(primaryReader, "EventIconType", sqpack.LangNone, []string{"NpcIconAvailable"}, &eventIconTypes)
-		loadSchema(primaryReader, "ParamGrow", sqpack.LangNone, []string{"ExpToNext", "ScaledQuestXP"}, &paramGrows)
-		loadSchema(primaryReader, "BeastTribe", primaryLang, []string{"Name", "CurrencyItem", "BeastRankBonus"}, &beastTribes)
-		loadSchema(primaryReader, "BeastRankBonus", sqpack.LangNone, nil, &beastRankBonuses)
-		loadSchema(primaryReader, "BeastReputationRank", primaryLang, []string{"Name"}, &beastReputationRanks)
-		loadSchema(primaryReader, "GrandCompany", primaryLang, []string{"Singular"}, &grandCompanies)
-		loadSchema(primaryReader, "ExVersion", primaryLang, []string{"Name"}, &exVersions)
-		loadSchema(primaryReader, "Mount", primaryLang, []string{"Singular", "Icon"}, &mounts)
-		loadSchema(primaryReader, "Action", primaryLang, []string{"Name", "Icon"}, &actions)
-		loadSchema(primaryReader, "Emote", primaryLang, []string{"Name", "Icon"}, &emotes)
-		loadSchema(primaryReader, "GeneralAction", primaryLang, []string{"Name", "Icon"}, &generalActions)
-		loadSchema(primaryReader, "InstanceContent", sqpack.LangNone, []string{"ContentFinderCondition"}, &instanceContents)
-		loadSchema(primaryReader, "ContentFinderCondition", primaryLang, []string{"Name"}, &contentFinderConditions)
-		loadSchema(primaryReader, "EObjName", primaryLang, []string{"Singular"}, &eobjNames)
+	}
 
-		// 理符表与子表
-		loadSchema(primaryReader, "Leve", primaryLang, nil, &levesPrimary)
-		loadSchema(primaryReader, "CraftLeve", sqpack.LangNone, nil, &craftLeves)
-		loadSchema(primaryReader, "GatheringLeve", sqpack.LangNone, nil, &gatheringLeves)
-		loadSchema(primaryReader, "GatheringLeveRoute", sqpack.LangNone, nil, &gatheringLeveRoutes)
-		loadSchema(primaryReader, "BattleLeve", sqpack.LangNone, nil, &battleLeves)
-		loadSchema(primaryReader, "CompanyLeve", sqpack.LangNone, nil, &companyLeves)
-		loadSchema(primaryReader, "LeveRewardItem", sqpack.LangNone, nil, &leveRewardItems)
-		loadSchema(primaryReader, "LeveRewardItemGroup", sqpack.LangNone, nil, &leveRewardItemGroups)
-		loadSchema(primaryReader, "LeveAssignmentType", primaryLang, []string{"Name", "Icon"}, &leveAssignmentTypes)
-		loadSchema(primaryReader, "LeveClient", primaryLang, []string{"Name"}, &leveClients)
-		loadSchema(primaryReader, "Town", primaryLang, []string{"Name", "Icon"}, &towns)
-		loadSchema(primaryReader, "LeveString", primaryLang, []string{"Objective"}, &leveStrings)
-		loadSchema(primaryReader, "GatheringLeveRule", primaryLang, []string{"Rule"}, &gatheringLeveRules)
-		loadSchema(primaryReader, "BattleLeveRule", primaryLang, []string{"Rule"}, &battleLeveRules)
-		loadSchema(primaryReader, "CompanyLeveRule", primaryLang, nil, &companyLeveRules)
-		loadSchema(primaryReader, "EventItem", primaryLang, []string{"Singular", "Name", "Icon"}, &eventItems)
-		loadSchema(primaryReader, "BNpcName", primaryLang, []string{"Singular"}, &bnpcNames)
+	// 2. 与主语言相关的本地化表：仅在主客户端语言变化时读取
+	if reusePrim {
+		bp := base.langPrimary
+		itemsPrimary = bp.itemsPrimary
+		itemsCn = bp.itemsCn
+		itemsEn = bp.itemsEn
+		itemsJa = bp.itemsJa
+		rawCategories = bp.rawCategories
+		rawClassJobs = bp.rawClassJobs
+		rawClassJobCategories = bp.rawClassJobCategories
+		rawBaseParams = bp.rawBaseParams
+		rawCraftTypes = bp.rawCraftTypes
+		rawSecretBooks = bp.rawSecretBooks
+		rawGatheringTypes = bp.rawGatheringTypes
+		rawGatheringSubCategories = bp.rawGatheringSubCategories
+		rawPlaceNames = bp.rawPlaceNames
+		fishingSpots = bp.fishingSpots
+		fishParameters = bp.fishParameters
+		spearfishingItems = bp.spearfishingItems
+		gilShops = bp.gilShops
+		specialShops = bp.specialShops
+		fccShops = bp.fccShops
+		enpcResidents = bp.enpcResidents
+		topicSelects = bp.topicSelects
+		inclusionCategories = bp.inclusionCategories
+		achievementsPrimary = bp.achievementsPrimary
+		achievementsCn = bp.achievementsCn
+		achievementsEn = bp.achievementsEn
+		achievementsJa = bp.achievementsJa
+		rawAchievementCategories = bp.rawAchievementCategories
+		rawAchievementKinds = bp.rawAchievementKinds
+		titlesPrimary = bp.titlesPrimary
+		titlesEn = bp.titlesEn
+		titlesJa = bp.titlesJa
+		questsPrimary = bp.questsPrimary
+		questsCn = bp.questsCn
+		questsEn = bp.questsEn
+		questsJa = bp.questsJa
+		journalGenres = bp.journalGenres
+		journalCategories = bp.journalCategories
+		journalSections = bp.journalSections
+		questRewardOthers = bp.questRewardOthers
+		beastTribes = bp.beastTribes
+		beastReputationRanks = bp.beastReputationRanks
+		grandCompanies = bp.grandCompanies
+		exVersions = bp.exVersions
+		mounts = bp.mounts
+		actions = bp.actions
+		emotes = bp.emotes
+		generalActions = bp.generalActions
+		contentFinderConditions = bp.contentFinderConditions
+		eobjNames = bp.eobjNames
+		levesPrimary = bp.levesPrimary
+		levesCn = bp.levesCn
+		levesEn = bp.levesEn
+		levesJa = bp.levesJa
+		leveAssignmentTypes = bp.leveAssignmentTypes
+		leveClients = bp.leveClients
+		towns = bp.towns
+		leveStrings = bp.leveStrings
+		gatheringLeveRules = bp.gatheringLeveRules
+		battleLeveRules = bp.battleLeveRules
+		companyLeveRules = bp.companyLeveRules
+		eventItems = bp.eventItems
+		bnpcNames = bp.bnpcNames
+		collectablesShops = bp.collectablesShops
+		collectablesShopItemGroups = bp.collectablesShopItemGroups
+		hwdTerms = bp.hwdTerms
+	} else {
+		loadSheet(primaryReader, "Item", primaryLang, nil, &itemsPrimary)
+		if cnReader != nil && primaryLang != sqpack.LangChineseSimplified {
+			loadSheet(cnReader, "Item", sqpack.LangChineseSimplified, []int{8, 9}, &itemsCn)
+		}
+		if globalReader != nil {
+			if primaryLang != sqpack.LangEnglish {
+				loadSheet(globalReader, "Item", sqpack.LangEnglish, []int{8, 9}, &itemsEn)
+			}
+			if primaryLang != sqpack.LangJapanese {
+				loadSheet(globalReader, "Item", sqpack.LangJapanese, []int{8, 9}, &itemsJa)
+			}
+		} else {
+			itemsEn = make(map[int]sqpack.Row)
+			itemsJa = make(map[int]sqpack.Row)
+		}
 
-		// 收藏品交易、老主顾与苍天街供货表
-		loadSchema(primaryReader, "CollectablesShop", primaryLang, nil, &collectablesShops)
-		loadSchemaSub(primaryReader, "CollectablesShopItem", sqpack.LangNone, &collectablesShopItems)
-		loadSchema(primaryReader, "CollectablesShopItemGroup", primaryLang, []string{"Name"}, &collectablesShopItemGroups)
-		loadSchema(primaryReader, "CollectablesShopRefine", sqpack.LangNone, nil, &collectablesShopRefines)
-		loadSchema(primaryReader, "CollectablesShopRewardItem", sqpack.LangNone, nil, &collectablesShopRewardItems)
-		loadSchema(primaryReader, "CollectablesShopRewardScrip", sqpack.LangNone, nil, &collectablesShopRewardScrips)
-		loadSchema(primaryReader, "SatisfactionNpc", sqpack.LangNone, nil, &satisfactionNpcs)
-		loadSchemaSub(primaryReader, "SatisfactionSupply", sqpack.LangNone, &satisfactionSupplies)
-		loadSchema(primaryReader, "SatisfactionSupplyReward", sqpack.LangNone, nil, &satisfactionRewards)
-		loadSchema(primaryReader, "HWDCrafterSupply", sqpack.LangNone, nil, &hwdSupplies)
-		loadSchema(primaryReader, "HWDCrafterSupplyReward", sqpack.LangNone, nil, &hwdRewards)
-		loadSchema(primaryReader, "HWDCrafterSupplyTerm", primaryLang, []string{"Name"}, &hwdTerms)
+		loadSheet(primaryReader, "ItemUICategory", primaryLang, nil, &rawCategories)
+		loadSheet(primaryReader, "ClassJob", primaryLang, nil, &rawClassJobs)
+		loadSheet(primaryReader, "ClassJobCategory", primaryLang, nil, &rawClassJobCategories)
+		loadSheet(primaryReader, "BaseParam", primaryLang, nil, &rawBaseParams)
+		loadSheet(primaryReader, "CraftType", primaryLang, nil, &rawCraftTypes)
+		loadSheet(primaryReader, "SecretRecipeBook", primaryLang, nil, &rawSecretBooks)
+		loadSheet(primaryReader, "GatheringType", primaryLang, nil, &rawGatheringTypes)
+		loadSheet(primaryReader, "GatheringSubCategory", primaryLang, nil, &rawGatheringSubCategories)
+		loadSheet(primaryReader, "PlaceName", primaryLang, nil, &rawPlaceNames)
+		loadSheet(primaryReader, "FishingSpot", primaryLang, nil, &fishingSpots)
+		loadSheet(primaryReader, "FishParameter", primaryLang, nil, &fishParameters)
+		loadSheet(primaryReader, "SpearfishingItem", primaryLang, nil, &spearfishingItems)
+		loadSheet(primaryReader, "GilShop", primaryLang, nil, &gilShops)
+		loadSheet(primaryReader, "SpecialShop", primaryLang, nil, &specialShops)
+		loadSheet(primaryReader, "FccShop", primaryLang, nil, &fccShops)
+		loadSheet(primaryReader, "ENpcResident", primaryLang, nil, &enpcResidents)
+		loadSheet(primaryReader, "TopicSelect", primaryLang, nil, &topicSelects)
+		loadSheet(primaryReader, "InclusionShopCategory", primaryLang, nil, &inclusionCategories)
+
+		loadSheet(primaryReader, "Achievement", primaryLang, nil, &achievementsPrimary)
+		if cnReader != nil && primaryLang != sqpack.LangChineseSimplified {
+			loadSheet(cnReader, "Achievement", sqpack.LangChineseSimplified, []int{1, 2}, &achievementsCn)
+		}
+		if globalReader != nil {
+			if primaryLang != sqpack.LangEnglish {
+				loadSheet(globalReader, "Achievement", sqpack.LangEnglish, []int{1, 2}, &achievementsEn)
+			}
+			if primaryLang != sqpack.LangJapanese {
+				loadSheet(globalReader, "Achievement", sqpack.LangJapanese, []int{1, 2}, &achievementsJa)
+			}
+		} else {
+			achievementsEn = make(map[int]sqpack.Row)
+			achievementsJa = make(map[int]sqpack.Row)
+		}
+		loadSheet(primaryReader, "AchievementCategory", primaryLang, nil, &rawAchievementCategories)
+		loadSheet(primaryReader, "AchievementKind", primaryLang, nil, &rawAchievementKinds)
+		loadSheet(primaryReader, "Title", primaryLang, nil, &titlesPrimary)
+		if globalReader != nil {
+			if primaryLang != sqpack.LangEnglish {
+				loadSheet(globalReader, "Title", sqpack.LangEnglish, []int{0, 1}, &titlesEn)
+			}
+			if primaryLang != sqpack.LangJapanese {
+				loadSheet(globalReader, "Title", sqpack.LangJapanese, []int{0, 1}, &titlesJa)
+			}
+		} else {
+			titlesEn = make(map[int]sqpack.Row)
+			titlesJa = make(map[int]sqpack.Row)
+		}
+
+		if schemasFS != nil {
+			loadSchema(primaryReader, "Quest", primaryLang, questNeededFields, &questsPrimary)
+			if cnReader != nil && primaryLang != sqpack.LangChineseSimplified {
+				loadSchema(cnReader, "Quest", sqpack.LangChineseSimplified, []string{"Name"}, &questsCn)
+				loadSchema(cnReader, "Leve", sqpack.LangChineseSimplified, []string{"Name"}, &levesCn)
+			}
+			if globalReader != nil {
+				if primaryLang != sqpack.LangEnglish {
+					loadSchema(globalReader, "Quest", sqpack.LangEnglish, []string{"Name"}, &questsEn)
+					loadSchema(globalReader, "Leve", sqpack.LangEnglish, []string{"Name"}, &levesEn)
+				}
+				if primaryLang != sqpack.LangJapanese {
+					loadSchema(globalReader, "Quest", sqpack.LangJapanese, []string{"Name"}, &questsJa)
+					loadSchema(globalReader, "Leve", sqpack.LangJapanese, []string{"Name"}, &levesJa)
+				}
+			}
+			loadSchema(primaryReader, "JournalGenre", primaryLang, []string{"Name", "Icon", "JournalCategory"}, &journalGenres)
+			loadSchema(primaryReader, "JournalCategory", primaryLang, []string{"Name", "JournalSection"}, &journalCategories)
+			loadSchema(primaryReader, "JournalSection", primaryLang, []string{"Name"}, &journalSections)
+			loadSchema(primaryReader, "QuestRewardOther", primaryLang, []string{"Name", "Icon"}, &questRewardOthers)
+			loadSchema(primaryReader, "BeastTribe", primaryLang, []string{"Name", "CurrencyItem", "BeastRankBonus"}, &beastTribes)
+			loadSchema(primaryReader, "BeastReputationRank", primaryLang, []string{"Name"}, &beastReputationRanks)
+			loadSchema(primaryReader, "GrandCompany", primaryLang, []string{"Singular"}, &grandCompanies)
+			loadSchema(primaryReader, "ExVersion", primaryLang, []string{"Name"}, &exVersions)
+			loadSchema(primaryReader, "Mount", primaryLang, []string{"Singular", "Icon"}, &mounts)
+			loadSchema(primaryReader, "Action", primaryLang, []string{"Name", "Icon"}, &actions)
+			loadSchema(primaryReader, "Emote", primaryLang, []string{"Name", "Icon"}, &emotes)
+			loadSchema(primaryReader, "GeneralAction", primaryLang, []string{"Name", "Icon"}, &generalActions)
+			loadSchema(primaryReader, "ContentFinderCondition", primaryLang, []string{"Name"}, &contentFinderConditions)
+			loadSchema(primaryReader, "EObjName", primaryLang, []string{"Singular"}, &eobjNames)
+
+			loadSchema(primaryReader, "Leve", primaryLang, nil, &levesPrimary)
+			loadSchema(primaryReader, "LeveAssignmentType", primaryLang, []string{"Name", "Icon"}, &leveAssignmentTypes)
+			loadSchema(primaryReader, "LeveClient", primaryLang, []string{"Name"}, &leveClients)
+			loadSchema(primaryReader, "Town", primaryLang, []string{"Name", "Icon"}, &towns)
+			loadSchema(primaryReader, "LeveString", primaryLang, []string{"Objective"}, &leveStrings)
+			loadSchema(primaryReader, "GatheringLeveRule", primaryLang, []string{"Rule"}, &gatheringLeveRules)
+			loadSchema(primaryReader, "BattleLeveRule", primaryLang, []string{"Rule"}, &battleLeveRules)
+			loadSchema(primaryReader, "CompanyLeveRule", primaryLang, nil, &companyLeveRules)
+			loadSchema(primaryReader, "EventItem", primaryLang, []string{"Singular", "Name", "Icon"}, &eventItems)
+			loadSchema(primaryReader, "BNpcName", primaryLang, []string{"Singular"}, &bnpcNames)
+
+			loadSchema(primaryReader, "CollectablesShop", primaryLang, nil, &collectablesShops)
+			loadSchema(primaryReader, "CollectablesShopItemGroup", primaryLang, []string{"Name"}, &collectablesShopItemGroups)
+			loadSchema(primaryReader, "HWDCrafterSupplyTerm", primaryLang, []string{"Name"}, &hwdTerms)
+		}
 	}
 
 	totalSheets := len(tasks)
@@ -550,36 +918,50 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		onProgress(p)
 	}
 
-	emit(LoadProgress{
-		Stage:   LoadStageSheets,
-		Done:    0,
-		Total:   totalSheets,
-		Message: "正在读取游戏数据表...",
-	}, true)
+	sheetsMsg := i18n.T(appLang, "loading.msg_sheets")
+	if totalSheets > 0 {
+		emit(LoadProgress{
+			Stage:   LoadStageSheets,
+			Done:    0,
+			Total:   totalSheets,
+			Message: sheetsMsg,
+		}, true)
 
-	wg.Add(totalSheets)
-	for _, fn := range tasks {
-		run := fn
-		go func() {
-			defer wg.Done()
-			run()
-			done := int(completedSheets.Add(1))
-			emit(LoadProgress{
-				Stage:   LoadStageSheets,
-				Done:    done,
-				Total:   totalSheets,
-				Message: "正在读取游戏数据表...",
-			}, done == totalSheets)
-		}()
-	}
-
-	wg.Wait()
-	if firstErr != nil {
-		if cnReader != nil {
-			_ = cnReader.Close()
+		// 限制并发工作协程数量，避免切换语言后台读取时抢占主 UI 线程的 CPU 时间片
+		workers := min(totalSheets, max(4, runtime.NumCPU()))
+		jobCh := make(chan func(), totalSheets)
+		for _, fn := range tasks {
+			jobCh <- fn
 		}
-		if globalReader != nil {
-			_ = globalReader.Close()
+		close(jobCh)
+
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for range workers {
+			go func() {
+				defer wg.Done()
+				for run := range jobCh {
+					run()
+					done := int(completedSheets.Add(1))
+					emit(LoadProgress{
+						Stage:   LoadStageSheets,
+						Done:    done,
+						Total:   totalSheets,
+						Message: sheetsMsg,
+					}, done == totalSheets)
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	if firstErr != nil {
+		if !opts.SharedReaders {
+			if openedCN && cnReader != nil {
+				_ = cnReader.Close()
+			}
+			if openedGlobal && globalReader != nil {
+				_ = globalReader.Close()
+			}
 		}
 		return nil, firstErr
 	}
@@ -588,16 +970,23 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		Stage:   LoadStageIndices,
 		Done:    0,
 		Total:   4,
-		Message: "正在构建配方与采集索引...",
+		Message: i18n.T(appLang, "loading.msg_recipes"),
 	}, true)
 
-	// 仅国际服模式时，itemsPrimary 本身即为英文表，复用避免重复读取
-	if cnReader == nil && globalReader != nil {
+	// 若主语言本身为英语或日语，直接复用主表作为对应语言副表，避免重复读取
+	switch primaryLang {
+	case sqpack.LangEnglish:
 		itemsEn = itemsPrimary
 		achievementsEn = achievementsPrimary
 		titlesEn = titlesPrimary
 		questsEn = questsPrimary
 		levesEn = levesPrimary
+	case sqpack.LangJapanese:
+		itemsJa = itemsPrimary
+		achievementsJa = achievementsPrimary
+		titlesJa = titlesPrimary
+		questsJa = questsPrimary
+		levesJa = levesPrimary
 	}
 
 	// 构建基础字典映射
@@ -631,7 +1020,7 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 
 	equipSlots := make(map[int]string, len(rawEquipSlots))
 	for id, row := range rawEquipSlots {
-		equipSlots[id] = formatEquipSlotCategory(row)
+		equipSlots[id] = formatEquipSlotCategoryForLang(row, appLang)
 	}
 
 	itemRepairResources := make(map[int]int, len(rawRepairResources))
@@ -828,11 +1217,12 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		Stage:   LoadStageIndices,
 		Done:    1,
 		Total:   4,
-		Message: "正在整理商店与雇员探险来源...",
+		Message: i18n.T(appLang, "loading.msg_shops"),
 	}, true)
 
 	// 构建商店与雇员探险索引
 	shopIdx := buildShopIndices(shopLoaderInput{
+		appLang:             appLang,
 		itemsPrimary:        itemsPrimary,
 		gilShops:            gilShops,
 		gilShopItems:        gilShopItems,
@@ -851,7 +1241,7 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		levels:              levels,
 	})
 
-	retainerIdx := buildRetainerIndices(retainerTasks, retainerTaskNormals, retainerTaskParameters, classJobCategories)
+	retainerIdx := buildRetainerIndices(appLang, retainerTasks, retainerTaskNormals, retainerTaskParameters, classJobCategories)
 
 	tomestoneByIndex := make(map[int]int)
 	for _, row := range tomestonesItems {
@@ -873,10 +1263,11 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		Stage:   LoadStageIndices,
 		Done:    2,
 		Total:   4,
-		Message: "正在关联收藏品、任务与理符数据...",
+		Message: i18n.T(appLang, "loading.msg_relations"),
 	}, true)
 
 	collectablesIdx := buildCollectablesData(collectablesLoaderInput{
+		appLang:                appLang,
 		shops:                  collectablesShops,
 		shopItems:              collectablesShopItems,
 		shopItemGroups:         collectablesShopItemGroups,
@@ -902,7 +1293,9 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 	})
 
 	questIdx := buildQuestData(questLoaderInput{
+		appLang:                 appLang,
 		quests:                  questsPrimary,
+		questsCn:                questsCn,
 		questsEn:                questsEn,
 		questsJa:                questsJa,
 		journalGenres:           journalGenres,
@@ -996,6 +1389,10 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		if namePrimary == "" {
 			continue
 		}
+		zhName := ""
+		if cnRow, ok := itemsCn[itemID]; ok {
+			zhName = cnRow.StringAt(9)
+		}
 		enName := ""
 		if enRow, ok := itemsEn[itemID]; ok {
 			enName = enRow.StringAt(9)
@@ -1007,7 +1404,7 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 
 		catID := row.IntAt(15)
 		catInfo, hasCat := categories[catID]
-		catName := "其他"
+		catName := i18n.T(appLang, "common.other")
 		catIconID := 0
 		if hasCat {
 			catName = catInfo.name
@@ -1041,6 +1438,7 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		summary := ItemSummary{
 			ID:                  itemID,
 			NameCn:              namePrimary,
+			NameZh:              zhName,
 			NameEn:              enName,
 			NameJa:              jaName,
 			IconID:              row.IntAt(10),
@@ -1074,7 +1472,9 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 	sort.Slice(itemSummaries, func(i, j int) bool { return itemSummaries[i].ID < itemSummaries[j].ID })
 
 	leveIdx := buildLeveData(leveLoaderInput{
+		appLang:               appLang,
 		leves:                 levesPrimary,
+		levesCn:               levesCn,
 		levesEn:               levesEn,
 		levesJa:               levesJa,
 		craftLeves:            craftLeves,
@@ -1121,7 +1521,7 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		Stage:   LoadStageIndices,
 		Done:    3,
 		Total:   4,
-		Message: "正在生成成就与搜索索引...",
+		Message: i18n.T(appLang, "loading.msg_achievements"),
 	}, true)
 
 	// 解析成就分类、大类与称号表
@@ -1169,6 +1569,7 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		if namePrimary == "" {
 			continue
 		}
+		cnRow := achievementsCn[achID]
 		enRow := achievementsEn[achID]
 		jaRow := achievementsJa[achID]
 		catID := row.IntAt(0)
@@ -1176,11 +1577,11 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		kindID := catInfo.kindID
 		kindName := achKinds[kindID].name
 		if kindName == "" {
-			kindName = "其他"
+			kindName = i18n.T(appLang, "common.other")
 		}
 		catName := catInfo.name
 		if catName == "" {
-			catName = "常规"
+			catName = i18n.T(appLang, "common.general")
 		}
 
 		titleID := row.IntAt(6)
@@ -1213,6 +1614,7 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		entry := AchievementEntry{
 			ID:               achID,
 			NameCn:           namePrimary,
+			NameZh:           cnRow.StringAt(1),
 			NameEn:           enRow.StringAt(1),
 			NameJa:           jaRow.StringAt(1),
 			DescriptionCn:    row.StringAt(2),
@@ -1257,7 +1659,7 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		}
 		kName := achKinds[cat.kindID].name
 		if kName == "" {
-			kName = "其他"
+			kName = i18n.T(appLang, "common.other")
 		}
 		catsByKind[cat.kindID] = append(catsByKind[cat.kindID], AchievementCategoryInfo{
 			ID:       id,
@@ -1306,19 +1708,156 @@ func LoadGameDataStoreWithProgress(resolved *config.ResolvedPaths, schemasFS fs.
 		achievementCategoryList = append(achievementCategoryList, orphanCats...)
 	}
 
+	var savedNone *rawLangNoneSheets
+	if reuseNone {
+		savedNone = base.langNone
+	} else {
+		savedNone = &rawLangNoneSheets{
+			rawEquipSlots:                rawEquipSlots,
+			rawRepairResources:           rawRepairResources,
+			itemActions:                  itemActions,
+			itemFoods:                    itemFoods,
+			recipes:                      recipes,
+			recipeLevelTables:            recipeLevelTables,
+			gatheringItems:               gatheringItems,
+			gatheringItemPointSubrows:    gatheringItemPointSubrows,
+			gatheringPoints:              gatheringPoints,
+			gatheringPointBases:          gatheringPointBases,
+			exportedGatheringPoints:      exportedGatheringPoints,
+			gatheringPointTransients:     gatheringPointTransients,
+			gatheringRarePopTimeTables:   gatheringRarePopTimeTables,
+			rawGatheringItemLevels:       rawGatheringItemLevels,
+			territoryTypes:               territoryTypes,
+			maps:                         maps,
+			spearfishingNotebooks:        spearfishingNotebooks,
+			gilShopItems:                 gilShopItems,
+			gcScripShopItems:             gcScripShopItems,
+			tomestonesItems:              tomestonesItems,
+			enpcBases:                    enpcBases,
+			preHandlers:                  preHandlers,
+			inclusionShops:               inclusionShops,
+			inclusionSeries:              inclusionSeries,
+			customTalks:                  customTalks,
+			levels:                       levels,
+			rawCabinets:                  rawCabinets,
+			retainerTasks:                retainerTasks,
+			retainerTaskNormals:          retainerTaskNormals,
+			retainerTaskParameters:       retainerTaskParameters,
+			questClassJobRewards:         questClassJobRewards,
+			eventIconTypes:               eventIconTypes,
+			paramGrows:                   paramGrows,
+			beastRankBonuses:             beastRankBonuses,
+			instanceContents:             instanceContents,
+			craftLeves:                   craftLeves,
+			gatheringLeves:               gatheringLeves,
+			gatheringLeveRoutes:          gatheringLeveRoutes,
+			battleLeves:                  battleLeves,
+			companyLeves:                 companyLeves,
+			leveRewardItems:              leveRewardItems,
+			leveRewardItemGroups:         leveRewardItemGroups,
+			collectablesShopItems:        collectablesShopItems,
+			collectablesShopRefines:      collectablesShopRefines,
+			collectablesShopRewardItems:  collectablesShopRewardItems,
+			collectablesShopRewardScrips: collectablesShopRewardScrips,
+			satisfactionNpcs:             satisfactionNpcs,
+			satisfactionSupplies:         satisfactionSupplies,
+			satisfactionRewards:          satisfactionRewards,
+			hwdSupplies:                  hwdSupplies,
+			hwdRewards:                   hwdRewards,
+		}
+	}
+
+	var savedPrim *rawPrimaryLangSheets
+	if reusePrim {
+		savedPrim = base.langPrimary
+	} else {
+		savedPrim = &rawPrimaryLangSheets{
+			itemsPrimary:               itemsPrimary,
+			itemsCn:                    itemsCn,
+			itemsEn:                    itemsEn,
+			itemsJa:                    itemsJa,
+			rawCategories:              rawCategories,
+			rawClassJobs:               rawClassJobs,
+			rawClassJobCategories:      rawClassJobCategories,
+			rawBaseParams:              rawBaseParams,
+			rawCraftTypes:              rawCraftTypes,
+			rawSecretBooks:             rawSecretBooks,
+			rawGatheringTypes:          rawGatheringTypes,
+			rawGatheringSubCategories:  rawGatheringSubCategories,
+			rawPlaceNames:              rawPlaceNames,
+			fishingSpots:               fishingSpots,
+			fishParameters:             fishParameters,
+			spearfishingItems:          spearfishingItems,
+			gilShops:                   gilShops,
+			specialShops:               specialShops,
+			fccShops:                   fccShops,
+			enpcResidents:              enpcResidents,
+			topicSelects:               topicSelects,
+			inclusionCategories:        inclusionCategories,
+			achievementsPrimary:        achievementsPrimary,
+			achievementsCn:             achievementsCn,
+			achievementsEn:             achievementsEn,
+			achievementsJa:             achievementsJa,
+			rawAchievementCategories:   rawAchievementCategories,
+			rawAchievementKinds:        rawAchievementKinds,
+			titlesPrimary:              titlesPrimary,
+			titlesEn:                   titlesEn,
+			titlesJa:                   titlesJa,
+			questsPrimary:              questsPrimary,
+			questsCn:                   questsCn,
+			questsEn:                   questsEn,
+			questsJa:                   questsJa,
+			journalGenres:              journalGenres,
+			journalCategories:          journalCategories,
+			journalSections:            journalSections,
+			questRewardOthers:          questRewardOthers,
+			beastTribes:                beastTribes,
+			beastReputationRanks:       beastReputationRanks,
+			grandCompanies:             grandCompanies,
+			exVersions:                 exVersions,
+			mounts:                     mounts,
+			actions:                    actions,
+			emotes:                     emotes,
+			generalActions:             generalActions,
+			contentFinderConditions:    contentFinderConditions,
+			eobjNames:                  eobjNames,
+			levesPrimary:               levesPrimary,
+			levesCn:                    levesCn,
+			levesEn:                    levesEn,
+			levesJa:                    levesJa,
+			leveAssignmentTypes:        leveAssignmentTypes,
+			leveClients:                leveClients,
+			towns:                      towns,
+			leveStrings:                leveStrings,
+			gatheringLeveRules:         gatheringLeveRules,
+			battleLeveRules:            battleLeveRules,
+			companyLeveRules:           companyLeveRules,
+			eventItems:                 eventItems,
+			bnpcNames:                  bnpcNames,
+			collectablesShops:          collectablesShops,
+			collectablesShopItemGroups: collectablesShopItemGroups,
+			hwdTerms:                   hwdTerms,
+		}
+	}
+
 	return &Store{
 		CNReader:                       cnReader,
 		GlobalReader:                   globalReader,
 		PrimaryReader:                  primaryReader,
-		TextureCache:                   sqpack.NewTextureCache(1000),
+		TextureCache:                   texCache,
 		HasCN:                          resolved.HasCN(),
 		HasGlobal:                      resolved.HasGlobal(),
 		CNVersion:                      cnVer,
 		GlobalVersion:                  globalVer,
-		PrimaryVersion:                 resolved.PrimaryVersion(),
+		PrimaryVersion:                 resolved.VersionForClient(primaryReader == globalReader),
 		CNPath:                         cnPath,
 		GlobalPath:                     globalPath,
 		LoadTimeMs:                     time.Since(startTime).Milliseconds(),
+		AppLang:                        appLang,
+		PrimaryLang:                    primaryLang,
+		sharedReaders:                  opts.SharedReaders,
+		langNone:                       savedNone,
+		langPrimary:                    savedPrim,
 		ItemsPrimary:                   itemsPrimary,
 		ItemsEn:                        itemsEn,
 		ItemsJa:                        itemsJa,

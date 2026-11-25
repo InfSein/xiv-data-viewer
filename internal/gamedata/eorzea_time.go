@@ -3,7 +3,10 @@ package gamedata
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"time"
+
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 )
 
 // eorzeaMultiplier 表示艾欧泽亚时间与现实时间换算比例（1 艾欧泽亚日 = 70 现实分钟）。
@@ -42,15 +45,20 @@ func eorzeaMinutesToRealSeconds(etMinutes int) int {
 
 // FormatRealDuration 将现实秒数格式化为 "X分YY秒" 或 "Y秒"。
 func FormatRealDuration(seconds int) string {
+	return FormatRealDurationForLang(seconds, i18n.LangZH)
+}
+
+// FormatRealDurationForLang 按指定界面语言将现实秒数格式化为可读倒计时。
+func FormatRealDurationForLang(seconds int, lang i18n.Lang) string {
 	if seconds < 0 {
 		seconds = 0
 	}
 	mins := seconds / 60
 	secs := seconds % 60
 	if mins <= 0 {
-		return fmt.Sprintf("%d秒", secs)
+		return i18n.Tf(lang, "time.sec", "sec", strconv.Itoa(secs))
 	}
-	return fmt.Sprintf("%d分%02d秒", mins, secs)
+	return i18n.Tf(lang, "time.min_sec", "min", strconv.Itoa(mins), "sec", fmt.Sprintf("%02d", secs))
 }
 
 // TimedNodeActiveStatus 表示限时采集点在当前 ET 下的开放状态与现实倒计时。
@@ -64,10 +72,15 @@ type TimedNodeActiveStatus struct {
 
 // EvaluateGatheringWindows 评估限时采集点当前是否处于开放窗口及距离下次变化的现实时间。
 func EvaluateGatheringWindows(windows []GatheringTimeWindow, now time.Time) TimedNodeActiveStatus {
+	return EvaluateGatheringWindowsForLang(windows, now, i18n.LangZH)
+}
+
+// EvaluateGatheringWindowsForLang 按指定界面语言评估限时采集点开放窗口及倒计时文本。
+func EvaluateGatheringWindowsForLang(windows []GatheringTimeWindow, now time.Time, lang i18n.Lang) TimedNodeActiveStatus {
 	if len(windows) == 0 {
 		return TimedNodeActiveStatus{
 			IsActive:   true,
-			StatusText: "常驻开放",
+			StatusText: i18n.T(lang, "time.always_open"),
 		}
 	}
 
@@ -85,7 +98,7 @@ func EvaluateGatheringWindows(windows []GatheringTimeWindow, now time.Time) Time
 				IsActive:             true,
 				ActiveWindow:         &winCopy,
 				RealSecondsRemaining: realSec,
-				StatusText:           fmt.Sprintf("采集开放中 · 剩余 %s", FormatRealDuration(realSec)),
+				StatusText:           i18n.Tf(lang, "time.open_remaining", "dur", FormatRealDurationForLang(realSec, lang)),
 			}
 		}
 	}
@@ -106,6 +119,6 @@ func EvaluateGatheringWindows(windows []GatheringTimeWindow, now time.Time) Time
 		IsActive:             false,
 		NextWindow:           &winCopy,
 		RealSecondsRemaining: realWait,
-		StatusText:           fmt.Sprintf("距下次开放 (%s) 还有 %s", nextWin.StartET, FormatRealDuration(realWait)),
+		StatusText:           i18n.Tf(lang, "time.next_open", "et", nextWin.StartET, "dur", FormatRealDurationForLang(realWait, lang)),
 	}
 }

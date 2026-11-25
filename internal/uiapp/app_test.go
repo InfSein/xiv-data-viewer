@@ -1,25 +1,45 @@
 package uiapp
 
 import (
+	"archive/zip"
+	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"image"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/InfSein/xiv-data-viewer/internal/backup"
 	"github.com/InfSein/xiv-data-viewer/internal/config"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
+	"github.com/InfSein/xiv-data-viewer/internal/updater"
 	"github.com/egoist/mygo/ui"
 )
 
+// newZHApp 创建一个预置中文界面语言的测试应用实例，确保现有中文断言测试在任意系统语言环境下稳定运行。
+func newZHApp(t *testing.T, dataDir string) *App {
+	t.Helper()
+	if err := config.SaveAppConfig(dataDir, config.AppConfig{Language: string(i18n.LangZH)}); err != nil {
+		t.Fatalf("写入测试中文配置失败: %v", err)
+	}
+	return NewApp("2.0.0", dataDir, os.DirFS(filepath.Join("..", "..", "schemas")))
+}
+
 func TestFirstRunSetupAndSettingsFlow(t *testing.T) {
 	dataDir := t.TempDir()
-	app := NewApp("2.0.0", dataDir, os.DirFS(filepath.Join("..", "..", "schemas")))
+	app := newZHApp(t, dataDir)
 	defer app.Close()
 
 	// 1. 首次启动未配置路径时应停留在引导设置页面
@@ -136,7 +156,7 @@ func TestFirstRunSetupAndSettingsFlow(t *testing.T) {
 
 func TestMinimumViewportAndFilterReset(t *testing.T) {
 	dataDir := t.TempDir()
-	app := NewApp("2.0.0", dataDir, os.DirFS(filepath.Join("..", "..", "schemas")))
+	app := newZHApp(t, dataDir)
 	defer app.Close()
 
 	// 验证最小窗口尺寸 1024×640 渲染稳定（含引导页与地图/导出弹窗边界）
@@ -182,7 +202,7 @@ func TestMinimumViewportAndFilterReset(t *testing.T) {
 
 func TestQuestLeveAndCollectablesViews(t *testing.T) {
 	dataDir := t.TempDir()
-	app := NewApp("2.0.0", dataDir, os.DirFS(filepath.Join("..", "..", "schemas")))
+	app := newZHApp(t, dataDir)
 	defer app.Close()
 
 	rowCake := make(sqpack.Row, 95)
@@ -421,7 +441,7 @@ func TestQuestLeveAndCollectablesViews(t *testing.T) {
 
 func TestDiffViewLayoutAndInteractions(t *testing.T) {
 	dataDir := t.TempDir()
-	app := NewApp("2.0.0", dataDir, os.DirFS(filepath.Join("..", "..", "schemas")))
+	app := newZHApp(t, dataDir)
 	defer app.Close()
 
 	rowCake := make(sqpack.Row, 95)
@@ -672,7 +692,7 @@ func TestSetupModesDiagnosisAndLoadingView(t *testing.T) {
 	cnDir := makeFakeClientDir(t, filepath.Join(gamesRoot, "最终幻想XIV"), "2026.11.01.0000.0000")
 	glDir := makeFakeClientDir(t, filepath.Join(gamesRoot, "FINAL FANTASY XIV Online"), "2026.11.02.0000.0000")
 
-	app := NewApp("2.0.0", dataDir, os.DirFS(filepath.Join("..", "..", "schemas")))
+	app := newZHApp(t, dataDir)
 	defer app.Close()
 
 	tt := ui.NewTester(app.View, 1366, 768)
@@ -757,7 +777,7 @@ func TestSetupModesDiagnosisAndLoadingView(t *testing.T) {
 
 func TestAchievementsViewFiltersAndColumns(t *testing.T) {
 	dataDir := t.TempDir()
-	app := NewApp("2.0.0", dataDir, os.DirFS(filepath.Join("..", "..", "schemas")))
+	app := newZHApp(t, dataDir)
 	defer app.Close()
 
 	rowItem := make(sqpack.Row, 95)
@@ -980,7 +1000,7 @@ func TestDarkModeTransparentIconRendering(t *testing.T) {
 	bmp := ui.NewBitmap(img)
 
 	dataDir := t.TempDir()
-	app := NewApp("2.0.0", dataDir, os.DirFS(filepath.Join("..", "..", "schemas")))
+	app := newZHApp(t, dataDir)
 	defer app.Close()
 	app.cfg.Theme = "dark"
 	app.service = gamedata.NewService(&gamedata.Store{})
@@ -1020,7 +1040,7 @@ func TestDarkModeTransparentIconRendering(t *testing.T) {
 
 func TestListRowDisplayFormat(t *testing.T) {
 	dataDir := t.TempDir()
-	app := NewApp("2.0.0", dataDir, os.DirFS(filepath.Join("..", "..", "schemas")))
+	app := newZHApp(t, dataDir)
 	defer app.Close()
 
 	store := &gamedata.Store{
@@ -1097,13 +1117,13 @@ func TestListRowDisplayFormat(t *testing.T) {
 	}
 
 	// 2. 任务页面列表：左下角仅显示类型（主线任务、日常任务等），右下角仅显示等级
-	if got := formatQuestRowType(store.Quests[0]); got != "主线任务" {
+	if got := app.formatQuestRowType(store.Quests[0]); got != "主线任务" {
 		t.Fatalf("主线任务类型文本异常: got=%q", got)
 	}
-	if got := formatQuestRowType(store.Quests[1]); got != "日常任务" {
+	if got := app.formatQuestRowType(store.Quests[1]); got != "日常任务" {
 		t.Fatalf("日常任务类型文本异常: got=%q", got)
 	}
-	if got := formatQuestRowType(store.Quests[2]); got != "功能解锁" {
+	if got := app.formatQuestRowType(store.Quests[2]); got != "功能解锁" {
 		t.Fatalf("功能解锁任务类型文本异常: got=%q", got)
 	}
 	if got := formatQuestRowMeta(store.Quests[0]); got != "Lv.1" {
@@ -1153,7 +1173,7 @@ func TestTopLeftBrandTitleAndVersion(t *testing.T) {
 	}
 
 	dataDir := t.TempDir()
-	app := NewApp("2.0.0", dataDir, os.DirFS(filepath.Join("..", "..", "schemas")))
+	app := newZHApp(t, dataDir)
 	defer app.Close()
 
 	// 1. 验证品牌组件文本顺序与小字号高度
@@ -1215,5 +1235,1372 @@ func TestTopLeftBrandTitleAndVersion(t *testing.T) {
 	}
 	if !slices.Contains(ttReady.Menu(), "导出游戏 CSV...") {
 		t.Fatalf("点击左上角品牌菜单后未展示菜单项: %v", ttReady.Menu())
+	}
+}
+
+func TestFirstLaunchAutoDetectsOSLanguage(t *testing.T) {
+	dataDir := t.TempDir()
+	app := NewApp("2.0.0", dataDir, os.DirFS(filepath.Join("..", "..", "schemas")))
+	defer app.Close()
+
+	wantLang := i18n.DetectSystemLanguage()
+	if app.Language() != wantLang {
+		t.Fatalf("首次启动未读取系统语言: got=%q want=%q", app.Language(), wantLang)
+	}
+	if app.mode != modeSetup {
+		t.Fatalf("首次无配置应停留在引导页: got=%v", app.mode)
+	}
+	wantSetupMode := setupModeCN
+	if wantLang != i18n.LangZH {
+		wantSetupMode = setupModeGlobal
+	}
+	if app.setupMode != wantSetupMode {
+		t.Fatalf("首次启动默认区服与语言不匹配: lang=%q setupMode=%v want=%v", wantLang, app.setupMode, wantSetupMode)
+	}
+	if inferSetupMode("", "", i18n.LangZH) != setupModeCN ||
+		inferSetupMode("", "", i18n.LangJA) != setupModeGlobal ||
+		inferSetupMode("", "", i18n.LangEN) != setupModeGlobal {
+		t.Fatalf("不同语言下首次默认区服推断结果异常")
+	}
+
+	tt := ui.NewTester(app.View, 1366, 768)
+	if !tt.HasText(i18n.T(wantLang, "setup.title")) {
+		t.Fatalf("引导页未按系统语言渲染标题 %q: %v", i18n.T(wantLang, "setup.title"), tt.Texts())
+	}
+}
+
+func TestWelcomeAndSettingsLanguageSwitchAndPersistence(t *testing.T) {
+	dataDir := t.TempDir()
+	app := newZHApp(t, dataDir)
+	defer app.Close()
+
+	tt := ui.NewTester(app.View, 1366, 768)
+
+	// 1. 欢迎页应直接展示三种语言选项并支持即时切换与持久化
+	for _, wantBtn := range []string{"简体中文", "日本語", "English"} {
+		if !tt.HasText(wantBtn) {
+			t.Fatalf("欢迎页缺少语言切换按钮 %q: %v", wantBtn, tt.Texts())
+		}
+	}
+	if err := tt.Click("日本語"); err != nil {
+		t.Fatalf("欢迎页切换日语失败: %v", err)
+	}
+	if app.Language() != i18n.LangJA || !tt.HasText(i18n.T(i18n.LangJA, "setup.title")) {
+		t.Fatalf("欢迎页切换日语后界面未刷新: lang=%q texts=%v", app.Language(), tt.Texts())
+	}
+	if cfg, err := config.LoadAppConfig(dataDir); err != nil || cfg.Language != "ja" {
+		t.Fatalf("欢迎页切换日语后未持久化: cfg=%+v err=%v", cfg, err)
+	}
+
+	if err := tt.Click("English"); err != nil {
+		t.Fatalf("欢迎页切换英语失败: %v", err)
+	}
+	if app.Language() != i18n.LangEN || !tt.HasText(i18n.T(i18n.LangEN, "setup.title")) {
+		t.Fatalf("欢迎页切换英语后界面未刷新: lang=%q texts=%v", app.Language(), tt.Texts())
+	}
+
+	if err := tt.Click("简体中文"); err != nil {
+		t.Fatalf("欢迎页切回中文失败: %v", err)
+	}
+	if app.Language() != i18n.LangZH || !tt.HasText(i18n.T(i18n.LangZH, "setup.title")) {
+		t.Fatalf("欢迎页切回中文后界面未刷新: lang=%q", app.Language())
+	}
+
+	// 2. 进入工作台「设置」页后仍可自由切换语言且保留当前页签状态
+	svc := gamedata.NewService(&gamedata.Store{PrimaryVersion: "2026.11.01"})
+	st := svc.GetSystemStatus()
+	app.service = svc
+	app.status = &st
+	app.mode = modeReady
+	app.tab = tabWorkbench
+	tt.Frame()
+
+	if err := tt.Click(i18n.T(i18n.LangZH, "nav.settings")); err != nil {
+		t.Fatalf("点击设置导航失败: %v", err)
+	}
+	if app.tab != tabSettings || !tt.HasText(i18n.T(i18n.LangZH, "settings.title")) {
+		t.Fatalf("未进入设置页面: tab=%v", app.tab)
+	}
+
+	if err := tt.Click("日本語"); err != nil {
+		t.Fatalf("设置页切换日语失败: %v", err)
+	}
+	if app.Language() != i18n.LangJA || app.mode != modeReady || app.tab != tabSettings || !tt.HasText(i18n.T(i18n.LangJA, "settings.title")) {
+		t.Fatalf("设置页切换日语状态异常: lang=%q mode=%v tab=%v texts=%v", app.Language(), app.mode, app.tab, tt.Texts())
+	}
+	if cfg, err := config.LoadAppConfig(dataDir); err != nil || cfg.Language != "ja" {
+		t.Fatalf("设置页切换日语后未持久化: cfg=%+v err=%v", cfg, err)
+	}
+
+	if err := tt.Click("English"); err != nil {
+		t.Fatalf("设置页切换英语失败: %v", err)
+	}
+	if app.Language() != i18n.LangEN || app.mode != modeReady || app.tab != tabSettings || !tt.HasText(i18n.T(i18n.LangEN, "settings.title")) {
+		t.Fatalf("设置页切换英语状态异常: lang=%q mode=%v tab=%v texts=%v", app.Language(), app.mode, app.tab, tt.Texts())
+	}
+
+	// 3. 验证国际服日语 / 英语与中文版本快照目录隔离
+	if got := app.backupDirForStore(&gamedata.Store{PrimaryLang: sqpack.LangChineseSimplified}); got != filepath.Join(dataDir, "backups") {
+		t.Fatalf("中文快照目录异常: %q", got)
+	}
+	if got := app.backupDirForStore(&gamedata.Store{PrimaryLang: sqpack.LangJapanese}); got != filepath.Join(dataDir, "backups", "ja") {
+		t.Fatalf("日语快照目录应独立隔离: %q", got)
+	}
+	if got := app.backupDirForStore(&gamedata.Store{PrimaryLang: sqpack.LangEnglish}); got != filepath.Join(dataDir, "backups", "en") {
+		t.Fatalf("英语模式下国际服快照目录应独立隔离: %q", got)
+	}
+}
+
+func TestSecondaryDataLanguageDisplayRules(t *testing.T) {
+	dataDir := t.TempDir()
+	app := newZHApp(t, dataDir)
+	defer app.Close()
+
+	rowItem := make(sqpack.Row, 95)
+	rowItem[9] = "主名称物品"
+	rowItem[20] = 690
+	rowItemJA := make(sqpack.Row, 95)
+	rowItemJA[9] = "日本語アイテム"
+	rowItemEN := make(sqpack.Row, 95)
+	rowItemEN[9] = "English Item"
+
+	cats := []gamedata.AchievementCategoryInfo{
+		{ID: 1, KindID: 1, KindName: "Battle", Name: "General", Count: 1},
+	}
+	store := &gamedata.Store{
+		PrimaryVersion: "2026.11.01",
+		ItemsPrimary:   map[int]sqpack.Row{44099: rowItem},
+		ItemsJa:        map[int]sqpack.Row{44099: rowItemJA},
+		ItemsEn:        map[int]sqpack.Row{44099: rowItemEN},
+		ItemSummaries: []gamedata.ItemSummary{{
+			ID: 44099, NameCn: "主名称物品", NameZh: "主名称物品", NameJa: "日本語アイテム", NameEn: "English Item",
+			CategoryName: "Food", ItemLevel: 690,
+		}},
+		ItemSummaryByID: map[int]gamedata.ItemSummary{
+			44099: {
+				ID: 44099, NameCn: "主名称物品", NameZh: "主名称物品", NameJa: "日本語アイテム", NameEn: "English Item",
+				CategoryName: "Food", ItemLevel: 690,
+			},
+		},
+		Quests: []gamedata.QuestEntry{{
+			ID: 65536, NameCn: "主名称任务", NameZh: "主名称任务", NameJa: "日本語クエスト", NameEn: "English Quest",
+			Level: 15, SectionName: "MSQ", GenreName: "MSQ",
+		}},
+		QuestByID: map[int]gamedata.QuestEntry{
+			65536: {
+				ID: 65536, NameCn: "主名称任务", NameZh: "主名称任务", NameJa: "日本語クエスト", NameEn: "English Quest",
+				Level: 15, SectionName: "MSQ", GenreName: "MSQ",
+			},
+		},
+		Leves: []gamedata.LeveEntry{{
+			ID: 201, NameCn: "主名称理符", NameZh: "主名称理符", NameJa: "日本語リーヴ", NameEn: "English Leve",
+			ClassJobLevel: 10, LeveKind: "craft", LeveKindLabel: "Craft", AssignmentTypeName: "CRP",
+		}},
+		LeveByID: map[int]gamedata.LeveEntry{
+			201: {
+				ID: 201, NameCn: "主名称理符", NameZh: "主名称理符", NameJa: "日本語リーヴ", NameEn: "English Leve",
+				ClassJobLevel: 10, LeveKind: "craft", LeveKindLabel: "Craft", AssignmentTypeName: "CRP",
+			},
+		},
+		Achievements: []gamedata.AchievementEntry{{
+			ID: 1, NameCn: "主名称成就", NameJa: "日本語アチーブ", NameEn: "English Achievement",
+			DescriptionCn: "Win battle", Points: 10, KindID: 1, KindName: "Battle", CategoryID: 1, CategoryName: "General",
+			TitleID: 10, TitleMasculineCn: "主名称称号男", TitleFeminineCn: "主名称称号女",
+			TitleNameJa: "日本語称号", TitleNameEn: "English Title",
+		}},
+		AchievementKindList:     []gamedata.AchievementKindInfo{{ID: 1, Name: "Battle", Count: 1, Categories: cats}},
+		AchievementCategoryList: cats,
+	}
+
+	svc := gamedata.NewService(store)
+	st := svc.GetSystemStatus()
+	app.service = svc
+	app.status = &st
+	app.mode = modeReady
+	app.refreshItemList()
+	app.selectItem(44099)
+	app.refreshQuests()
+	app.selectQuest(65536)
+	app.refreshLeves()
+	app.selectLeve(201)
+	app.refreshAchievements()
+
+	tt := ui.NewTester(app.View, 1366, 768)
+
+	// 1. 中文模式下：四个实体均同时显示日语+英语（日语在先，英语在后）
+	app.SetLanguage(i18n.LangZH)
+	app.tab = tabWorkbench
+	tt.Frame()
+	itemJaRect, okItemJA := tt.Find("JA  日本語アイテム")
+	itemEnRect, okItemEN := tt.Find("EN  English Item")
+	if !okItemJA || !okItemEN || itemJaRect.X >= itemEnRect.X {
+		t.Fatalf("中文下物品详情副语言应为 JA + EN: ja=%v en=%v texts=%v", okItemJA, okItemEN, tt.Texts())
+	}
+
+	app.tab = tabQuests
+	tt.Frame()
+	qJaRect, okQJA := tt.Find("JA  日本語クエスト")
+	qEnRect, okQEN := tt.Find("EN  English Quest")
+	if !okQJA || !okQEN || qJaRect.X >= qEnRect.X {
+		t.Fatalf("中文下任务详情副语言应为 JA + EN: ja=%v en=%v texts=%v", okQJA, okQEN, tt.Texts())
+	}
+
+	app.tab = tabLeves
+	tt.Frame()
+	lJaRect, okLJA := tt.Find("JA  日本語リーヴ")
+	lEnRect, okLEN := tt.Find("EN  English Leve")
+	if !okLJA || !okLEN || lJaRect.X >= lEnRect.X {
+		t.Fatalf("中文下理符详情副语言应为 JA + EN: ja=%v en=%v texts=%v", okLJA, okLEN, tt.Texts())
+	}
+
+	app.tab = tabAchievements
+	tt.Frame()
+	achJaRect, okAchJA := tt.Find("日本語アチーブ")
+	achEnRect, okAchEN := tt.Find("English Achievement")
+	tJaRect, okTitleJA := tt.Find("日本語称号")
+	tEnRect, okTitleEN := tt.Find("English Title")
+	if !okAchJA || !okAchEN || achJaRect.Y >= achEnRect.Y || !okTitleJA || !okTitleEN || tJaRect.Y >= tEnRect.Y {
+		t.Fatalf("中文下成就与称号副语言应为 日语在前、英语在后: texts=%v", tt.Texts())
+	}
+
+	// 2. 日语模式下：仅显示英语，不显示日语副语言
+	app.SetLanguage(i18n.LangJA)
+	app.tab = tabWorkbench
+	tt.Frame()
+	if !tt.HasText("EN  English Item") || tt.HasText("JA  日本語アイテム") {
+		t.Fatalf("日语下物品详情应仅显示 EN 副语言: %v", tt.Texts())
+	}
+	app.tab = tabQuests
+	tt.Frame()
+	if !tt.HasText("EN  English Quest") || tt.HasText("JA  日本語クエスト") {
+		t.Fatalf("日语下任务详情应仅显示 EN 副语言: %v", tt.Texts())
+	}
+	app.tab = tabLeves
+	tt.Frame()
+	if !tt.HasText("EN  English Leve") || tt.HasText("JA  日本語リーヴ") {
+		t.Fatalf("日语下理符详情应仅显示 EN 副语言: %v", tt.Texts())
+	}
+	app.tab = tabAchievements
+	tt.Frame()
+	if !tt.HasText("English Achievement") || tt.HasText("日本語アチーブ") || !tt.HasText("English Title") || tt.HasText("日本語称号") {
+		t.Fatalf("日语下成就与称号应仅显示英语副语言: %v", tt.Texts())
+	}
+
+	// 3. 英语模式下：仅显示日语，不显示英语副语言
+	app.SetLanguage(i18n.LangEN)
+	app.tab = tabWorkbench
+	tt.Frame()
+	if !tt.HasText("JA  日本語アイテム") || tt.HasText("EN  English Item") {
+		t.Fatalf("英语下物品详情应仅显示 JA 副语言: %v", tt.Texts())
+	}
+	app.tab = tabQuests
+	tt.Frame()
+	if !tt.HasText("JA  日本語クエスト") || tt.HasText("EN  English Quest") {
+		t.Fatalf("英语下任务详情应仅显示 JA 副语言: %v", tt.Texts())
+	}
+	app.tab = tabLeves
+	tt.Frame()
+	if !tt.HasText("JA  日本語リーヴ") || tt.HasText("EN  English Leve") {
+		t.Fatalf("英语下理符详情应仅显示 JA 副语言: %v", tt.Texts())
+	}
+	app.tab = tabAchievements
+	tt.Frame()
+	if !tt.HasText("日本語アチーブ") || tt.HasText("English Achievement") || !tt.HasText("日本語称号") || tt.HasText("English Title") {
+		t.Fatalf("英语下成就与称号应仅显示日语副语言: %v", tt.Texts())
+	}
+}
+
+func TestMinimumViewportInJapaneseAndEnglish(t *testing.T) {
+	for _, lang := range []i18n.Lang{i18n.LangJA, i18n.LangEN} {
+		dataDir := t.TempDir()
+		if err := config.SaveAppConfig(dataDir, config.AppConfig{Language: string(lang)}); err != nil {
+			t.Fatal(err)
+		}
+		app := NewApp("2.0.0", dataDir, os.DirFS(filepath.Join("..", "..", "schemas")))
+
+		tt := ui.NewTester(app.View, 1024, 640)
+		if !tt.HasText(i18n.T(lang, "setup.title")) || !tt.HasText(i18n.T(lang, "setup.start_btn")) {
+			app.Close()
+			t.Fatalf("最小视口 (%s) 引导页未正常渲染: %v", lang, tt.Texts())
+		}
+
+		svc := gamedata.NewService(&gamedata.Store{PrimaryVersion: "2026.11.01"})
+		st := svc.GetSystemStatus()
+		app.service = svc
+		app.status = &st
+		app.mode = modeReady
+
+		for _, tab := range []activeTab{tabWorkbench, tabQuests, tabLeves, tabAchievements, tabDiff, tabChangelog, tabSettings} {
+			app.tab = tab
+			tt.Frame()
+			if len(tt.Texts()) == 0 {
+				app.Close()
+				t.Fatalf("最小视口 (%s) 页签 %v 渲染为空", lang, tab)
+			}
+		}
+		if !tt.HasText(i18n.T(lang, "settings.title")) {
+			app.Close()
+			t.Fatalf("最小视口 (%s) 设置页缺少标题: %v", lang, tt.Texts())
+		}
+		app.Close()
+	}
+}
+
+func TestTopRightLanguageSwitcherEverywhere(t *testing.T) {
+	dataDir := t.TempDir()
+	app := newZHApp(t, dataDir)
+	defer app.Close()
+
+	tt := ui.NewTester(app.View, 1366, 768)
+
+	// 1. 欢迎引导页 (modeSetup)：右上角按钮位于右侧且点击后展开菜单并切换语言
+	setupBtnRect, okSetupBtn := tt.Find(i18n.T(i18n.LangZH, "lang.switch_tip"))
+	if !okSetupBtn || setupBtnRect.X <= 1366/2 || setupBtnRect.Y >= 48 {
+		t.Fatalf("引导页右上角语言切换按钮位置异常: ok=%v rect=%+v", okSetupBtn, setupBtnRect)
+	}
+	if err := tt.Click(i18n.T(i18n.LangZH, "lang.switch_tip")); err != nil {
+		t.Fatalf("引导页点击右上角语言按钮失败: %v", err)
+	}
+	if !app.langPopoverOpen {
+		t.Fatalf("点击右上角语言按钮后未打开切换浮层")
+	}
+	// 点击浮层中的第二项（「日本語」：MarginTop 4 + PaddingTop 4 + Row1 28 + Gap 2 + Row2 半高 14）
+	tt.ClickAt(setupBtnRect.X+setupBtnRect.W/2, setupBtnRect.Y+setupBtnRect.H+52)
+	if app.Language() != i18n.LangJA || app.langPopoverOpen || !tt.HasText(i18n.T(i18n.LangJA, "setup.title")) {
+		t.Fatalf("引导页右上角浮层切换日语失败: lang=%q open=%v texts=%v", app.Language(), app.langPopoverOpen, tt.Texts())
+	}
+
+	// 2. 加载等待页 (modeLoading)：右上角按钮可打开并通过浮层即时切换语言
+	app.mode = modeLoading
+	app.loadingStatusTxt = i18n.T(i18n.LangJA, "loading.preparing")
+	tt.Frame()
+	loadBtnRect, okLoadBtn := tt.Find(i18n.T(i18n.LangJA, "lang.switch_tip"))
+	if !okLoadBtn || loadBtnRect.X <= 1366/2 || loadBtnRect.Y >= 48 {
+		t.Fatalf("加载页右上角语言切换按钮位置异常: ok=%v rect=%+v", okLoadBtn, loadBtnRect)
+	}
+	if err := tt.Click(i18n.T(i18n.LangJA, "lang.switch_tip")); err != nil {
+		t.Fatalf("加载页点击右上角语言按钮失败: %v", err)
+	}
+	if err := tt.Click("English"); err != nil {
+		t.Fatalf("加载页浮层切换英语失败: %v", err)
+	}
+	if app.Language() != i18n.LangEN || !tt.HasText(i18n.T(i18n.LangEN, "loading.title")) {
+		t.Fatalf("加载页通过右上角切换英语失败: lang=%q texts=%v", app.Language(), tt.Texts())
+	}
+
+	// 3. 主工作台各页面 (modeReady)：物品、任务、理符、成就、版本对比、设置全量覆盖
+	svc := gamedata.NewService(&gamedata.Store{PrimaryVersion: "2026.11.01"})
+	st := svc.GetSystemStatus()
+	app.service = svc
+	app.status = &st
+	app.mode = modeReady
+
+	for _, tab := range []activeTab{tabWorkbench, tabQuests, tabLeves, tabAchievements, tabDiff, tabChangelog, tabSettings} {
+		app.tab = tab
+		tt.Frame()
+		rect, ok := tt.Find(i18n.T(app.Language(), "lang.switch_tip"))
+		if !ok || rect.X <= 1366/2 || rect.Y >= 48 {
+			t.Fatalf("页签 %v 右上角语言切换按钮缺失或位置异常: ok=%v rect=%+v", tab, ok, rect)
+		}
+	}
+
+	// 从版本对比页通过右上角按钮切换到日语，并保持在当前页签
+	app.tab = tabDiff
+	tt.Frame()
+	if err := tt.Click(i18n.T(i18n.LangEN, "lang.switch_tip")); err != nil {
+		t.Fatalf("版本对比页点击右上角语言按钮失败: %v", err)
+	}
+	if err := tt.Click("日本語"); err != nil {
+		t.Fatalf("版本对比页浮层切换日语失败: %v", err)
+	}
+	if app.Language() != i18n.LangJA || app.tab != tabDiff || !tt.HasText(i18n.T(i18n.LangJA, "diff.title")) {
+		t.Fatalf("版本对比页右上角切换日语异常: lang=%q tab=%v", app.Language(), app.tab)
+	}
+
+	// 从物品页通过右上角按钮切回简体中文，并验证配置持久化
+	app.tab = tabWorkbench
+	tt.Frame()
+	if err := tt.Click(i18n.T(i18n.LangJA, "lang.switch_tip")); err != nil {
+		t.Fatalf("物品页点击右上角语言按钮失败: %v", err)
+	}
+	if err := tt.Click("简体中文"); err != nil {
+		t.Fatalf("物品页浮层切换简体中文失败: %v", err)
+	}
+	if app.Language() != i18n.LangZH || app.tab != tabWorkbench || !tt.HasText(i18n.T(i18n.LangZH, "nav.items")) {
+		t.Fatalf("物品页右上角切换中文异常: lang=%q tab=%v", app.Language(), app.tab)
+	}
+	if cfg, err := config.LoadAppConfig(dataDir); err != nil || cfg.Language != "zh" {
+		t.Fatalf("通过右上角切换语言后未持久化: cfg=%+v err=%v", cfg, err)
+	}
+
+	// 4. 最小窗口尺寸 1024×640 下顶栏全局检索框、内置搜索框与右上角语言按钮不重叠、不溢出
+	ttMin := ui.NewTester(app.View, 1024, 640)
+	globalRect, okGlobal := ttMin.Find(i18n.T(i18n.LangZH, "search.global_label"))
+	searchRect, okSearch := ttMin.Find(i18n.T(i18n.LangZH, "search.item_label"))
+	minLangRect, okMinLang := ttMin.Find(i18n.T(i18n.LangZH, "lang.switch_tip"))
+	if !okGlobal || !okSearch || !okMinLang || globalRect.Y >= 48 || globalRect.X+globalRect.W >= minLangRect.X || searchRect.Y <= 48 || minLangRect.X+minLangRect.W > 1024 {
+		t.Fatalf("1024x640 下顶栏全局搜索框、页内搜索框与右上角语言按钮布局异常: global=%+v (%v) page=%+v (%v) lang=%+v (%v)",
+			globalRect, okGlobal, searchRect, okSearch, minLangRect, okMinLang)
+	}
+}
+
+func TestLanguageSwitchPreservesSelectionBitmapsAndCache(t *testing.T) {
+	// 1. 无客户端模式下：切换语言不清空图标位图缓存，且同字体栈语言 (zh/en) 复用同一主题对象
+	dataDir := t.TempDir()
+	app := newZHApp(t, dataDir)
+	defer app.Close()
+
+	app.bitmaps.put("icon:99999:false", ui.NewBitmap(image.NewRGBA(image.Rect(0, 0, 2, 2))))
+	app.mode = modeReady
+	app.tab = tabWorkbench
+	app.SetLanguage(i18n.LangJA)
+	app.SetLanguage(i18n.LangEN)
+	app.bitmaps.mu.Lock()
+	_, keptMockSentinel := app.bitmaps.bitmaps["icon:99999:false"]
+	app.bitmaps.mu.Unlock()
+	if !keptMockSentinel {
+		t.Fatalf("无客户端模式下切语言也不应清空图标位图缓存")
+	}
+
+	tt := ui.NewTester(func(c *ui.Context) {
+		_ = applyAppThemeWithLang(c, "light", i18n.LangZH)
+	}, 100, 100)
+	_ = tt
+	var thZH, thEN, thJA *ui.Theme
+	ui.NewTester(func(c *ui.Context) {
+		_ = applyAppThemeWithLang(c, "light", i18n.LangZH)
+		thZH = c.Theme()
+		_ = applyAppThemeWithLang(c, "light", i18n.LangEN)
+		thEN = c.Theme()
+		_ = applyAppThemeWithLang(c, "light", i18n.LangJA)
+		thJA = c.Theme()
+	}, 100, 100)
+	if thZH != thEN || thZH == thJA {
+		t.Fatalf("同字体栈语言应复用同一 Theme 指针且日语独立: zh=%p en=%p ja=%p", thZH, thEN, thJA)
+	}
+
+	// 2. 若本机配置真实客户端：验证切语言不退回 modeLoading、保留图标与当前选中条目，并命中多语言会话缓存
+	envCfg := config.LoadAppConfigFromEnv(filepath.Join("..", "..", ".env"))
+	if _, err := config.ValidateAndResolve(envCfg); err != nil {
+		t.Skipf("本地未配置可用 FF14 客户端，跳过真实客户端语言切换缓存测试: %v", err)
+	}
+
+	realDir := t.TempDir()
+	realApp := newZHApp(t, realDir)
+	defer realApp.Close()
+
+	if !realApp.SaveAndReloadPaths(envCfg.CNPath, envCfg.GlobalPath) {
+		t.Fatalf("加载真实客户端失败: %s", realApp.draftError)
+	}
+	if realApp.mode != modeReady {
+		t.Fatalf("期望进入 modeReady，实际 %v", realApp.mode)
+	}
+	realApp.bitmaps.put("icon:99999:false", ui.NewBitmap(image.NewRGBA(image.Rect(0, 0, 2, 2))))
+	realApp.tab = tabWorkbench
+	realApp.selectItem(34577)
+	origZHService := realApp.service
+
+	// 首次切换到日语：停留在当前页面与 tabWorkbench，不清空位图，尽量保留选中物品 #34577
+	realApp.SetLanguage(i18n.LangJA)
+	if realApp.mode != modeReady || realApp.tab != tabWorkbench || realApp.selectedItemID != 34577 {
+		t.Fatalf("切到日语不应跳转加载页或丢失选中物品: mode=%v tab=%v item=%d", realApp.mode, realApp.tab, realApp.selectedItemID)
+	}
+	realApp.bitmaps.mu.Lock()
+	_, keptSentinel := realApp.bitmaps.bitmaps["icon:99999:false"]
+	realApp.bitmaps.mu.Unlock()
+	if !keptSentinel {
+		t.Fatalf("切语言不应清空已缓存的图标位图")
+	}
+
+	// 切换到英语：命中缓存或共享句柄，继续保留选中条目与当前页面
+	realApp.SetLanguage(i18n.LangEN)
+	if realApp.mode != modeReady || realApp.selectedItemID != 34577 {
+		t.Fatalf("切到英语状态异常: mode=%v item=%d", realApp.mode, realApp.selectedItemID)
+	}
+
+	// 切回已缓存的简体中文：应直接命中会话缓存（同一 Service 实例，零重载）
+	realApp.SetLanguage(i18n.LangZH)
+	if realApp.service != origZHService || realApp.mode != modeReady || realApp.selectedItemID != 34577 {
+		t.Fatalf("切回已缓存中文应直接命中会话缓存并保持选中条目: sameSvc=%v mode=%v item=%d",
+			realApp.service == origZHService, realApp.mode, realApp.selectedItemID)
+	}
+}
+
+func TestGlobalSearchAndBuiltInPageSearchBars(t *testing.T) {
+	dataDir := t.TempDir()
+	app := newZHApp(t, dataDir)
+	defer app.Close()
+
+	rowCake := make(sqpack.Row, 95)
+	rowCake[9] = "收藏用图拉尔菠萝蛋糕"
+	rowCake[20] = 99
+	rowTea := make(sqpack.Row, 95)
+	rowTea[9] = "高山红茶"
+	rowTea[20] = 99
+
+	quest1 := gamedata.QuestEntry{
+		ID: 65536, NameCn: "\ue0be 启程之日", NameEn: "Coming to Gridania",
+		IconID: gamedata.QuestIconMSQ, SectionName: "主线任务", GenreName: "第七星历主线", Level: 15, IsMSQ: true,
+	}
+	quest2 := gamedata.QuestEntry{
+		ID: 65537, NameCn: "蛋糕试吃大会", NameEn: "Cake Tasting",
+		IconID: gamedata.QuestIconSide, SectionName: "支线任务", GenreName: "太阳海岸支线", Level: 50,
+	}
+	leve1 := gamedata.LeveEntry{
+		ID: 201, NameCn: "大量制作：甜点委托", NameEn: "Sweet Treat",
+		LeveKind: "craft", LeveKindLabel: "制作理符", AssignmentTypeName: "大量筹备", ClassJobLevel: 98,
+	}
+	leve2 := gamedata.LeveEntry{
+		ID: 202, NameCn: "制作委托：蛋糕拼盘", NameEn: "Cake Platter",
+		LeveKind: "craft", LeveKindLabel: "制作理符", AssignmentTypeName: "工匠委托", ClassJobLevel: 90,
+	}
+	cats := []gamedata.AchievementCategoryInfo{
+		{ID: 1, KindID: 1, KindName: "战斗", Name: "整体", Count: 2},
+	}
+	ach1 := gamedata.AchievementEntry{
+		ID: 1001, NameCn: "胜利的荣光1", DescriptionCn: "战斗获胜", Points: 10,
+		KindID: 1, KindName: "战斗", CategoryID: 1, CategoryName: "整体",
+		TitleID: 1, TitleMasculineCn: "沙场勇将",
+	}
+	ach2 := gamedata.AchievementEntry{
+		ID: 1002, NameCn: "蛋糕大师", DescriptionCn: "制作大量甜点", Points: 20,
+		KindID: 1, KindName: "战斗", CategoryID: 1, CategoryName: "整体",
+	}
+
+	store := &gamedata.Store{
+		PrimaryVersion: "2026.11.01",
+		ItemsPrimary:   map[int]sqpack.Row{44099: rowCake, 44100: rowTea},
+		ItemSummaries: []gamedata.ItemSummary{
+			{ID: 44099, NameCn: "收藏用图拉尔菠萝蛋糕", CategoryName: "食品", ItemLevel: 690},
+			{ID: 44100, NameCn: "高山红茶", CategoryName: "食品", ItemLevel: 680},
+		},
+		ItemSummaryByID: map[int]gamedata.ItemSummary{
+			44099: {ID: 44099, NameCn: "收藏用图拉尔菠萝蛋糕", CategoryName: "食品", ItemLevel: 690},
+			44100: {ID: 44100, NameCn: "高山红茶", CategoryName: "食品", ItemLevel: 680},
+		},
+		Quests:                  []gamedata.QuestEntry{quest1, quest2},
+		QuestByID:               map[int]gamedata.QuestEntry{65536: quest1, 65537: quest2},
+		Leves:                   []gamedata.LeveEntry{leve1, leve2},
+		LeveByID:                map[int]gamedata.LeveEntry{201: leve1, 202: leve2},
+		Achievements:            []gamedata.AchievementEntry{ach1, ach2},
+		AchievementKindList:     []gamedata.AchievementKindInfo{{ID: 1, Name: "战斗", Count: 2, Categories: cats}},
+		AchievementCategoryList: cats,
+	}
+
+	backupDir := filepath.Join(dataDir, "backups")
+	oldStore := &gamedata.Store{PrimaryVersion: "2026.10.01"}
+	if _, err := backup.NewService(oldStore, backupDir).InitializeOnStartup(); err != nil {
+		t.Fatal(err)
+	}
+	bSvc := backup.NewService(store, backupDir)
+	vst, err := bSvc.InitializeOnStartup()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	svc := gamedata.NewService(store)
+	st := svc.GetSystemStatus()
+	app.service = svc
+	app.status = &st
+	app.backupSvc = bSvc
+	app.versionStatus = &vst
+	app.diffFromVer = vst.PreviousVersion
+	app.diffToVer = vst.CurrentVersion
+	app.mode = modeReady
+	app.tab = tabWorkbench
+	app.refreshItemList()
+	app.selectItem(44100)
+	app.refreshQuests()
+	app.selectQuest(65536)
+	app.refreshLeves()
+	app.selectLeve(201)
+	app.refreshAchievements()
+	app.refreshDiff()
+
+	tt := ui.NewTester(app.View, 1366, 768)
+
+	// 1. 验证全局搜索支持名称包含检索（输入部分词“启程”命中“启程之日”）并支持按回车直接跳转详情
+	if err := tt.Click(i18n.T(i18n.LangZH, "search.global_label")); err != nil {
+		t.Fatalf("点击顶栏全局搜索框失败: %v", err)
+	}
+	tt.Type("启程")
+	if !app.globalSearchOpen || !tt.HasText("匹配结果") || !tt.HasText("启程之日") || !tt.HasText("跳转到对应页面搜索") {
+		t.Fatalf("输入后未弹出全局搜索浮层或未包含匹配结果: open=%v texts=%v", app.globalSearchOpen, tt.Texts())
+	}
+	if !tt.HasText("在「物品」中搜索") || !tt.HasText("在「任务」中搜索") || !tt.HasText("在「理符」中搜索") || !tt.HasText("在「成就」中搜索") || !tt.HasText("在「版本对比」中搜索") {
+		t.Fatalf("全局搜索浮层末尾缺少各模块跳转搜索入口: %v", tt.Texts())
+	}
+
+	// 按 Enter 应直接打开命中的任务 #65536
+	tt.Key(0, ui.KeyEnter)
+	if app.tab != tabQuests || app.selectedQuestID != 65536 || app.globalSearchOpen {
+		t.Fatalf("全局搜索回车未跳转到任务详情 #65536: tab=%v questID=%d open=%v", app.tab, app.selectedQuestID, app.globalSearchOpen)
+	}
+
+	// 2. 验证包含匹配成就称号（“沙场”命中“沙场勇将”）并点击命中条目跳转至成就页
+	if err := tt.Click("清空"); err != nil {
+		t.Fatalf("清空全局搜索框失败: %v", err)
+	}
+	if err := tt.Click(i18n.T(i18n.LangZH, "search.global_label")); err != nil {
+		t.Fatalf("重新聚焦全局搜索框失败: %v", err)
+	}
+	tt.Type("沙场")
+	if !app.globalSearchOpen || !tt.HasText("胜利的荣光1") {
+		t.Fatalf("输入成就称号关键词未命中对应成就: open=%v texts=%v", app.globalSearchOpen, tt.Texts())
+	}
+	if err := tt.Click("胜利的荣光1"); err != nil {
+		t.Fatalf("点击全局搜索命中成就失败: %v", err)
+	}
+	if app.tab != tabAchievements || app.achQuery.Q != "1001" || app.globalSearchOpen {
+		t.Fatalf("点击全局成就命中后未跳转定位: tab=%v q=%q open=%v", app.tab, app.achQuery.Q, app.globalSearchOpen)
+	}
+
+	// 3. 验证无结果词提示，以及输入“蛋糕”可跨模块命中并从末尾跳转到指定页面搜索
+	if err := tt.Click("清空"); err != nil {
+		t.Fatalf("清空全局搜索框失败: %v", err)
+	}
+	if err := tt.Click(i18n.T(i18n.LangZH, "search.global_label")); err != nil {
+		t.Fatalf("重新聚焦全局搜索框失败: %v", err)
+	}
+	tt.Type("不存在的词")
+	if !app.globalSearchOpen || !tt.HasText(i18n.T(i18n.LangZH, "search.global_no_matches")) {
+		t.Fatalf("无命中词时应显示空提示: open=%v hits=%+v", app.globalSearchOpen, app.globalSearchRes.Hits)
+	}
+	if err := tt.Click("清空"); err != nil {
+		t.Fatalf("清空全局搜索框失败: %v", err)
+	}
+	if err := tt.Click(i18n.T(i18n.LangZH, "search.global_label")); err != nil {
+		t.Fatalf("重新聚焦全局搜索框失败: %v", err)
+	}
+	tt.Type("蛋糕")
+	if !app.globalSearchOpen || app.globalSearchRes.TotalMatched != 4 {
+		t.Fatalf("跨模块包含搜索“蛋糕”应同时命中 4 个模块共 4 项: open=%v res=%+v", app.globalSearchOpen, app.globalSearchRes)
+	}
+	if err := tt.Click("在「理符」中搜索"); err != nil {
+		t.Fatalf("点击跳转到理符页面搜索失败: %v", err)
+	}
+	if app.tab != tabLeves || app.leveQuery.Q != "蛋糕" || app.leveRes.Total != 1 || app.leveRes.Items[0].ID != 202 {
+		t.Fatalf("跳转到理符页面搜索状态异常: tab=%v q=%q res=%+v", app.tab, app.leveQuery.Q, app.leveRes)
+	}
+
+	// 4. 验证全部 5 个模块页面均具备内置搜索栏、可独立过滤且不干扰全局搜索框
+	pageChecks := []struct {
+		tab      activeTab
+		label    string
+		query    string
+		want     string
+		absent   string
+		checkRes func() bool
+	}{
+		{
+			tab: tabWorkbench, label: i18n.T(i18n.LangZH, "search.item_label"),
+			query: "红茶", want: "高山红茶", absent: "收藏用图拉尔菠萝蛋糕",
+			checkRes: func() bool { return app.itemRes.Total == 1 && app.itemRes.Items[0].ID == 44100 },
+		},
+		{
+			tab: tabQuests, label: i18n.T(i18n.LangZH, "search.quest_label"),
+			query: "试吃", want: "蛋糕试吃大会", absent: "启程之日",
+			checkRes: func() bool { return app.questRes.Total == 1 && app.questRes.Items[0].ID == 65537 },
+		},
+		{
+			tab: tabLeves, label: i18n.T(i18n.LangZH, "search.leve_label"),
+			query: "甜点", want: "大量制作：甜点委托", absent: "制作委托：蛋糕拼盘",
+			checkRes: func() bool { return app.leveRes.Total == 1 && app.leveRes.Items[0].ID == 201 },
+		},
+		{
+			tab: tabAchievements, label: i18n.T(i18n.LangZH, "search.ach_label"),
+			query: "蛋糕大师", want: "蛋糕大师", absent: "胜利的荣光1",
+			checkRes: func() bool { return app.achRes.Total == 1 && app.achRes.Items[0].ID == 1002 },
+		},
+		{
+			tab: tabDiff, label: i18n.T(i18n.LangZH, "search.diff_label"),
+			query: "高山红茶", want: "高山红茶", absent: "蛋糕试吃大会",
+			checkRes: func() bool {
+				return app.diffRes != nil && app.diffRes.TotalFiltered == 1 && app.diffRes.Items[0].ID == 44100
+			},
+		},
+	}
+	for _, pc := range pageChecks {
+		app.navigateTab(pc.tab)
+		tt.Frame()
+		// 切换页签后先重置可能遗留的筛选再测试页内搜索框
+		switch pc.tab {
+		case tabWorkbench:
+			app.resetItemFilters()
+		case tabQuests:
+			app.resetQuestFilters()
+		case tabLeves:
+			app.resetLeveFilters()
+		case tabAchievements:
+			app.resetAchievementFilters()
+		case tabDiff:
+			app.resetDiffFilters()
+		}
+		tt.Frame()
+		// 先验证 Ctrl/Cmd+F 可聚焦当前页内内置搜索栏
+		tt.Key(ui.Cmd, ui.KeyF)
+		if !tt.Focused(pc.label) {
+			t.Fatalf("页签 %v 按快捷键未聚焦页内搜索框 %q", pc.tab, pc.label)
+		}
+		tt.Type(pc.query)
+		if !pc.checkRes() || !tt.HasText(pc.want) {
+			t.Fatalf("页签 %v 内置搜索过滤结果异常: want=%q texts=%v", pc.tab, pc.want, tt.Texts())
+		}
+		if r, ok := tt.Find(pc.absent); ok {
+			// 分栏页面右侧详情面板仍可能展示此前选中的条目，左侧列表/整页表格内不应再出现被过滤条目
+			if pc.tab == tabAchievements || pc.tab == tabDiff || r.X < app.sidebarW+app.listW {
+				t.Fatalf("页签 %v 列表区仍包含被过滤条目 %q: rect=%+v", pc.tab, pc.absent, r)
+			}
+		}
+		if app.globalSearchQ != "蛋糕" {
+			t.Fatalf("页内搜索不应覆盖全局搜索输入内容: got=%q", app.globalSearchQ)
+		}
+	}
+
+	// 验证 Ctrl/Cmd+K 可聚焦顶栏全局搜索框并重新打开浮层，Escape 可关闭浮层
+	tt.Key(ui.Cmd, ui.KeyK)
+	if !tt.Focused(i18n.T(i18n.LangZH, "search.global_label")) || !app.globalSearchOpen {
+		t.Fatalf("全局搜索快捷键未聚焦顶栏搜索框或未展开浮层: focused=%v open=%v",
+			tt.Focused(i18n.T(i18n.LangZH, "search.global_label")), app.globalSearchOpen)
+	}
+	tt.Key(0, ui.KeyEscape)
+	if app.globalSearchOpen {
+		t.Fatalf("按 Escape 应关闭全局搜索浮层")
+	}
+
+	// 5. 验证 1024×640 窄屏下全部 5 个页面内置搜索框与全局搜索框均正常显示且不越界
+	ttMin := ui.NewTester(app.View, 1024, 640)
+	for _, pc := range pageChecks {
+		app.tab = pc.tab
+		ttMin.Frame()
+		r, ok := ttMin.Find(pc.label)
+		if !ok || r.X < 0 || r.X+r.W > 1024 || r.Y < 48 {
+			t.Fatalf("1024x640 下页签 %v 内置搜索框位置异常: ok=%v rect=%+v", pc.tab, ok, r)
+		}
+	}
+}
+
+func TestGlobalSearchFixedHeightAndJumpLocatesLeftList(t *testing.T) {
+	dataDir := t.TempDir()
+	app := newZHApp(t, dataDir)
+	defer app.Close()
+
+	itemsMap := make(map[int]sqpack.Row, 70)
+	itemSummaries := make([]gamedata.ItemSummary, 0, 70)
+	itemSummaryByID := make(map[int]gamedata.ItemSummary, 70)
+	for i := 1; i <= 70; i++ {
+		name := "以太测试物品 " + string(rune('A'+(i-1)%26))
+		if i == 55 {
+			name = "目标跃迁水晶"
+		}
+		if i == 60 {
+			name = "目标关联材料"
+		}
+		row := make(sqpack.Row, 95)
+		row[9] = name
+		row[20] = 99
+		itemsMap[i] = row
+		sum := gamedata.ItemSummary{ID: i, NameCn: name, CategoryName: "药水", ItemLevel: 100 + i}
+		itemSummaries = append(itemSummaries, sum)
+		itemSummaryByID[i] = sum
+	}
+
+	quests := make([]gamedata.QuestEntry, 0, 40)
+	questByID := make(map[int]gamedata.QuestEntry, 40)
+	for i := 1; i <= 40; i++ {
+		qid := 65500 + i
+		qe := gamedata.QuestEntry{
+			ID:          qid,
+			NameCn:      "以太测试任务",
+			IconID:      gamedata.QuestIconSide,
+			SectionID:   0,
+			SectionName: "支线任务",
+			GenreName:   "支线",
+			Level:       i,
+		}
+		if i == 35 {
+			qe.NameCn = "目标第2页任务"
+			qe.RewardItems = []gamedata.QuestRewardItem{{ItemID: 55, ItemName: "目标跃迁水晶", Count: 1}}
+		}
+		if i == 38 {
+			qe.NameCn = "目标后续任务"
+			qe.PreviousQuestIDs = []int{65535}
+			qe.PreviousQuestNames = []string{"目标第2页任务"}
+		}
+		quests = append(quests, qe)
+		questByID[qid] = qe
+	}
+
+	leves := make([]gamedata.LeveEntry, 0, 40)
+	leveByID := make(map[int]gamedata.LeveEntry, 40)
+	for i := 1; i <= 40; i++ {
+		lid := 200 + i
+		lv := gamedata.LeveEntry{
+			ID:                 lid,
+			NameCn:             "以太测试理符",
+			LeveKind:           "craft",
+			LeveKindLabel:      "制作理符",
+			AssignmentTypeName: "工匠委托",
+			ClassJobLevel:      i,
+		}
+		if i == 36 {
+			lv.NameCn = "目标第2页理符"
+		}
+		leves = append(leves, lv)
+		leveByID[lid] = lv
+	}
+
+	store := &gamedata.Store{
+		PrimaryVersion:  "2026.11.01",
+		ItemsPrimary:    itemsMap,
+		ItemSummaries:   itemSummaries,
+		ItemSummaryByID: itemSummaryByID,
+		Recipes: map[int]sqpack.Row{
+			9001: {0, 0, 1, 55, 1, 0, 60, 2},
+		},
+		RecipesByResultItem: map[int][]int{55: {9001}},
+		Quests:              quests,
+		QuestByID:           questByID,
+		Leves:               leves,
+		LeveByID:            leveByID,
+	}
+
+	svc := gamedata.NewService(store)
+	st := svc.GetSystemStatus()
+	app.service = svc
+	app.status = &st
+	app.mode = modeReady
+	app.tab = tabWorkbench
+	app.refreshItemList()
+	app.selectItem(1)
+	app.refreshQuests()
+	app.selectQuest(65501)
+	app.refreshLeves()
+	app.selectLeve(201)
+
+	tt := ui.NewTester(app.View, 1366, 768)
+
+	// 1. 验证 0 命中、1 命中、50 命中时全局搜索弹出面板高度与底部跳转入口位置恒定不变（不抖动）
+	if err := tt.Click(i18n.T(i18n.LangZH, "search.global_label")); err != nil {
+		t.Fatalf("点击顶栏全局搜索框失败: %v", err)
+	}
+	tt.Type("绝对不存在词")
+	jumpTop0, ok0 := tt.Find("在「物品」中搜索")
+	jumpEnd0, okEnd0 := tt.Find("在「版本对比」中搜索")
+	if !ok0 || !okEnd0 {
+		t.Fatalf("0 命中时底部跳转入口未显示: %v", tt.Texts())
+	}
+
+	if err := tt.Click("清空"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.Click(i18n.T(i18n.LangZH, "search.global_label")); err != nil {
+		t.Fatal(err)
+	}
+	tt.Type("目标跃迁水晶")
+	jumpTop1, ok1 := tt.Find("在「物品」中搜索")
+	jumpEnd1, okEnd1 := tt.Find("在「版本对比」中搜索")
+	if !ok1 || !okEnd1 {
+		t.Fatalf("1 命中时底部跳转入口未显示: %v", tt.Texts())
+	}
+
+	if err := tt.Click("清空"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.Click(i18n.T(i18n.LangZH, "search.global_label")); err != nil {
+		t.Fatal(err)
+	}
+	tt.Type("以太测试")
+	if len(app.globalSearchRes.Hits) != 50 || app.globalSearchRes.TotalMatched != 145 || !tt.HasText("显示前 50 / 共 145 项") {
+		t.Fatalf("全局搜索应展示前 50 项并提示总数: len=%d total=%d texts=%v", len(app.globalSearchRes.Hits), app.globalSearchRes.TotalMatched, tt.Texts())
+	}
+	jumpTop50, ok50 := tt.Find("在「物品」中搜索")
+	jumpEnd50, okEnd50 := tt.Find("在「版本对比」中搜索")
+	if !ok50 || !okEnd50 {
+		t.Fatalf("50 命中时底部跳转入口被挤出或不可见: %v", tt.Texts())
+	}
+	if math.Abs(float64(jumpTop0.Y-jumpTop1.Y)) > 1 || math.Abs(float64(jumpTop0.Y-jumpTop50.Y)) > 1 ||
+		math.Abs(float64(jumpEnd0.Y-jumpEnd1.Y)) > 1 || math.Abs(float64(jumpEnd0.Y-jumpEnd50.Y)) > 1 {
+		t.Fatalf("不同结果数量下全局搜索面板底部位置发生抖动: 0=%+v/%+v 1=%+v/%+v 50=%+v/%+v",
+			jumpTop0, jumpEnd0, jumpTop1, jumpEnd1, jumpTop50, jumpEnd50)
+	}
+
+	// 验证中部 50 条结果区域可独立滚动，同时底部跳转按钮位置不受滚动影响
+	tt.Scroll(jumpTop50.X+40, jumpTop50.Y-80, 0, 240)
+	if app.globalSearchScroll.Y <= 0 {
+		t.Fatalf("期望全局搜索中间结果区可内部滚动，实际 Scroll.Y=%v", app.globalSearchScroll.Y)
+	}
+	jumpEndAfterScroll, _ := tt.Find("在「版本对比」中搜索")
+	if math.Abs(float64(jumpEndAfterScroll.Y-jumpEnd50.Y)) > 1 {
+		t.Fatalf("滚动中部结果后底部跳转入口位置不应改变: before=%+v after=%+v", jumpEnd50, jumpEndAfterScroll)
+	}
+
+	// 2. 通过全局搜索跳转到第 2 页任务 #65535，验证左侧任务列表切换至第 2 页并滚动定位到该任务
+	if err := tt.Click("清空"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.Click(i18n.T(i18n.LangZH, "search.global_label")); err != nil {
+		t.Fatal(err)
+	}
+	tt.Type("目标第2页任务")
+	tt.Key(0, ui.KeyEnter)
+	if app.tab != tabQuests || app.selectedQuestID != 65535 || app.questQuery.Page != 2 {
+		t.Fatalf("全局搜索跳转后任务左侧分页未同步定位: tab=%v qid=%d page=%d", app.tab, app.selectedQuestID, app.questQuery.Page)
+	}
+	qRowRect, okQRow := tt.Find("#65535")
+	if !okQRow || qRowRect.X >= app.sidebarW+app.listW || qRowRect.Y < 48 || qRowRect.Y+qRowRect.H > 768 {
+		t.Fatalf("跳转后左侧任务列表未定位显示 #65535: ok=%v rect=%+v", okQRow, qRowRect)
+	}
+
+	// 3. 在物品页故意保留冲突搜索词后，从任务奖励点击跳转第 2 页物品 #55，验证清空冲突筛选、翻页并滚动定位到 #55
+	app.itemQuery.Q = "仅匹配不存在的词"
+	app.refreshItemList()
+	if err := tt.Click("目标跃迁水晶"); err != nil {
+		t.Fatalf("点击任务奖励物品跳转失败: %v", err)
+	}
+	if app.tab != tabWorkbench || app.selectedItemID != 55 || app.itemQuery.Page != 2 || app.itemQuery.Q != "" {
+		t.Fatalf("从任务跳转物品后左侧列表未正确翻页定位: tab=%v item=%d page=%d q=%q", app.tab, app.selectedItemID, app.itemQuery.Page, app.itemQuery.Q)
+	}
+	if app.itemListScroll.Y <= 0 {
+		t.Fatalf("跳转到第 2 页末尾附近物品 #55 时左侧列表应自动滚动将其显示在视野内: scrollY=%v", app.itemListScroll.Y)
+	}
+	itemRowRect, okItemRow := tt.Find("#55")
+	if !okItemRow || itemRowRect.X >= app.sidebarW+app.listW || itemRowRect.Y < 160 || itemRowRect.Y+itemRowRect.H > 728 {
+		t.Fatalf("跳转后左侧物品列表行 #55 未滚动至可见区域: ok=%v rect=%+v", okItemRow, itemRowRect)
+	}
+
+	// 4. 在物品详情页内点击制作材料 #60（同样位于第 2 页末尾），验证页内联动跳转同样自动定位左侧列表
+	if err := tt.Click("目标关联材料"); err != nil {
+		t.Fatalf("点击配方材料联动跳转失败: %v", err)
+	}
+	if app.selectedItemID != 60 || app.itemQuery.Page != 2 || app.itemListScroll.Y <= 0 {
+		t.Fatalf("物品详情内联动跳转未定位左侧列表 #60: item=%d page=%d scrollY=%v", app.selectedItemID, app.itemQuery.Page, app.itemListScroll.Y)
+	}
+}
+
+func makeTestPortableZip(t *testing.T, exePayload []byte) ([]byte, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("XIV Data Viewer.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(exePayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(buf.Bytes())
+	return buf.Bytes(), hex.EncodeToString(sum[:])
+}
+
+func makeTestPEBytes(tag string) []byte {
+	b := make([]byte, 128)
+	b[0] = 'M'
+	b[1] = 'Z'
+	copy(b[2:], tag)
+	return b
+}
+
+func newReadyUpdateTestApp(t *testing.T, dataDir, appVer string) *App {
+	t.Helper()
+	app := newZHApp(t, dataDir)
+	app.appVersion = appVer
+	svc := gamedata.NewService(&gamedata.Store{PrimaryVersion: "2026.11.01"})
+	st := svc.GetSystemStatus()
+	app.service = svc
+	app.status = &st
+	app.mode = modeReady
+	app.tab = tabWorkbench
+	return app
+}
+
+func TestManualCheckUpdateMenuAndModalFlows(t *testing.T) {
+	installDir := t.TempDir()
+	exePath := filepath.Join(installDir, "XIV Data Viewer.exe")
+	oldPE := makeTestPEBytes("v2.1.0")
+	if err := os.WriteFile(exePath, oldPE, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	newPE := makeTestPEBytes("v2.2.0")
+	zipBytes, zipSHA := makeTestPortableZip(t, newPE)
+	assetName := "xiv-data-viewer-portable-2.2.0-windows-amd64.zip"
+
+	var mode string
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/InfSein/xiv-data-viewer/releases/latest":
+			switch mode {
+			case "error":
+				w.WriteHeader(http.StatusInternalServerError)
+			case "latest":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"tag_name":     "v2.1.0",
+					"name":         "XIV Data Viewer v2.1.0",
+					"html_url":     srv.URL + "/releases/tag/v2.1.0",
+					"published_at": "2026-11-24T10:00:00Z",
+					"assets": []map[string]any{{
+						"name":                 "xiv-data-viewer-portable-2.1.0-windows-amd64.zip",
+						"size":                 len(zipBytes),
+						"browser_download_url": srv.URL + "/dl/" + assetName,
+						"digest":               "sha256:" + zipSHA,
+					}},
+				})
+			case "available":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"tag_name":     "v2.2.0",
+					"name":         "XIV Data Viewer v2.2.0",
+					"body":         "## 更新内容\n- 支持应用内置自动更新",
+					"html_url":     srv.URL + "/releases/tag/v2.2.0",
+					"published_at": "2026-11-25T12:00:00Z",
+					"assets": []map[string]any{{
+						"name":                 assetName,
+						"size":                 len(zipBytes),
+						"browser_download_url": srv.URL + "/dl/" + assetName,
+						"digest":               "sha256:" + zipSHA,
+					}},
+				})
+			}
+		case "/dl/" + assetName:
+			_, _ = w.Write(zipBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	isDev := false
+	client := updater.NewClient(updater.Options{
+		CurrentVersion: "2.1.0",
+		OS:             "windows",
+		Arch:           "amd64",
+		ExePath:        exePath,
+		IsDev:          &isDev,
+		APIBaseURL:     srv.URL,
+		WebBaseURL:     srv.URL,
+		HTTPClient:     srv.Client(),
+	})
+
+	dataDir := t.TempDir()
+	app := newReadyUpdateTestApp(t, dataDir, "2.1.0")
+	defer app.Close()
+	app.SetUpdaterClient(client)
+
+	tt := ui.NewTester(app.View, 1366, 768)
+
+	// 1. 验证左上角品牌菜单包含「检查更新...」
+	if err := tt.Click(appBrandTitle); err != nil {
+		t.Fatalf("点击左上角标题打开菜单失败: %v", err)
+	}
+	if !slices.Contains(tt.Menu(), "检查更新...") {
+		t.Fatalf("左上角应用菜单缺少「检查更新...」: %v", tt.Menu())
+	}
+
+	// 2. 已是最新版本场景：主动检查应明确告知用户
+	mode = "latest"
+	if err := tt.ChooseMenuItem("检查更新..."); err != nil {
+		t.Fatalf("点击菜单项「检查更新...」失败: %v", err)
+	}
+	if !app.updateModalOpen || app.updateState != updateUpToDate || !tt.HasText("已是最新版本") {
+		t.Fatalf("期望弹窗提示已是最新版本，open=%v state=%v texts=%v", app.updateModalOpen, app.updateState, tt.Texts())
+	}
+
+	// 3. 主动检查出错场景：点击「重新检查」并模拟服务端 500，应明确向用户提示错误
+	mode = "error"
+	if err := tt.Click("重新检查"); err != nil {
+		t.Fatalf("点击「重新检查」失败: %v", err)
+	}
+	if app.updateState != updateError || !tt.HasText("检查或更新失败") {
+		t.Fatalf("主动检查出错应告知用户，state=%v texts=%v", app.updateState, tt.Texts())
+	}
+
+	// 4. 发现新版本场景：展示版本与更新说明 -> 点击「下载并更新」 -> 替换并提示重启，同时左下角展示重启按钮
+	mode = "available"
+	if err := tt.Click("重试"); err != nil {
+		t.Fatalf("点击「重试」失败: %v", err)
+	}
+	if app.updateState != updateAvailable || !tt.HasText("发现新版本 v2.2.0") || !tt.HasText("支持应用内置自动更新") {
+		t.Fatalf("期望展示新版本详情与说明，state=%v texts=%v", app.updateState, tt.Texts())
+	}
+
+	if err := tt.Click("下载并更新"); err != nil {
+		t.Fatalf("点击「下载并更新」失败: %v", err)
+	}
+	if app.updateState != updateReady || !tt.HasText("新版本 v2.2.0 已准备就绪") || !tt.HasText("立即重启") {
+		t.Fatalf("下载替换后期望处于就绪态并提示立即重启，state=%v texts=%v", app.updateState, tt.Texts())
+	}
+	gotExe, _ := os.ReadFile(exePath)
+	if !bytes.Equal(gotExe, newPE) {
+		t.Fatalf("磁盘上的可执行文件未替换为新版本")
+	}
+
+	// 关闭弹窗后，左下角应存在重启提醒按钮
+	if err := tt.Click("稍后重启"); err != nil {
+		t.Fatalf("点击「稍后重启」失败: %v", err)
+	}
+	if app.updateModalOpen {
+		t.Fatalf("关闭更新弹窗后 updateModalOpen 应为 false")
+	}
+	restartRect, okRestart := tt.Find("重新启动以更新")
+	if !okRestart || restartRect.X >= app.sidebarW || restartRect.Y < 450 {
+		t.Fatalf("左下角应展示「重新启动以更新」按钮，ok=%v rect=%+v", okRestart, restartRect)
+	}
+	if err := tt.Click("重新启动以更新"); err != nil {
+		t.Fatalf("点击左下角重启按钮失败: %v", err)
+	}
+	if !app.relaunchRequested {
+		t.Fatalf("点击左下角重启按钮后应触发 Relaunch")
+	}
+}
+
+func TestSilentStartupUpdateSuccessAndSilentRollback(t *testing.T) {
+	// 子用例 1：静默更新过程中出错（哈希不匹配/网络异常）时静默中断回滚，不打扰用户
+	t.Run("silent error rolls back without disturbing user", func(t *testing.T) {
+		installDir := t.TempDir()
+		exePath := filepath.Join(installDir, "XIV Data Viewer.exe")
+		oldPE := makeTestPEBytes("v2.1.0")
+		if err := os.WriteFile(exePath, oldPE, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		zipBytes, _ := makeTestPortableZip(t, makeTestPEBytes("corrupt-v2.2.0"))
+		assetName := "xiv-data-viewer-portable-2.2.0-windows-amd64.zip"
+
+		var srv *httptest.Server
+		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/repos/InfSein/xiv-data-viewer/releases/latest":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"tag_name": "v2.2.0",
+					"assets": []map[string]any{{
+						"name":                 assetName,
+						"size":                 len(zipBytes),
+						"browser_download_url": srv.URL + "/dl/" + assetName,
+						"digest":               "sha256:" + strings.Repeat("f", 64),
+					}},
+				})
+			case "/dl/" + assetName:
+				_, _ = w.Write(zipBytes)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		isDev := false
+		client := updater.NewClient(updater.Options{
+			CurrentVersion: "2.1.0",
+			OS:             "windows",
+			Arch:           "amd64",
+			ExePath:        exePath,
+			IsDev:          &isDev,
+			APIBaseURL:     srv.URL,
+			WebBaseURL:     srv.URL,
+			HTTPClient:     srv.Client(),
+		})
+
+		app := newReadyUpdateTestApp(t, t.TempDir(), "2.1.0")
+		defer app.Close()
+		app.SetUpdaterClient(client)
+		app.StartStartupUpdateCheck()
+
+		tt := ui.NewTester(app.View, 1366, 768)
+		if app.updateModalOpen || app.updateState != updateIdle || app.updateErrorMsg != "" {
+			t.Fatalf("静默更新失败应静默中断且不弹窗: modal=%v state=%v err=%q", app.updateModalOpen, app.updateState, app.updateErrorMsg)
+		}
+		if tt.HasText("检查或更新失败") || tt.HasText("重新启动以更新") {
+			t.Fatalf("静默失败不应向界面展示任何错误或重启按钮: %v", tt.Texts())
+		}
+		gotExe, _ := os.ReadFile(exePath)
+		if !bytes.Equal(gotExe, oldPE) {
+			t.Fatalf("静默失败回滚后应保留原可执行文件")
+		}
+	})
+
+	// 子用例 2：静默更新成功下载并替换后，在左下角显示重启按钮
+	t.Run("silent success shows bottom-left restart button", func(t *testing.T) {
+		installDir := t.TempDir()
+		exePath := filepath.Join(installDir, "XIV Data Viewer.exe")
+		oldPE := makeTestPEBytes("v2.1.0")
+		if err := os.WriteFile(exePath, oldPE, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		newPE := makeTestPEBytes("v2.2.0")
+		zipBytes, zipSHA := makeTestPortableZip(t, newPE)
+		assetName := "xiv-data-viewer-portable-2.2.0-windows-amd64.zip"
+
+		var srv *httptest.Server
+		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/repos/InfSein/xiv-data-viewer/releases/latest":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"tag_name": "v2.2.0",
+					"assets": []map[string]any{{
+						"name":                 assetName,
+						"size":                 len(zipBytes),
+						"browser_download_url": srv.URL + "/dl/" + assetName,
+						"digest":               "sha256:" + zipSHA,
+					}},
+				})
+			case "/dl/" + assetName:
+				_, _ = w.Write(zipBytes)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		isDev := false
+		client := updater.NewClient(updater.Options{
+			CurrentVersion: "2.1.0",
+			OS:             "windows",
+			Arch:           "amd64",
+			ExePath:        exePath,
+			IsDev:          &isDev,
+			APIBaseURL:     srv.URL,
+			WebBaseURL:     srv.URL,
+			HTTPClient:     srv.Client(),
+		})
+
+		app := newReadyUpdateTestApp(t, t.TempDir(), "2.1.0")
+		defer app.Close()
+		app.SetUpdaterClient(client)
+		app.StartStartupUpdateCheck()
+
+		tt := ui.NewTester(app.View, 1366, 768)
+		if app.updateModalOpen || app.updateState != updateReady || app.updateReadyVer != "2.2.0" {
+			t.Fatalf("静默更新完成后应静默处于就绪态: modal=%v state=%v ver=%q", app.updateModalOpen, app.updateState, app.updateReadyVer)
+		}
+		gotExe, _ := os.ReadFile(exePath)
+		if !bytes.Equal(gotExe, newPE) {
+			t.Fatalf("静默更新完成后磁盘文件应已替换")
+		}
+		if !tt.HasText("应用更新已就绪") || !tt.HasText("v2.2.0") || !tt.HasText("重新启动以更新") {
+			t.Fatalf("左下角应显示重启提醒按钮: %v", tt.Texts())
+		}
+		rect, ok := tt.Find("重新启动以更新")
+		if !ok || rect.X >= app.sidebarW || rect.Y < 450 {
+			t.Fatalf("重启提醒按钮应位于左下角侧边栏区域: ok=%v rect=%+v", ok, rect)
+		}
+	})
+}
+
+func TestChangelogSidebarButtonAndStructuredView(t *testing.T) {
+	dataDir := t.TempDir()
+	app := newReadyUpdateTestApp(t, dataDir, "2.1.0")
+	defer app.Close()
+
+	// 先校验默认磁盘回退路径可正常加载仓库内的真实三语更新日志
+	if doc, ok := app.loadCurrentChangelog(); !ok || len(doc.NonEmptyReleases()) == 0 {
+		t.Fatalf("默认仓库更新日志回退加载失败: ok=%v err=%q", ok, app.changelogErr)
+	}
+
+	// 使用固定测试夹具隔离当前 Unreleased/已发布状态，避免随后续发版归档而失效
+	app.SetChangelogFS(fstest.MapFS{
+		"CHANGELOG.md": &fstest.MapFile{
+			Data: []byte("# 更新日志\n\n## [Unreleased]\n\n### 新增\n- **更新日志页面**：在侧边栏「设置」上方新增「更新日志」页面，按版本与分类清晰展示各版本更新内容，支持搜索与筛选。\n\n## [2.1.0] - 2026-11-24\n\n### 新增\n- **任务与理符查询**：新增「任务」与「理符」专属页面。\n\n### 修复\n- **图标边缘显示修复**：修复部分游戏图标边缘白边问题。\n\n## [2.0.0] - 2026-11-24\n\n### 新增\n- 首个正式桌面版本发布。\n"),
+		},
+		"docs/CHANGELOG.en.md": &fstest.MapFile{
+			Data: []byte("# Changelog\n\n## [Unreleased]\n\n### Added\n- **Changelog Page**: Added a Changelog page above Settings.\n\n## [2.1.0] - 2026-11-24\n\n### Added\n- **Quests & Leves Views**: Added dedicated Quests and Leves pages.\n\n### Fixed\n- **Icon Edge Halos**: Fixed bright white halos.\n\n## [2.0.0] - 2026-11-24\n\n### Added\n- First desktop release.\n"),
+		},
+		"docs/CHANGELOG.ja.md": &fstest.MapFile{
+			Data: []byte("# 更新履歴\n\n## [Unreleased]\n\n### 新規追加\n- **更新履歴ページ**：設定の上に更新履歴ページを追加しました。\n\n## [2.1.0] - 2026-11-24\n\n### 新規追加\n- **クエスト・リーヴ閲覧機能**：専用ページを追加しました。\n\n### 修正\n- **アイコン縁の白浮き修正**：縁の白浮きを修正しました。\n\n## [2.0.0] - 2026-11-24\n\n### 新規追加\n- 最初のデスクトップ版をリリース。\n"),
+		},
+	})
+
+	tt := ui.NewTester(app.View, 1366, 768)
+
+	// 1. 验证侧栏「更新日志」按钮存在且严格位于「设置」按钮正上方
+	clBtnRect, okCL := tt.Find("更新日志")
+	setBtnRect, okSet := tt.Find("设置")
+	diffBtnRect, okDiff := tt.Find("版本对比")
+	if !okCL || !okSet || !okDiff {
+		t.Fatalf("侧栏缺少预期导航项: changelog=%v settings=%v diff=%v texts=%v", okCL, okSet, okDiff, tt.Texts())
+	}
+	if clBtnRect.Y >= setBtnRect.Y || clBtnRect.Y <= diffBtnRect.Y {
+		t.Fatalf("「更新日志」应位于「版本对比」下方、「设置」上方: diff=%+v changelog=%+v settings=%+v", diffBtnRect, clBtnRect, setBtnRect)
+	}
+
+	// 2. 点击「更新日志」打开页面并验证结构化内容展示
+	if err := tt.Click("更新日志"); err != nil {
+		t.Fatalf("点击侧栏「更新日志」失败: %v", err)
+	}
+	if app.tab != tabChangelog {
+		t.Fatalf("期望跳转至 tabChangelog，实际: %v", app.tab)
+	}
+	for _, want := range []string{"更新日志", "当前 v2.1.0", "开发中版本", "v2.1.0", "当前版本", "v2.0.0", "2026-11-24", "任务与理符查询"} {
+		if !tt.HasText(want) {
+			t.Fatalf("更新日志页面缺少预期结构化内容 %q: %v", want, tt.Texts())
+		}
+	}
+
+	// 验证标题在正文上方且均实际绘制在可视区域内（分层排版而非纯文本拼接）
+	titleRect, okTitle := tt.Find("更新日志页面")
+	wantBody := "在侧边栏「设置」上方新增「更新日志」页面，按版本与分类清晰展示各版本更新内容，支持搜索与筛选。"
+	bodyRect, okBody := tt.Find(wantBody)
+	if !okTitle || !okBody || titleRect.W <= 0 || bodyRect.W <= 0 || titleRect.Y >= bodyRect.Y {
+		t.Fatalf("条目加粗标题与正文应分上下行结构化排版: title=%+v (%v) body=%+v (%v)", titleRect, okTitle, bodyRect, okBody)
+	}
+
+	// 3. 验证分类筛选与页内搜索（Ctrl+F）及重置
+	if err := tt.Click("修复"); err != nil {
+		t.Fatalf("点击「修复」分类筛选失败: %v", err)
+	}
+	if app.changelogCatFilter != "fixed" || !tt.HasText("图标边缘显示修复") || tt.HasText("任务与理符查询") {
+		t.Fatalf("「修复」分类筛选未生效: filter=%q texts=%v", app.changelogCatFilter, tt.Texts())
+	}
+
+	tt.Key(ui.Cmd, ui.KeyF)
+	if !tt.Focused(i18n.T(i18n.LangZH, "changelog.search_label")) {
+		t.Fatalf("Ctrl+F 应聚焦更新日志页内搜索框")
+	}
+	tt.Type("不存在的版本特性")
+	if !tt.HasText(i18n.T(i18n.LangZH, "changelog.empty_title")) {
+		t.Fatalf("搜索无结果时应展示空状态提示: %v", tt.Texts())
+	}
+	if err := tt.Click("重置筛选"); err != nil {
+		t.Fatalf("点击空状态「重置筛选」失败: %v", err)
+	}
+	if app.hasChangelogFilter() || !tt.HasText("任务与理符查询") {
+		t.Fatalf("重置筛选后应恢复完整更新日志展示")
+	}
+
+	// 4. 验证版本折叠按钮交互
+	if err := tt.Click("收起此版本"); err != nil {
+		t.Fatalf("收起版本卡片失败: %v", err)
+	}
+	if tt.HasText("更新日志页面") || tt.HasText(wantBody) {
+		t.Fatalf("收起 Unreleased 卡片后应隐藏其内容")
+	}
+	if err := tt.Click("展开此版本"); err != nil {
+		t.Fatalf("展开版本卡片失败: %v", err)
+	}
+	if !tt.HasText(wantBody) {
+		t.Fatalf("展开 Unreleased 卡片后应恢复显示内容")
+	}
+
+	// 5. 切换日语 / 英语，验证更新日志内容自动切换为 docs/CHANGELOG.ja.md 与 docs/CHANGELOG.en.md
+	app.SetLanguage(i18n.LangJA)
+	tt.Frame()
+	if !tt.HasText("更新履歴") || !tt.HasText("クエスト・リーヴ閲覧機能") {
+		t.Fatalf("日语模式下未展示日文更新日志内容: %v", tt.Texts())
+	}
+
+	app.SetLanguage(i18n.LangEN)
+	tt.Frame()
+	if !tt.HasText("Changelog") || !tt.HasText("Quests & Leves Views") {
+		t.Fatalf("英语模式下未展示英文更新日志内容: %v", tt.Texts())
+	}
+
+	// 6. 验证最小视口 1024×640 及深色主题下渲染正常
+	app.SetThemeMode("dark")
+	ttMin := ui.NewTester(app.View, 1024, 640)
+	if !ttMin.HasText("Changelog") || !ttMin.HasText("v2.1.0") {
+		t.Fatalf("最小视口深色模式下更新日志渲染异常: %v", ttMin.Texts())
 	}
 }

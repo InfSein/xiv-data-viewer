@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -15,25 +16,29 @@ type itemScopeDef struct {
 	label string
 }
 
-// itemScopeFilters 物品界面内的快捷数据视图筛选。
-var itemScopeFilters = []itemScopeDef{
-	{mode: "all", label: "全部"},
-	{mode: "craftable", label: "制作物品"},
-	{mode: "gatherable", label: "采集物品"},
-	{mode: "gil_shop", label: "金币商店"},
-	{mode: "special_shop", label: "特殊兑换"},
-	{mode: "retainer_venture", label: "雇员探险"},
-	{mode: "collectable_turnin", label: "收藏品交纳"},
-	{mode: "equipment", label: "武器装备"},
-	{mode: "consumable", label: "食品药水"},
+// itemScopeFilters 返回物品界面内的快捷数据视图筛选选项。
+func (a *App) itemScopeFilters() []itemScopeDef {
+	return []itemScopeDef{
+		{mode: "all", label: a.t("items.scope_all")},
+		{mode: "craftable", label: a.t("items.scope_craftable")},
+		{mode: "gatherable", label: a.t("items.scope_gatherable")},
+		{mode: "gil_shop", label: a.t("items.scope_gil_shop")},
+		{mode: "special_shop", label: a.t("items.scope_special_shop")},
+		{mode: "retainer_venture", label: a.t("items.scope_retainer_venture")},
+		{mode: "collectable_turnin", label: a.t("items.scope_collectable_turnin")},
+		{mode: "equipment", label: a.t("items.scope_equipment")},
+		{mode: "consumable", label: a.t("items.scope_consumable")},
+	}
 }
 
-var itemSortOptions = []selectOption[string]{
-	{value: "id_asc", label: "ID 升序"},
-	{value: "id_desc", label: "ID 降序"},
-	{value: "ilvl_desc", label: "品级降序"},
-	{value: "ilvl_asc", label: "品级升序"},
-	{value: "level_desc", label: "装备等级降序"},
+func (a *App) itemSortOptions() []selectOption[string] {
+	return []selectOption[string]{
+		{value: "id_asc", label: a.t("items.sort_id_asc")},
+		{value: "id_desc", label: a.t("items.sort_id_desc")},
+		{value: "ilvl_desc", label: a.t("items.sort_ilvl_desc")},
+		{value: "ilvl_asc", label: a.t("items.sort_ilvl_asc")},
+		{value: "level_desc", label: a.t("items.sort_level_desc")},
+	}
 }
 
 const appBrandTitle = "XIV Data Viewer"
@@ -70,10 +75,12 @@ func (a *App) renderBareTitleBar(c *ui.Context, showCaption bool) {
 	padR := tb.Right + 10
 	ui.Row(c).Height(h).FillWidth().Padding(0, padR, 0, padL).AlignItems(ui.Center).DragWindow().Children(func() {
 		if showCaption {
-			ui.Row(c).Gap(7).AlignItems(ui.Center).Children(func() {
+			ui.Row(c).Gap(7).AlignItems(ui.Center).Shrink(0).Children(func() {
 				a.renderBrandCaption(c)
 			})
 		}
+		ui.Spacer(c).MinWidth(12)
+		a.renderTitleLanguageButton(c)
 	})
 }
 
@@ -98,17 +105,17 @@ func (a *App) renderTitleBar(c *ui.Context) {
 			a.renderBrandMenu(c)
 			kitSeparator(c, true).Margin(0, 4)
 
-			sbTip := fmt.Sprintf("收起侧边栏 (%s)", shortcutLabel("B"))
+			sbTip := a.tf("shell.collapse_sidebar", "shortcut", shortcutLabel("B"))
 			if a.sidebarHidden {
-				sbTip = fmt.Sprintf("展开侧边栏 (%s)", shortcutLabel("B"))
+				sbTip = a.tf("shell.expand_sidebar", "shortcut", shortcutLabel("B"))
 			}
 			if kitIconButton(c, "tb-toggle-sb", icoPanelLeft, sbTip, btnOpts{variant: btnGhost, size: btnSizeSm}) {
 				a.sidebarHidden = !a.sidebarHidden
 			}
-			if kitIconButton(c, "tb-back", icoArrowLeft, "后退", btnOpts{variant: btnGhost, size: btnSizeSm, disabled: len(a.tabHistory) == 0}) {
+			if kitIconButton(c, "tb-back", icoArrowLeft, a.t("shell.back"), btnOpts{variant: btnGhost, size: btnSizeSm, disabled: len(a.tabHistory) == 0}) {
 				a.goBack()
 			}
-			if kitIconButton(c, "tb-fwd", icoArrowRight, "前进", btnOpts{variant: btnGhost, size: btnSizeSm, disabled: len(a.tabAhead) == 0}) {
+			if kitIconButton(c, "tb-fwd", icoArrowRight, a.t("shell.forward"), btnOpts{variant: btnGhost, size: btnSizeSm, disabled: len(a.tabAhead) == 0}) {
 				a.goForward()
 			}
 		})
@@ -119,6 +126,74 @@ func (a *App) renderTitleBar(c *ui.Context) {
 		a.renderTitleSearch(c)
 
 		ui.Spacer(c).MinWidth(12)
+
+		// 右侧：全局语言切换按钮（全界面随时切换）
+		a.renderTitleLanguageButton(c)
+	})
+}
+
+// renderTitleLanguageButton 在窗口右上角渲染语言切换按钮及浮层菜单，支持在任意页面随时切换。
+func (a *App) renderTitleLanguageButton(c *ui.Context) {
+	t := themeOf(c)
+	curLang := a.Language()
+	curOpt := i18n.OptionOf(curLang)
+
+	btn := ui.ButtonBase(c.Key("title-lang-btn")).Label(a.t("lang.switch_tip")).
+		Height(28).Padding(0, 8).Radius(t.radius.md).Gap(5).
+		AlignItems(ui.Center).Shrink(0).
+		Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+	if a.langPopoverOpen || btn.Hovered() {
+		btn.Background(t.tint(1))
+	}
+	kitTooltip(c, btn, a.t("lang.switch_tip"))
+	btn.Children(func() {
+		fg := t.subdued
+		if a.langPopoverOpen || btn.Hovered() {
+			fg = t.foreground
+		}
+		if a.langSwitching {
+			ui.Spinner(c).FontSize(iconSm).TextColor(t.primary)
+		} else {
+			ui.Icon(c, icoGlobe).Size(iconSm, iconSm).Shrink(0).TextColor(fg)
+		}
+		ui.Text(c, curOpt.Autonym).FontSize(t.text.xs).FontWeight(500).TextColor(fg).SingleLine()
+		ui.Icon(c, icoChevronDown).Size(iconXs, iconXs).Shrink(0).TextColor(t.muted)
+	})
+	if btn.Clicked() {
+		a.langPopoverOpen = !a.langPopoverOpen
+	}
+
+	ui.PopoverBase(c.Key("title-lang-popover"), btn, &a.langPopoverOpen, func(panel ui.Element) {
+		applyOverlaySurface(c, panel.AttachTo(btn, ui.AnchorBottomEnd, ui.AnchorTopEnd).
+			Margin(4, 0, 0, 0).Width(156).Padding(4).Radius(t.radius.lg), shadowOverlay)
+		ui.Column(c).FillWidth().Gap(2).Children(func() {
+			for _, opt := range i18n.SupportedLangs {
+				active := curLang == opt.Code
+				row := ui.ButtonBase(c.Key("title-lang-opt-"+string(opt.Code))).Label(opt.Autonym).
+					FillWidth().Height(28).Padding(0, 8).Radius(t.radius.md).
+					Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).
+					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+				if row.Hovered() {
+					row.Background(t.tint(1.25))
+				}
+				row.Children(func() {
+					fw := 400
+					if active {
+						fw = 600
+					}
+					ui.Text(c, opt.Autonym).FontSize(t.text.xs).FontWeight(fw).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
+					if active {
+						ui.Icon(c, icoCheck).Size(iconXs, iconXs).Shrink(0).TextColor(t.primary)
+					}
+				})
+				if row.Clicked() {
+					a.langPopoverOpen = false
+					if !active {
+						a.SetLanguage(opt.Code)
+					}
+				}
+			}
+		})
 	})
 }
 
@@ -132,25 +207,29 @@ func (a *App) renderBrandMenu(c *ui.Context) {
 		b.Background(t.tint(1))
 	}
 	b.Menu(func(m *ui.Menu) {
-		if m.Item("导出游戏 CSV...").Chosen() {
+		if m.Item(a.t("menu.export_csv")).Chosen() {
 			a.openExportModal()
 		}
-		if m.Item("刷新版本快照").Disabled(a.backupSvc == nil || a.diffBusy).Chosen() {
+		if m.Item(a.t("menu.refresh_snapshot")).Disabled(a.backupSvc == nil || a.diffBusy).Chosen() {
 			a.refreshVersionBackup()
 		}
 		m.Separator()
-		if m.Item("浅色外观").Checked(a.cfg.Theme == "light").Chosen() {
+		if m.Item(a.t("menu.theme_light")).Checked(a.cfg.Theme == "light").Chosen() {
 			a.SetThemeMode("light")
 		}
-		if m.Item("深色外观").Checked(a.cfg.Theme == "dark").Chosen() {
+		if m.Item(a.t("menu.theme_dark")).Checked(a.cfg.Theme == "dark").Chosen() {
 			a.SetThemeMode("dark")
 		}
-		if m.Item("跟随系统外观").Checked(a.cfg.Theme == "" || a.cfg.Theme == "system").Chosen() {
+		if m.Item(a.t("menu.theme_system")).Checked(a.cfg.Theme == "" || a.cfg.Theme == "system").Chosen() {
 			a.SetThemeMode("system")
 		}
 		m.Separator()
-		if m.Item("设置").Chosen() {
+		if m.Item(a.t("menu.settings")).Chosen() {
 			a.navigateTab(tabSettings)
+		}
+		m.Separator()
+		if m.Item(a.t("menu.check_update")).Chosen() {
+			a.openManualUpdateCheck()
 		}
 	})
 	b.Children(func() {
@@ -158,104 +237,309 @@ func (a *App) renderBrandMenu(c *ui.Context) {
 	})
 }
 
+type globalJumpTarget struct {
+	tab   activeTab
+	label string
+	icon  *ui.SVG
+}
+
+func (a *App) globalJumpTargets() []globalJumpTarget {
+	return []globalJumpTarget{
+		{tab: tabWorkbench, label: a.t("search.global_module_item"), icon: icoPackage},
+		{tab: tabQuests, label: a.t("search.global_module_quest"), icon: icoScroll},
+		{tab: tabLeves, label: a.t("search.global_module_leve"), icon: icoClipboard},
+		{tab: tabAchievements, label: a.t("search.global_module_achievement"), icon: icoTrophy},
+		{tab: tabDiff, label: a.t("search.global_module_diff"), icon: icoCompare},
+	}
+}
+
+func (a *App) defaultGlobalSearchIdx() int {
+	if len(a.globalSearchRes.Hits) > 0 {
+		return 0
+	}
+	targets := a.globalJumpTargets()
+	for i, jt := range targets {
+		if jt.tab == a.tab {
+			return i
+		}
+	}
+	return 0
+}
+
+func (a *App) executeGlobalSearchAction(idx int) {
+	hits := a.globalSearchRes.Hits
+	targets := a.globalJumpTargets()
+	total := len(hits) + len(targets)
+	if total == 0 {
+		return
+	}
+	if idx < 0 || idx >= total {
+		idx = a.defaultGlobalSearchIdx()
+	}
+	if idx < len(hits) {
+		a.openGlobalSearchHit(hits[idx])
+		return
+	}
+	a.jumpToModuleSearch(targets[idx-len(hits)].tab)
+}
+
+func (a *App) globalHitBadgeAndIcon(kind gamedata.GlobalSearchHitKind) (string, pillKind, *ui.SVG) {
+	switch kind {
+	case gamedata.GlobalHitQuest:
+		return a.t("search.global_module_quest"), pillWarning, icoScroll
+	case gamedata.GlobalHitLeve:
+		return a.t("search.global_module_leve"), pillPositive, icoClipboard
+	case gamedata.GlobalHitAchievement:
+		return a.t("search.global_module_achievement"), pillAccent, icoTrophy
+	default:
+		return a.t("search.global_module_item"), pillNeutral, icoPackage
+	}
+}
+
+func (a *App) formatGlobalHitMeta(hit gamedata.GlobalSearchHit) string {
+	parts := []string{fmt.Sprintf("#%d", hit.ID)}
+	if hit.Category != "" {
+		parts = append(parts, hit.Category)
+	}
+	switch hit.Kind {
+	case gamedata.GlobalHitItem:
+		if hit.ItemLevel > 0 {
+			parts = append(parts, fmt.Sprintf("iLv %d", hit.ItemLevel))
+		}
+	case gamedata.GlobalHitQuest, gamedata.GlobalHitLeve:
+		if hit.Level > 0 {
+			parts = append(parts, fmt.Sprintf("Lv.%d", hit.Level))
+		}
+	case gamedata.GlobalHitAchievement:
+		if hit.Points > 0 {
+			parts = append(parts, a.tf("search.global_ach_points", "pts", strconv.Itoa(hit.Points)))
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// renderPageSearchInput 绘制各模块页面内统一的内置搜索栏，保持一致的尺寸、图标、清零与 Ctrl+F 聚焦体验。
+func (a *App) renderPageSearchInput(c *ui.Context, key string, val *string, placeholder, label string, onChanged func()) {
+	inp := kitInput(c, key, val, kitInputOpts{
+		placeholder: placeholder,
+		label:       label,
+		size:        btnSizeSm,
+		tintBg:      true,
+		leading:     icoSearch,
+		shortcut:    shortcutLabel("F"),
+		clearable:   true,
+	})
+	if a.focusPageSearch {
+		inp.Focus()
+		a.focusPageSearch = false
+	}
+	if inp.Changed() && onChanged != nil {
+		onChanged()
+	}
+}
+
 func (a *App) renderTitleSearch(c *ui.Context) {
+	t := themeOf(c)
 	sc := shortcutLabel("K")
 	ui.Box(c).Width(420).MinWidth(200).Shrink(1).Children(func() {
-		switch a.tab {
-		case tabQuests:
-			inp := kitInput(c, "title-search-quest", &a.questQuery.Q, kitInputOpts{
-				placeholder: "搜索任务名、区域、NPC 或 ID...",
-				label:       "搜索任务",
-				size:        btnSizeSm,
-				tintBg:      true,
-				leading:     icoSearch,
-				shortcut:    sc,
-				clearable:   true,
-			})
-			if a.focusSearch {
-				inp.Focus()
-				a.focusSearch = false
-			}
-			if inp.Changed() {
-				a.questQuery.Page = 1
-				a.refreshQuests()
-			}
-		case tabLeves:
-			inp := kitInput(c, "title-search-leve", &a.leveQuery.Q, kitInputOpts{
-				placeholder: "搜索理符名、委托道具、发布地或 ID...",
-				label:       "搜索理符",
-				size:        btnSizeSm,
-				tintBg:      true,
-				leading:     icoSearch,
-				shortcut:    sc,
-				clearable:   true,
-			})
-			if a.focusSearch {
-				inp.Focus()
-				a.focusSearch = false
-			}
-			if inp.Changed() {
-				a.leveQuery.Page = 1
-				a.refreshLeves()
-			}
-		case tabAchievements:
-			inp := kitInput(c, "title-search-ach", &a.achQuery.Q, kitInputOpts{
-				placeholder: "搜索成就、称号或 ID...",
-				label:       "搜索成就",
-				size:        btnSizeSm,
-				tintBg:      true,
-				leading:     icoSearch,
-				shortcut:    sc,
-				clearable:   true,
-			})
-			if a.focusSearch {
-				inp.Focus()
-				a.focusSearch = false
-			}
-			if inp.Changed() {
-				a.achQuery.Page = 1
-				a.refreshAchievements()
-			}
-		case tabDiff:
-			inp := kitInput(c, "title-search-diff", &a.diffSearch, kitInputOpts{
-				placeholder: "搜索差异中的物品、任务、理符、成就或 ID...",
-				label:       "搜索版本差异",
-				size:        btnSizeSm,
-				tintBg:      true,
-				leading:     icoSearch,
-				shortcut:    sc,
-				clearable:   true,
-			})
-			if a.focusSearch {
-				inp.Focus()
-				a.focusSearch = false
-			}
-			if inp.Changed() {
-				a.diffPage = 1
-				a.refreshDiff()
-			}
-		default:
-			inp := kitInput(c, "title-search-item", &a.itemQuery.Q, kitInputOpts{
-				placeholder: "搜索物品名（中/英/日）或 ID...",
-				label:       "全局物品搜索",
-				size:        btnSizeSm,
-				tintBg:      true,
-				leading:     icoSearch,
-				shortcut:    sc,
-				clearable:   true,
-			})
-			if a.focusSearch {
-				inp.Focus()
-				a.focusSearch = false
-			}
-			if inp.Changed() {
-				if a.tab != tabWorkbench {
-					a.navigateTab(tabWorkbench)
-				}
-				a.itemQuery.Page = 1
-				a.refreshItemList()
+		inp, anchor := kitInputWithContainer(c, "title-search-global", &a.globalSearchQ, kitInputOpts{
+			placeholder: a.t("search.global_placeholder"),
+			label:       a.t("search.global_label"),
+			size:        btnSizeSm,
+			tintBg:      true,
+			leading:     icoSearch,
+			shortcut:    sc,
+			clearable:   true,
+		})
+
+		if a.focusSearch {
+			inp.Focus()
+			a.focusSearch = false
+			if strings.TrimSpace(a.globalSearchQ) != "" {
+				a.refreshGlobalSearch()
+				a.globalSearchOpen = true
+				a.globalSearchIdx = a.defaultGlobalSearchIdx()
 			}
 		}
+
+		if inp.Changed() {
+			a.globalSearchScroll.Y = 0
+			if strings.TrimSpace(a.globalSearchQ) == "" {
+				a.globalSearchOpen = false
+				a.globalSearchRes = gamedata.GlobalSearchResult{}
+				a.globalSearchIdx = 0
+			} else {
+				a.refreshGlobalSearch()
+				a.globalSearchOpen = true
+				a.globalSearchIdx = a.defaultGlobalSearchIdx()
+			}
+		} else if inp.Clicked() && !a.globalSearchOpen && strings.TrimSpace(a.globalSearchQ) != "" {
+			a.globalSearchScroll.Y = 0
+			a.refreshGlobalSearch()
+			a.globalSearchOpen = true
+			a.globalSearchIdx = a.defaultGlobalSearchIdx()
+		}
+
+		hits := a.globalSearchRes.Hits
+		targets := a.globalJumpTargets()
+		totalActions := len(hits) + len(targets)
+		if totalActions > 0 && (a.globalSearchIdx < 0 || a.globalSearchIdx >= totalActions) {
+			a.globalSearchIdx = a.defaultGlobalSearchIdx()
+		}
+
+		if totalActions > 0 {
+			if a.globalSearchOpen {
+				if inp.Shortcut(0, ui.KeyDown) {
+					a.globalSearchIdx = (a.globalSearchIdx + 1) % totalActions
+					a.globalSearchScrollTo = true
+				}
+				if inp.Shortcut(0, ui.KeyUp) {
+					a.globalSearchIdx = (a.globalSearchIdx - 1 + totalActions) % totalActions
+					a.globalSearchScrollTo = true
+				}
+			} else if strings.TrimSpace(a.globalSearchQ) != "" && inp.Shortcut(0, ui.KeyDown) {
+				a.refreshGlobalSearch()
+				a.globalSearchOpen = true
+				a.globalSearchIdx = a.defaultGlobalSearchIdx()
+				a.globalSearchScrollTo = true
+			}
+		}
+
+		if inp.Submitted() && strings.TrimSpace(a.globalSearchQ) != "" {
+			if !a.globalSearchOpen {
+				a.refreshGlobalSearch()
+				hits = a.globalSearchRes.Hits
+				a.globalSearchIdx = a.defaultGlobalSearchIdx()
+			}
+			a.executeGlobalSearchAction(a.globalSearchIdx)
+		}
+
+		ui.PopoverBase(c.Key("global-search-popover"), anchor, &a.globalSearchOpen, func(panel ui.Element) {
+			panel.KeepFocus()
+			// 固定高度并内置结果区滚动、底部跳转区常驻，避免搜索结果数变化导致面板高度抖动
+			applyOverlaySurface(c, panel.AttachTo(anchor, ui.AnchorBottomStart, ui.AnchorTopStart).
+				Margin(6, 0, 0, 0).Width(480).Height(448).Clip().Radius(t.radius.xl), shadowOverlay)
+
+			ui.Column(c).Fill().Padding(6).Gap(0).Children(func() {
+				// 1. 顶部结果摘要栏（固定高度）
+				ui.Row(c).FillWidth().Shrink(0).Padding(4, 8, 4, 8).Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, a.t("search.global_matches_header")).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).SingleLine()
+					if a.globalSearchRes.TotalMatched > len(hits) {
+						numText(c, a.tf("search.global_matches_capped",
+							"shown", formatInt(len(hits)),
+							"count", formatInt(a.globalSearchRes.TotalMatched),
+						)).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+					} else if a.globalSearchRes.TotalMatched > 0 {
+						numText(c, a.tf("search.global_matches_count", "count", formatInt(a.globalSearchRes.TotalMatched))).
+							FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+					}
+				})
+
+				// 2. 中部匹配结果区（占满剩余弹性高度并内部滚动）
+				ui.Scroll(c.Key("global-search-scroll")).TrackScroll(&a.globalSearchScroll).Grow(1).Shrink(1).FillWidth().Children(func() {
+					if len(hits) == 0 {
+						ui.Column(c).FillWidth().Padding(28, 12).Center().Children(func() {
+							ui.Text(c, a.t("search.global_no_matches")).FontSize(t.text.xs).TextColor(t.muted).TextAlign(ui.Center)
+						})
+					} else {
+						ui.Column(c).FillWidth().Gap(2).Children(func() {
+							for i, hit := range hits {
+								active := a.globalSearchIdx == i
+								modLabel, pillKind, fallbackIco := a.globalHitBadgeAndIcon(hit.Kind)
+								btn := ui.ButtonBase(c.Key(fmt.Sprintf("gs-hit-%s-%d", hit.Kind, hit.ID))).
+									Label(hit.Title).FillWidth().Padding(6, 8).Gap(8).Radius(t.radius.md).
+									Justify(ui.SpaceBetween).AlignItems(ui.Center).
+									Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+								if btn.Hovered() || active {
+									btn.Background(t.tint(1.25))
+								}
+								if active && a.globalSearchScrollTo {
+									btn.ScrollIntoView()
+									a.globalSearchScrollTo = false
+								}
+								btn.Children(func() {
+									ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+										if hit.IconID > 0 {
+											a.drawGameIcon(c, hit.IconID, false, 28, t.radius.md)
+										} else {
+											ui.Box(c).Size(28, 28).Shrink(0).Radius(t.radius.md).Background(t.card).Border(hairline, t.border).Center().Children(func() {
+												ui.Icon(c, fallbackIco).Size(iconSm, iconSm).TextColor(t.muted)
+											})
+										}
+										ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
+											ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Baseline).Children(func() {
+												fw := 500
+												if active {
+													fw = 600
+												}
+												ui.Text(c, hit.Title).FontSize(t.text.sm).FontWeight(fw).TextColor(t.foreground).SingleLine().Shrink(1)
+												if hit.MatchedAlias != "" {
+													ui.Text(c, hit.MatchedAlias).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(1)
+												}
+											})
+											numText(c, a.formatGlobalHitMeta(hit)).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+										})
+									})
+									drawPill(c, modLabel, pillKind)
+								})
+								if btn.Clicked() {
+									a.openGlobalSearchHit(hit)
+								}
+							}
+						})
+					}
+				})
+
+				kitSeparator(c, false).Margin(4, 6)
+
+				// 3. 底部固定跳转搜索区（始终显示，不随上方结果滚动消失）
+				ui.Column(c).FillWidth().Shrink(0).Gap(1).Children(func() {
+					ui.Row(c).FillWidth().Padding(2, 8, 2, 8).Children(func() {
+						ui.Text(c, a.t("search.global_jump_header")).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).SingleLine()
+					})
+
+					trimmedQ := strings.TrimSpace(a.globalSearchQ)
+					for j, jt := range targets {
+						actionIdx := len(hits) + j
+						active := a.globalSearchIdx == actionIdx
+						isCurrent := jt.tab == a.tab
+						actionLabel := a.tf("search.global_jump_action", "module", jt.label)
+						row := ui.ButtonBase(c.Key(fmt.Sprintf("gs-jump-%d", jt.tab))).
+							Label(actionLabel).FillWidth().Height(28).Padding(0, 8).Gap(8).Radius(t.radius.md).
+							Justify(ui.SpaceBetween).AlignItems(ui.Center).
+							Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+						if row.Hovered() || active {
+							row.Background(t.tint(1.25))
+						}
+						if active && a.globalSearchScrollTo {
+							a.globalSearchScrollTo = false
+						}
+						row.Children(func() {
+							ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+								icoCol := t.muted
+								if active || row.Hovered() {
+									icoCol = t.primary
+								}
+								ui.Icon(c, jt.icon).Size(iconSm, iconSm).Shrink(0).TextColor(icoCol)
+								ui.Text(c, actionLabel).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine().Shrink(0)
+								if trimmedQ != "" {
+									ui.Text(c, "“"+trimmedQ+"”").FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
+								}
+							})
+							ui.Row(c).Gap(6).AlignItems(ui.Center).Shrink(0).Children(func() {
+								if isCurrent {
+									drawPill(c, a.t("search.global_current_page"), pillOutline)
+								}
+								ui.Icon(c, icoArrowRight).Size(iconXs, iconXs).TextColor(t.muted)
+							})
+						})
+						if row.Clicked() {
+							a.jumpToModuleSearch(jt.tab)
+						}
+					}
+				})
+			})
+		})
 	})
 }
 
@@ -280,7 +564,7 @@ func (a *App) renderShellBody(c *ui.Context) {
 			})
 
 			if !a.sidebarHidden {
-				renderSplitterGrip(c, "sb-grip", &a.sidebarW, sidebarMinWidth, sidebarMaxWidth, edgeGap, "调整侧边栏宽度")
+				renderSplitterGrip(c, "sb-grip", &a.sidebarW, sidebarMinWidth, sidebarMaxWidth, edgeGap, a.t("shell.resize_sidebar"))
 			}
 		}
 
@@ -294,6 +578,8 @@ func (a *App) renderShellBody(c *ui.Context) {
 				a.renderAchievementsView(c)
 			case tabDiff:
 				a.renderDiffView(c)
+			case tabChangelog:
+				a.renderChangelogView(c)
 			case tabSettings:
 				a.renderSettingsView(c)
 			default:
@@ -309,7 +595,7 @@ func (a *App) renderSidebar(c *ui.Context) {
 	ui.Column(c).Fill().Padding(6, 4, 4, 4).Justify(ui.SpaceBetween).Children(func() {
 		ui.Scroll(c.Key("sidebar-scroll")).Grow(1).Shrink(1).Children(func() {
 			ui.Column(c).FillWidth().Gap(2).Children(func() {
-				ui.Text(c, "数据").FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).Padding(4, 10, 4, 10)
+				ui.Text(c, a.t("nav.section.data")).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).Padding(4, 10, 4, 10)
 
 				achCnt := ""
 				itemCnt := ""
@@ -321,90 +607,99 @@ func (a *App) renderSidebar(c *ui.Context) {
 					questCnt = formatInt(a.status.Stats.TotalQuests)
 					leveCnt = formatInt(a.status.Stats.TotalLeves)
 				}
-				if kitSidebarItem(c, "nav-items", icoPackage, icoPackageFill, "物品", itemCnt, a.tab == tabWorkbench, false) {
+				if kitSidebarItem(c, "nav-items", icoPackage, icoPackageFill, a.t("nav.items"), itemCnt, a.tab == tabWorkbench, false) {
 					a.navigateTab(tabWorkbench)
 				}
-				if kitSidebarItem(c, "nav-quests", icoScroll, icoScrollFill, "任务", questCnt, a.tab == tabQuests, false) {
+				if kitSidebarItem(c, "nav-quests", icoScroll, icoScrollFill, a.t("nav.quests"), questCnt, a.tab == tabQuests, false) {
 					a.navigateTab(tabQuests)
 				}
-				if kitSidebarItem(c, "nav-leves", icoClipboard, icoClipboardFill, "理符", leveCnt, a.tab == tabLeves, false) {
+				if kitSidebarItem(c, "nav-leves", icoClipboard, icoClipboardFill, a.t("nav.leves"), leveCnt, a.tab == tabLeves, false) {
 					a.navigateTab(tabLeves)
 				}
-				if kitSidebarItem(c, "nav-achievements", icoTrophy, icoTrophyFill, "成就", achCnt, a.tab == tabAchievements, false) {
+				if kitSidebarItem(c, "nav-achievements", icoTrophy, icoTrophyFill, a.t("nav.achievements"), achCnt, a.tab == tabAchievements, false) {
 					a.navigateTab(tabAchievements)
 				}
 
-				ui.Text(c, "对比").FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).Padding(14, 10, 4, 10)
+				ui.Text(c, a.t("nav.section.compare")).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).Padding(14, 10, 4, 10)
 
 				hasUpdate := a.versionStatus != nil && a.versionStatus.HasVersionUpdate
 				diffMeta := ""
 				if hasUpdate {
-					diffMeta = "有更新"
+					diffMeta = a.t("nav.diff_update_badge")
 				}
-				if kitSidebarItem(c, "nav-diff", icoCompare, icoCompare, "版本对比", diffMeta, a.tab == tabDiff, hasUpdate) {
+				if kitSidebarItem(c, "nav-diff", icoCompare, icoCompare, a.t("nav.diff"), diffMeta, a.tab == tabDiff, hasUpdate) {
 					a.navigateTab(tabDiff)
 				}
 			})
 		})
 
 		ui.Column(c).FillWidth().Gap(6).Padding(8, 0, 0, 0).Children(func() {
+			if a.updateState == updateReady {
+				a.renderSidebarAppRestartCard(c)
+			}
 			if a.versionStatus != nil && a.versionStatus.HasVersionUpdate && a.tab != tabDiff && !a.dismissUpdateBanner {
 				a.renderSidebarUpdateCard(c)
 			}
 
 			kitSeparator(c, false).Margin(0, 6)
 
-			footRow := ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(4)
-			footRow.Children(func() {
-				ui.Box(c).Grow(1).Shrink(1).Children(func() {
-					if kitSidebarItem(c, "nav-settings", icoSettings, icoSettings, "设置", "", a.tab == tabSettings, false) {
-						a.navigateTab(tabSettings)
-					}
-				})
-
-				et := gamedata.GetCurrentEorzeaTime(time.Now())
-				stBtn := ui.ButtonBase(c.Key("sb-status-btn")).Label("客户端状态与艾欧泽亚时间").
-					Height(28).Padding(0, 8).Radius(t.radius.md).Gap(6).Shrink(0).
-					AlignItems(ui.Center).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-				if a.statusPopoverOpen || stBtn.Hovered() {
-					stBtn.Background(t.tint(1.25))
+			ui.Column(c).FillWidth().Gap(2).Children(func() {
+				if kitSidebarItem(c, "nav-changelog", icoChangelog, icoChangelogFill, a.t("nav.changelog"), "", a.tab == tabChangelog, false) {
+					a.navigateTab(tabChangelog)
 				}
-				stBtn.Children(func() {
-					drawStatusDot(c, t.success)
-					numText(c, "ET "+et.Formatted).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).SingleLine()
-				})
-				if stBtn.Clicked() {
-					a.statusPopoverOpen = !a.statusPopoverOpen
-				}
-			})
 
-			ui.PopoverBase(c.Key("sb-status-popover"), footRow, &a.statusPopoverOpen, func(panel ui.Element) {
-				applyOverlaySurface(c, panel.AttachTo(footRow, ui.AnchorTopStart, ui.AnchorBottomStart).
-					Margin(0, 0, 6, 0).Width(236).Padding(12).Radius(t.radius.xl), shadowOverlay)
-				ui.Column(c).FillWidth().Gap(8).Children(func() {
-					ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
-						ui.Text(c, "客户端状态").FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground)
-						ui.Text(c, "只读模式").FontSize(t.text.micro).TextColor(t.successText)
+				footRow := ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(4)
+				footRow.Children(func() {
+					ui.Box(c).Grow(1).Shrink(1).Children(func() {
+						if kitSidebarItem(c, "nav-settings", icoSettings, icoSettings, a.t("nav.settings"), "", a.tab == tabSettings, false) {
+							a.navigateTab(tabSettings)
+						}
 					})
-					kitSeparator(c, false)
-					if a.status != nil {
-						if a.status.HasCN {
-							ui.Row(c).FillWidth().Justify(ui.SpaceBetween).Children(func() {
-								ui.Text(c, "国服").FontSize(t.text.xs).TextColor(t.muted)
-								numText(c, "v"+a.status.CNVersion).FontSize(t.text.xs).TextColor(t.foreground)
-							})
-						}
-						if a.status.HasGlobal {
-							ui.Row(c).FillWidth().Justify(ui.SpaceBetween).Children(func() {
-								ui.Text(c, "国际服").FontSize(t.text.xs).TextColor(t.muted)
-								numText(c, "v"+a.status.GlobalVersion).FontSize(t.text.xs).TextColor(t.foreground)
-							})
-						}
-						ui.Row(c).FillWidth().Justify(ui.SpaceBetween).Children(func() {
-							ui.Text(c, "加载耗时").FontSize(t.text.xs).TextColor(t.muted)
-							numTextf(c, "%d ms", a.status.Stats.LoadTimeMs).FontSize(t.text.xs).TextColor(t.muted)
-						})
+
+					et := gamedata.GetCurrentEorzeaTime(time.Now())
+					stBtn := ui.ButtonBase(c.Key("sb-status-btn")).Label(a.t("shell.status_btn_label")).
+						Height(28).Padding(0, 8).Radius(t.radius.md).Gap(6).Shrink(0).
+						AlignItems(ui.Center).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+					if a.statusPopoverOpen || stBtn.Hovered() {
+						stBtn.Background(t.tint(1.25))
 					}
+					stBtn.Children(func() {
+						drawStatusDot(c, t.success)
+						numText(c, "ET "+et.Formatted).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).SingleLine()
+					})
+					if stBtn.Clicked() {
+						a.statusPopoverOpen = !a.statusPopoverOpen
+					}
+				})
+
+				ui.PopoverBase(c.Key("sb-status-popover"), footRow, &a.statusPopoverOpen, func(panel ui.Element) {
+					applyOverlaySurface(c, panel.AttachTo(footRow, ui.AnchorTopStart, ui.AnchorBottomStart).
+						Margin(0, 0, 6, 0).Width(236).Padding(12).Radius(t.radius.xl), shadowOverlay)
+					ui.Column(c).FillWidth().Gap(8).Children(func() {
+						ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
+							ui.Text(c, a.t("shell.client_status")).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground)
+							ui.Text(c, a.t("common.readonly_mode")).FontSize(t.text.micro).TextColor(t.successText)
+						})
+						kitSeparator(c, false)
+						if a.status != nil {
+							if a.status.HasCN {
+								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).Children(func() {
+									ui.Text(c, a.t("shell.server_cn")).FontSize(t.text.xs).TextColor(t.muted)
+									numText(c, "v"+a.status.CNVersion).FontSize(t.text.xs).TextColor(t.foreground)
+								})
+							}
+							if a.status.HasGlobal {
+								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).Children(func() {
+									ui.Text(c, a.t("shell.server_global")).FontSize(t.text.xs).TextColor(t.muted)
+									numText(c, "v"+a.status.GlobalVersion).FontSize(t.text.xs).TextColor(t.foreground)
+								})
+							}
+							ui.Row(c).FillWidth().Justify(ui.SpaceBetween).Children(func() {
+								ui.Text(c, a.t("shell.load_time")).FontSize(t.text.xs).TextColor(t.muted)
+								numTextf(c, "%d ms", a.status.Stats.LoadTimeMs).FontSize(t.text.xs).TextColor(t.muted)
+							})
+						}
+					})
 				})
 			})
 		})
@@ -416,13 +711,13 @@ func (a *App) renderSidebarUpdateCard(c *ui.Context) {
 	t := themeOf(c)
 	ui.Row(c.Key("sb-update-card")).FillWidth().Padding(8, 8, 8, 10).Radius(t.radius.lg).Gap(6).
 		Background(t.background).Border(hairline, t.border).AlignItems(ui.Center).Children(func() {
-		nav := ui.ButtonBase(c.Key("sb-update-go")).Label("查看版本更新对比").
+		nav := ui.ButtonBase(c.Key("sb-update-go")).Label(a.t("shell.update_card_label")).
 			Grow(1).Shrink(1).Cursor(ui.CursorPointer)
 		nav.Children(func() {
 			ui.Column(c).FillWidth().Gap(2).Children(func() {
 				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
 					drawStatusDot(c, t.success)
-					ui.Text(c, "检测到版本更新").FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
+					ui.Text(c, a.t("shell.update_detected")).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
 				})
 				numText(c, a.versionStatus.CurrentVersion).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 			})
@@ -431,8 +726,47 @@ func (a *App) renderSidebarUpdateCard(c *ui.Context) {
 			a.navigateTab(tabDiff)
 		}
 
-		if kitIconButton(c, "sb-update-dismiss", icoClose, "暂不提醒", btnOpts{variant: btnGhost, size: btnSizeXs}) {
+		if kitIconButton(c, "sb-update-dismiss", icoClose, a.t("shell.dismiss_update"), btnOpts{variant: btnGhost, size: btnSizeXs}) {
 			a.dismissUpdateBanner = true
+		}
+	})
+}
+
+// renderSidebarAppRestartCard 在左下角显示应用新版本已就绪提醒与一键重启按钮。
+func (a *App) renderSidebarAppRestartCard(c *ui.Context) {
+	t := themeOf(c)
+	card := kitBlock(c, ui.Column(c.Key("sb-app-restart-card")).FillWidth().Padding(10).Gap(8), toneInfo)
+	card.Children(func() {
+		ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
+			ui.Row(c).Gap(6).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+				drawStatusDot(c, t.primary)
+				ui.Text(c, a.t("update.sidebar_ready_title")).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
+			})
+			if ver := formatAppVersionTag(a.updateReadyVer); ver != "" {
+				numText(c, ver).FontSize(t.text.micro).FontWeight(500).TextColor(t.infoText).SingleLine().Shrink(0)
+			}
+		})
+
+		btnLabel := a.t("update.sidebar_restart_btn")
+		b := ui.ButtonBase(c.Key("sb-app-restart-btn")).Label(btnLabel).
+			FillWidth().Height(28).PaddingX(10).Radius(t.radius.md).
+			Gap(6).Justify(ui.Center).AlignItems(ui.Center).
+			Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+		bg := t.primary
+		if b.Hovered() {
+			if b.Pressed() {
+				bg = t.primary.Mix(t.foreground, 0.16)
+			} else {
+				bg = t.primary.Mix(t.foreground, 0.08)
+			}
+		}
+		b.Background(bg).TextColor(t.primaryText)
+		b.Children(func() {
+			ui.Icon(c, icoRefresh).Size(iconSm, iconSm).Shrink(0).TextColor(t.primaryText)
+			ui.Text(c, btnLabel).FontSize(t.text.xs).FontWeight(500).TextColor(t.primaryText).SingleLine()
+		})
+		if b.Clicked() {
+			a.restartForUpdate()
 		}
 	})
 }
@@ -442,7 +776,7 @@ func (a *App) renderSidebarUpdateCard(c *ui.Context) {
 // ---------------------------------------------------------------------------
 
 func (a *App) renderWorkbenchView(c *ui.Context) {
-	kitResizer(c, "wb-split", &a.listW, itemListMinWidth, itemListMaxWidth, 8, "调整物品列表宽度",
+	kitResizer(c, "wb-split", &a.listW, itemListMinWidth, itemListMaxWidth, 8, a.t("shell.resize_item_list"),
 		func() { a.renderItemListPane(c) },
 		func() { a.renderItemDetailPane(c) },
 	)
@@ -478,26 +812,26 @@ func (a *App) renderItemListPane(c *ui.Context) {
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Children(func() {
 			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
 				ui.Row(c).Gap(6).AlignItems(ui.Baseline).Grow(1).Shrink(1).Children(func() {
-					ui.Text(c, "物品").FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
-					numTextf(c, "%s 项", formatInt(a.itemRes.Total)).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+					ui.Text(c, a.t("items.title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
+					numText(c, a.tf("common.items_count", "count", formatInt(a.itemRes.Total))).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
 				})
 
 				ui.Row(c).Gap(4).AlignItems(ui.Center).Shrink(0).Children(func() {
 					if a.hasAnyItemFilter() {
-						if kitButton(c, "wb-quick-reset", "重置", btnOpts{variant: btnGhost, size: btnSizeSm}) {
+						if kitButton(c, "wb-quick-reset", a.t("common.reset"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
 							a.resetItemFilters()
 						}
 					}
 
-					if kitSelect(c, "wb-sort-select", &a.itemQuery.Sort, itemSortOptions, 112, 148, true) {
+					if kitSelect(c, "wb-sort-select", &a.itemQuery.Sort, a.itemSortOptions(), 126, 184, true) {
 						a.itemQuery.Page = 1
 						a.refreshItemList()
 					}
 
 					advCnt := a.countActiveAdvFilters()
-					fltLbl := "筛选"
+					fltLbl := a.t("items.filter")
 					if advCnt > 0 {
-						fltLbl = fmt.Sprintf("筛选 (%d)", advCnt)
+						fltLbl = a.tf("items.filter_count", "count", strconv.Itoa(advCnt))
 					}
 					v := btnOutline
 					if a.itemAdvFilter || advCnt > 0 {
@@ -509,9 +843,15 @@ func (a *App) renderItemListPane(c *ui.Context) {
 				})
 			})
 
+			// 页面内置搜索栏
+			a.renderPageSearchInput(c, "wb-page-search", &a.itemQuery.Q, a.t("search.item_placeholder"), a.t("search.item_label"), func() {
+				a.itemQuery.Page = 1
+				a.refreshItemList()
+			})
+
 			// 途径筛选条（去掉冗余千位数字，保持两行内清爽排列）
 			ui.Row(c).FillWidth().Gap(4).Wrap().AlignItems(ui.Center).Children(func() {
-				for _, f := range itemScopeFilters {
+				for _, f := range a.itemScopeFilters() {
 					active := a.itemQuery.Filter == f.mode
 					if kitToggleChip(c, "scope-"+f.mode, f.label, "", active, nil) {
 						a.itemQuery.Filter = f.mode
@@ -529,9 +869,9 @@ func (a *App) renderItemListPane(c *ui.Context) {
 				ui.Column(c).FillWidth().Padding(8, 0, 0, 0).Gap(6).
 					BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).Children(func() {
 					ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
-						ui.Text(c, "能工巧匠职业").FontSize(t.text.micro).FontWeight(500).TextColor(t.muted)
+						ui.Text(c, a.t("items.craft_jobs")).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted)
 						if a.itemQuery.CraftTypeID != nil {
-							if kitButton(c, "craft-clear", "全部职业", btnOpts{variant: btnGhost, size: btnSizeXs}) {
+							if kitButton(c, "craft-clear", a.t("items.all_jobs"), btnOpts{variant: btnGhost, size: btnSizeXs}) {
 								a.itemQuery.CraftTypeID = nil
 								a.itemQuery.Page = 1
 								a.refreshItemList()
@@ -566,8 +906,8 @@ func (a *App) renderItemListPane(c *ui.Context) {
 
 		// 2. 物品列表主体（清爽无胶囊堆砌：左下角仅显示类型，右下角仅显示品级）
 		if len(a.itemRes.Items) == 0 {
-			kitEmpty(c, icoSearch, "没有匹配的物品", "尝试更换关键词，或重置筛选条件。", func() {
-				if kitButton(c, "wb-empty-reset", "重置筛选", btnOpts{variant: btnOutline, size: btnSizeSm}) {
+			kitEmpty(c, icoSearch, a.t("items.empty_title"), a.t("items.empty_desc"), func() {
+				if kitButton(c, "wb-empty-reset", a.t("common.reset_filters"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
 					a.resetItemFilters()
 				}
 			})
@@ -599,7 +939,7 @@ func (a *App) renderItemListPane(c *ui.Context) {
 									numTextf(c, "#%d", item.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
 								})
 								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-									sub := nonEmptyStr(item.CategoryName, "其他")
+									sub := nonEmptyStr(item.CategoryName, a.t("common.other"))
 									ui.Text(c, sub).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
 
 									metaParts := buildItemRowMeta(item)
@@ -609,6 +949,10 @@ func (a *App) renderItemListPane(c *ui.Context) {
 						})
 						if row.Clicked() {
 							a.selectItem(item.ID)
+						}
+						if item.ID == a.scrollItemListToID {
+							row.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollCenter})
+							a.scrollItemListToID = 0
 						}
 					}
 				})
@@ -639,9 +983,9 @@ func (a *App) renderAdvancedFilterDrawer(c *ui.Context) {
 	t := themeOf(c)
 	ui.Column(c).FillWidth().Padding(8, 0, 2, 0).Gap(8).
 		BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).Children(func() {
-		catOpts := []selectOption[int]{{value: 0, label: "全部分类"}}
+		catOpts := []selectOption[int]{{value: 0, label: a.t("items.all_categories")}}
 		if a.status != nil {
-			catOpts[0].label = fmt.Sprintf("全部分类 (%d)", len(a.status.Categories))
+			catOpts[0].label = a.tf("items.all_categories_count", "count", strconv.Itoa(len(a.status.Categories)))
 			for _, cat := range a.status.Categories {
 				catOpts = append(catOpts, selectOption[int]{
 					value: cat.ID,
@@ -650,7 +994,7 @@ func (a *App) renderAdvancedFilterDrawer(c *ui.Context) {
 			}
 		}
 		ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-			ui.Text(c, "物品分类").FontSize(t.text.xs).TextColor(t.muted).Shrink(0)
+			ui.Text(c, a.t("items.category_label")).FontSize(t.text.xs).TextColor(t.muted).Shrink(0)
 			if kitSelect(c, "wb-cat-select", &a.itemQuery.CategoryID, catOpts, 200, 240, true) {
 				a.itemQuery.Page = 1
 				a.refreshItemList()
@@ -658,11 +1002,11 @@ func (a *App) renderAdvancedFilterDrawer(c *ui.Context) {
 		})
 
 		ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-			ui.Text(c, "品级区间").FontSize(t.text.xs).TextColor(t.muted).Shrink(0)
+			ui.Text(c, a.t("items.ilvl_range")).FontSize(t.text.xs).TextColor(t.muted).Shrink(0)
 			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
 				ui.Box(c).Width(74).Children(func() {
 					if kitInput(c, "wb-min-ilvl", &a.itemMinIlvlStr, kitInputOpts{
-						placeholder: "最低", label: "最低品级", size: btnSizeSm,
+						placeholder: a.t("items.ilvl_min"), label: a.t("items.ilvl_min_label"), size: btnSizeSm,
 					}).Changed() {
 						a.itemQuery.Page = 1
 						a.refreshItemList()
@@ -671,7 +1015,7 @@ func (a *App) renderAdvancedFilterDrawer(c *ui.Context) {
 				ui.Text(c, "–").FontSize(t.text.xs).TextColor(t.muted)
 				ui.Box(c).Width(74).Children(func() {
 					if kitInput(c, "wb-max-ilvl", &a.itemMaxIlvlStr, kitInputOpts{
-						placeholder: "最高", label: "最高品级", size: btnSizeSm,
+						placeholder: a.t("items.ilvl_max"), label: a.t("items.ilvl_max_label"), size: btnSizeSm,
 					}).Changed() {
 						a.itemQuery.Page = 1
 						a.refreshItemList()
@@ -682,13 +1026,13 @@ func (a *App) renderAdvancedFilterDrawer(c *ui.Context) {
 
 		ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				if kitSwitch(c, "wb-tradable", &a.itemQuery.TradableOnly, "仅可交易") {
+				if kitSwitch(c, "wb-tradable", &a.itemQuery.TradableOnly, a.t("items.tradable_label")) {
 					a.itemQuery.Page = 1
 					a.refreshItemList()
 				}
-				ui.Text(c, "仅显示可交易").FontSize(t.text.xs).TextColor(t.subdued)
+				ui.Text(c, a.t("items.tradable_only")).FontSize(t.text.xs).TextColor(t.subdued)
 			})
-			if kitButton(c, "wb-reset-btn", "重置筛选", btnOpts{variant: btnGhost, size: btnSizeXs, disabled: !a.hasAnyItemFilter()}) {
+			if kitButton(c, "wb-reset-btn", a.t("common.reset_filters"), btnOpts{variant: btnGhost, size: btnSizeXs, disabled: !a.hasAnyItemFilter()}) {
 				a.resetItemFilters()
 			}
 		})
@@ -719,10 +1063,10 @@ func (a *App) renderPaginationBar(
 		BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).
 		Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
 		ui.Row(c).Gap(4).Children(func() {
-			if kitButton(c, keyPrefix+"-first", "首页", btnOpts{variant: btnGhost, size: btnSizeXs, disabled: page <= 1}) {
+			if kitButton(c, keyPrefix+"-first", a.t("common.first_page"), btnOpts{variant: btnGhost, size: btnSizeXs, disabled: page <= 1}) {
 				onGo(1)
 			}
-			if kitButton(c, keyPrefix+"-prev", "上一页", btnOpts{variant: btnOutline, size: btnSizeXs, disabled: page <= 1}) {
+			if kitButton(c, keyPrefix+"-prev", a.t("common.prev_page"), btnOpts{variant: btnOutline, size: btnSizeXs, disabled: page <= 1}) {
 				onGo(max(1, page-1))
 			}
 		})
@@ -730,7 +1074,7 @@ func (a *App) renderPaginationBar(
 		ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
 			ui.Box(c).Width(46).Children(func() {
 				inp := kitInput(c, keyPrefix+"-input", pageInput, kitInputOpts{
-					label: "跳转页码", size: btnSizeXs,
+					label: a.t("common.jump_page"), size: btnSizeXs,
 				})
 				if inp.Submitted() {
 					if p, err := strconv.Atoi(strings.TrimSpace(*pageInput)); err == nil {
@@ -748,10 +1092,10 @@ func (a *App) renderPaginationBar(
 		})
 
 		ui.Row(c).Gap(4).Children(func() {
-			if kitButton(c, keyPrefix+"-next", "下一页", btnOpts{variant: btnOutline, size: btnSizeXs, disabled: page >= totalPages}) {
+			if kitButton(c, keyPrefix+"-next", a.t("common.next_page"), btnOpts{variant: btnOutline, size: btnSizeXs, disabled: page >= totalPages}) {
 				onGo(min(totalPages, page+1))
 			}
-			if kitButton(c, keyPrefix+"-last", "末页", btnOpts{variant: btnGhost, size: btnSizeXs, disabled: page >= totalPages}) {
+			if kitButton(c, keyPrefix+"-last", a.t("common.last_page"), btnOpts{variant: btnGhost, size: btnSizeXs, disabled: page >= totalPages}) {
 				onGo(totalPages)
 			}
 		})

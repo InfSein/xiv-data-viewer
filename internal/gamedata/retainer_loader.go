@@ -3,6 +3,7 @@ package gamedata
 import (
 	"sort"
 
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
@@ -108,11 +109,13 @@ func buildVentureTiers(taskRow, normalRow, paramRow sqpack.Row, meta ventureCate
 
 // buildRetainerIndices 构建道具 -> 雇员探险定向筹集委托反向索引。
 func buildRetainerIndices(
+	appLang i18n.Lang,
 	retainerTasks map[int]sqpack.Row,
 	retainerTaskNormals map[int]sqpack.Row,
 	retainerTaskParameters map[int]sqpack.Row,
 	classJobCategories map[int]string,
 ) RetainerIndices {
+	appLang = resolveAppLang(appLang)
 	venturesByItem := make(map[int][]RawRetainerVenture)
 	totalTasks := 0
 
@@ -149,9 +152,10 @@ func buildRetainerIndices(
 			continue
 		}
 
+		ventureTypeLabel := i18n.T(appLang, "gamedata.retainer."+meta.ventureType)
 		catName := classJobCategories[cjCatID]
 		if catName == "" {
-			catName = meta.ventureTypeLabel
+			catName = ventureTypeLabel
 		}
 		level := taskRow.IntAt(2)
 		if level <= 0 {
@@ -170,7 +174,7 @@ func buildRetainerIndices(
 			TaskID:               taskID,
 			ItemID:               itemID,
 			VentureType:          meta.ventureType,
-			VentureTypeLabel:     meta.ventureTypeLabel,
+			VentureTypeLabel:     ventureTypeLabel,
 			ClassJobCategoryID:   cjCatID,
 			ClassJobCategoryName: catName,
 			RetainerLevel:        level,

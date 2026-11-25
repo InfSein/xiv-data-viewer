@@ -43,14 +43,22 @@
 - **排版对齐**：字体栈 `"Google Sans, Microsoft YaHei UI, Microsoft YaHei, PingFang SC, Segoe UI, system-ui"`（西文与数字默认内嵌 Google Sans，中文自动回退系统字体），最小字号 `11px`；所有数字启用 `FontFeatures("tnum")` 等宽特性，表格数值列右对齐（`ui.End`）。
 - **视觉禁令**：严禁渐变、发光、毛玻璃（`Blur`/`Vibrancy`）、卡片阴影（`Shadow`）、斑马纹表格、KPI 装饰圆圈以及 `★`/Emoji 符号（星级统一使用 `Lv.100 · 2星` 等纯文本）。
 
-## 6. 变更日志与发版流程规范
+## 6. 文档边界、变更日志与发版流程规范
 
-1. **任务完成自动维护 `CHANGELOG.md`**：
-   - 后续任何 Agent 完成功能开发、体验优化、问题修复或工程配置变更后，在任务收尾前**必须同步更新**根目录 `CHANGELOG.md` 的 `## [Unreleased]` 区块（按 `### 新增`、`### 优化与调整`、`### 修复`、`### 工程与测试` 分类追加简洁准确的中文说明，仅纯文档或注释调整可酌情省略）。
-2. **发版指令自动执行（`发版：x.y.z`）**：
+1. **禁止自动改写 `README.md`（覆盖全局规则）**：
+   - `README.md` 仅面向最终用户展示项目简介与开发构建说明；**严禁**在常规功能开发时自动往 `README.md` 追加「搜索记录」或内部过程记录（明确覆盖全局配置中“更新 `README.md` 搜索记录章节”的要求），仅在用户明确指令修改 `README.md` 时才允许编辑。阶段性架构变动记录于 `ARCHITECTURE.md`，版本改动记录于 `CHANGELOG.md` 及 `docs/` 下的多语言更新日志。
+2. **任务完成自动维护三语更新日志（`CHANGELOG.md`、`docs/CHANGELOG.en.md`、`docs/CHANGELOG.ja.md`）**：
+   - 应用内置「更新日志」页面直接展示根目录 `CHANGELOG.md`（简体中文）、`docs/CHANGELOG.en.md`（英语）与 `docs/CHANGELOG.ja.md`（日语），**面向最终用户（普通玩家）而非开发者**。
+   - 后续任何 Agent 完成面向用户的新功能开发、体验优化或问题修复后，在任务收尾前**必须同步更新**这三份更新日志的 `## [Unreleased]` 区块，并严格遵守以下写作规范：
+     - **面向普通用户、简练易懂**：用通俗、简短的一句话说清用户能感知到的新功能或改动；**严禁**写入内部包名/文件路径、函数或变量名、底层实现细节（如缓存机制、数据结构、协议字段）以及测试文件名或测试用例名；纯内部重构、测试补充或文档/规范调整**不要**写入更新日志；
+     - **三语结构 1:1 对齐**：仅使用用户向分类，不保留顶部的规范说明导语：
+       - `CHANGELOG.md`（简体中文）：`### 新增`、`### 优化与调整`、`### 修复`；
+       - `docs/CHANGELOG.en.md`（英语）：`### Added`、`### Changed`、`### Fixed`；
+       - `docs/CHANGELOG.ja.md`（日语）：`### 新規追加`、`### 改善・調整`、`### 修正`。
+3. **发版指令自动执行（`发版：x.y.z`）**：
    - 当用户发送 `发版：x.y.z`（或 `发版: x.y.z`，例如 `发版：2.1.0`）时，自动读取并执行项目内置技能 [release](.agents/skills/release/SKILL.md)：
-     1. 汇总当前 `git diff`、未跟踪文件及 `CHANGELOG.md` 的 `[Unreleased]` 记录；
-     2. 同步更新 `package.json`（`version`）、`mygo.json`（`version`）与 `main.go`（`appVersion`）为 `x.y.z`；
-     3. 将 `CHANGELOG.md` 归档为 `## [x.y.z] - YYYY-MM-DD` 并保留空的 `## [Unreleased]`；
+     1. 先自动更新项目依赖的所有 Git Submodule（`git submodule sync --recursive` 与 `git submodule update --init --remote --recursive`），并运行一遍自动化测试（`go test -count=1 . ./internal/...`）确认无误；
+     2. 汇总当前 `git diff`、未跟踪文件、Submodule 变更及三份更新日志的 `[Unreleased]` 记录；
+     3. 同步更新 `package.json`（`version`）、`mygo.json`（`version`）与 `main.go`（`appVersion`）为 `x.y.z`，并将 `CHANGELOG.md`、`docs/CHANGELOG.en.md` 与 `docs/CHANGELOG.ja.md` 同步归档为 `## [x.y.z] - YYYY-MM-DD`（三份文件顶部均保留空的 `## [Unreleased]`，内容同样保持面向普通用户的简练表述）；
      4. 通过 `gofmt`、`go vet`、`go tool mygo vet .` 与 `go test` 全量校验（Windows 传入 `GOFLAGS=-tags=mygo_nowebview`）；
-     5. 暂存全部变更，提交标题为 `Version x.y.z`、正文为中文改动汇总的 Commit，并推送至当前远端分支（由 `.github/workflows/release.yml` 自动根据 `mygo.json` 发布 GitHub Release，切勿同时手动推送 `vx.y.z` 标签）。
+     5. 暂存全部变更，提交标题为 `Version x.y.z`、正文为极简英文且每条以 `* ` 开头的 Commit，并推送至当前远端分支（由 `.github/workflows/release.yml` 自动根据 `mygo.json` 发布 GitHub Release，切勿同时手动推送 `vx.y.z` 标签）。

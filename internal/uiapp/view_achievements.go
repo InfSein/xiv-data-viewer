@@ -9,7 +9,14 @@ import (
 )
 
 var achFilterModes = []string{"all", "with_title", "with_item"}
-var achFilterLabels = []string{"全部", "含称号", "含道具"}
+
+func (a *App) achFilterLabels() []string {
+	return []string{
+		a.t("achievements.filter_all"),
+		a.t("achievements.filter_title"),
+		a.t("achievements.filter_item"),
+	}
+}
 
 const (
 	achColIDW     float32 = 50
@@ -48,11 +55,11 @@ func (a *App) allAchievementCategories() []gamedata.AchievementCategoryInfo {
 }
 
 func (a *App) buildAchievementKindOptions() []selectOption[int] {
-	opts := []selectOption[int]{{value: 0, label: "全部大类"}}
+	opts := []selectOption[int]{{value: 0, label: a.t("achievements.all_kinds")}}
 	if a.status == nil {
 		return opts
 	}
-	opts[0].label = fmt.Sprintf("全部大类 (%d)", len(a.status.AchievementKinds))
+	opts[0].label = a.tf("achievements.all_kinds_count", "count", fmt.Sprintf("%d", len(a.status.AchievementKinds)))
 	for _, k := range a.status.AchievementKinds {
 		opts = append(opts, selectOption[int]{
 			value: k.ID,
@@ -63,7 +70,7 @@ func (a *App) buildAchievementKindOptions() []selectOption[int] {
 }
 
 func (a *App) buildAchievementCategoryOptions() []selectOption[int] {
-	opts := []selectOption[int]{{value: 0, label: "全部二级分类"}}
+	opts := []selectOption[int]{{value: 0, label: a.t("achievements.all_cats")}}
 	allCats := a.allAchievementCategories()
 	if len(allCats) == 0 {
 		return opts
@@ -75,7 +82,7 @@ func (a *App) buildAchievementCategoryOptions() []selectOption[int] {
 			matched = append(matched, cat)
 		}
 	}
-	opts[0].label = fmt.Sprintf("全部二级分类 (%d)", len(matched))
+	opts[0].label = a.tf("achievements.all_cats_count", "count", fmt.Sprintf("%d", len(matched)))
 	for _, cat := range matched {
 		label := fmt.Sprintf("%s (%d)", cat.Name, cat.Count)
 		// 未锁定大类时加上大类前缀，避免“整体”“战斗”等重名二级分类难以区分
@@ -139,13 +146,13 @@ func (a *App) renderAchievementRewardCell(c *ui.Context, ach gamedata.Achievemen
 			} else if ach.TitleFeminineCn != "" && ach.TitleFeminineCn != ach.TitleMasculineCn {
 				titleTxt += " / " + ach.TitleFeminineCn
 			}
-			ui.Text(c, "《"+titleTxt+"》").FontSize(t.text.xs).FontWeight(500).TextColor(t.warningText).SingleLine()
-			if ach.TitleNameEn != "" && ach.TitleNameEn != titleTxt {
-				ui.Text(c, ach.TitleNameEn).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+			ui.Text(c, a.tf("achievements.title_format", "title", titleTxt)).FontSize(t.text.xs).FontWeight(500).TextColor(t.warningText).SingleLine()
+			for _, sec := range a.secondaryDataLines(titleTxt, ach.TitleNameJa, ach.TitleNameEn) {
+				ui.Text(c, sec.text).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 			}
 		}
 		if hasItem {
-			btn := ui.ButtonBase(c.Key(fmt.Sprintf("ach-rew-%d", ach.ID))).Label("查看 "+ach.RewardItemNameCn).
+			btn := ui.ButtonBase(c.Key(fmt.Sprintf("ach-rew-%d", ach.ID))).Label(a.tf("common.view_item", "name", ach.RewardItemNameCn)).
 				FillWidth().Padding(4, 7).Radius(t.radius.md).
 				Background(t.card).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 			if btn.Hovered() {
@@ -167,22 +174,48 @@ func (a *App) renderAchievementRewardCell(c *ui.Context, ach gamedata.Achievemen
 func (a *App) renderAchievementsView(c *ui.Context) {
 	t := themeOf(c)
 	kitPanel(c, a.panelRadius(c)).Fill().Children(func() {
-		// 1. 集成页头与筛选控制条
-		ui.Row(c).FillWidth().Padding(12, 16).Gap(10).
-			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).
-			Justify(ui.SpaceBetween).AlignItems(ui.Center).Wrap().Children(func() {
-			ui.Row(c).Gap(10).AlignItems(ui.Baseline).Children(func() {
-				ui.Text(c, "成就与称号").FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
-				if a.status != nil {
-					numTextf(c, "%s 项成就 · %s 个称号 · 当前 %s 项",
-						formatInt(a.status.Stats.TotalAchievements),
-						formatInt(a.status.Stats.TotalTitles),
-						formatInt(a.achRes.Total),
-					).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
-				}
+		// 1. 集成页头、页面内置搜索栏与筛选控制条（对齐统一页头规范）
+		ui.Column(c).FillWidth().Padding(12, 16, 10, 16).Gap(8).
+			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Children(func() {
+			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Wrap().Gap(8).Children(func() {
+				ui.Row(c).Gap(10).AlignItems(ui.Baseline).Children(func() {
+					ui.Text(c, a.t("achievements.title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
+					if a.status != nil {
+						numText(c, a.tf("achievements.summary",
+							"achs", formatInt(a.status.Stats.TotalAchievements),
+							"titles", formatInt(a.status.Stats.TotalTitles),
+							"cur", formatInt(a.achRes.Total),
+						)).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+					}
+				})
+
+				ui.Row(c).Gap(8).AlignItems(ui.Center).Wrap().Children(func() {
+					if a.hasAchievementFilter() {
+						if kitButton(c, "ach-reset", a.t("common.reset"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
+							a.resetAchievementFilters()
+						}
+					}
+
+					kindOpts := a.buildAchievementKindOptions()
+					if kitSelect(c, "ach-kind-select", &a.achQuery.KindID, kindOpts, 152, 204, true) {
+						a.onAchievementKindChanged()
+					}
+
+					catOpts := a.buildAchievementCategoryOptions()
+					if kitSelect(c, "ach-cat-select", &a.achQuery.CategoryID, catOpts, 176, 244, true) {
+						a.onAchievementCategoryChanged()
+					}
+				})
 			})
 
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Wrap().Children(func() {
+			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Wrap().Gap(8).Children(func() {
+				ui.Box(c).Grow(1).MinWidth(220).MaxWidth(380).Children(func() {
+					a.renderPageSearchInput(c, "ach-page-search", &a.achQuery.Q, a.t("search.ach_placeholder"), a.t("search.ach_label"), func() {
+						a.achQuery.Page = 1
+						a.refreshAchievements()
+					})
+				})
+
 				curIdx := 0
 				for i, m := range achFilterModes {
 					if m == a.achQuery.Filter {
@@ -190,26 +223,10 @@ func (a *App) renderAchievementsView(c *ui.Context) {
 						break
 					}
 				}
-				if nextIdx, chg := kitSegmentedTabs(c, "ach-flt", curIdx, achFilterLabels); chg {
+				if nextIdx, chg := kitSegmentedTabs(c, "ach-flt", curIdx, a.achFilterLabels()); chg {
 					a.achQuery.Filter = achFilterModes[nextIdx]
 					a.achQuery.Page = 1
 					a.refreshAchievements()
-				}
-
-				kindOpts := a.buildAchievementKindOptions()
-				if kitSelect(c, "ach-kind-select", &a.achQuery.KindID, kindOpts, 152, 204, true) {
-					a.onAchievementKindChanged()
-				}
-
-				catOpts := a.buildAchievementCategoryOptions()
-				if kitSelect(c, "ach-cat-select", &a.achQuery.CategoryID, catOpts, 176, 244, true) {
-					a.onAchievementCategoryChanged()
-				}
-
-				if a.hasAchievementFilter() {
-					if kitButton(c, "ach-reset", "重置", btnOpts{variant: btnGhost, size: btnSizeSm}) {
-						a.resetAchievementFilters()
-					}
 				}
 			})
 		})
@@ -217,18 +234,18 @@ func (a *App) renderAchievementsView(c *ui.Context) {
 		// 2. 表头（紧凑列宽以兼容最小 1024px 窗口，避免挤占达成条件列）
 		ui.Row(c).FillWidth().Padding(8, 16).Background(t.card).
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Gap(10).Children(func() {
-			ui.Text(c, "ID").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColIDW).Shrink(0).TextAlign(ui.End)
-			ui.Text(c, "成就名称").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColNameW).Shrink(0)
-			ui.Text(c, "分类").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColCatW).Shrink(0)
-			ui.Text(c, "点数").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColPointsW).Shrink(0).TextAlign(ui.Center)
-			ui.Text(c, "达成条件").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(achColCondMin)
-			ui.Text(c, "奖励称号 / 道具").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColRewardW).Shrink(0)
+			ui.Text(c, a.t("achievements.col_id")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColIDW).Shrink(0).TextAlign(ui.End)
+			ui.Text(c, a.t("achievements.col_name")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColNameW).Shrink(0)
+			ui.Text(c, a.t("achievements.col_category")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColCatW).Shrink(0)
+			ui.Text(c, a.t("achievements.col_points")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColPointsW).Shrink(0).TextAlign(ui.Center)
+			ui.Text(c, a.t("achievements.col_condition")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(achColCondMin)
+			ui.Text(c, a.t("achievements.col_reward")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColRewardW).Shrink(0)
 		})
 
 		// 3. 成就列表行
 		if len(a.achRes.Items) == 0 {
-			kitEmpty(c, icoTrophy, "没有匹配的成就或称号", "尝试在顶部搜索框调整关键词，或切换筛选分类。", func() {
-				if kitButton(c, "ach-empty-reset", "重置筛选", btnOpts{variant: btnOutline, size: btnSizeSm}) {
+			kitEmpty(c, icoTrophy, a.t("achievements.empty_title"), a.t("achievements.empty_desc"), func() {
+				if kitButton(c, "ach-empty-reset", a.t("common.reset_filters"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
 					a.resetAchievementFilters()
 				}
 			})
@@ -252,11 +269,8 @@ func (a *App) renderAchievementsView(c *ui.Context) {
 								a.drawGameIcon(c, ach.IconID, false, 28, t.radius.md)
 								ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
 									ui.Text(c, ach.NameCn).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground).SingleLine()
-									if ach.NameJa != "" {
-										ui.Text(c, ach.NameJa).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
-									}
-									if ach.NameEn != "" && ach.NameEn != ach.NameCn {
-										ui.Text(c, ach.NameEn).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+									for _, sec := range a.secondaryDataLines(ach.NameCn, ach.NameJa, ach.NameEn) {
+										ui.Text(c, sec.text).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 									}
 								})
 							})
@@ -277,6 +291,10 @@ func (a *App) renderAchievementsView(c *ui.Context) {
 
 							a.renderAchievementRewardCell(c, ach)
 						})
+						if ach.ID == a.scrollAchToID {
+							row.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollCenter})
+							a.scrollAchToID = 0
+						}
 					}
 				})
 			})

@@ -120,6 +120,7 @@ type QuestEntry struct {
 	ID                    int
 	InternalID            string
 	NameCn                string
+	NameZh                string
 	NameEn                string
 	NameJa                string
 	IconID                int // 任务类型图标 ID（061431 普通 / 061432 主线 / 061433 可重复 / 061439 功能解锁）
@@ -272,6 +273,7 @@ type LeveRewardGroup struct {
 type LeveEntry struct {
 	ID                      int
 	NameCn                  string
+	NameZh                  string
 	NameEn                  string
 	NameJa                  string
 	DescriptionCn           string
@@ -411,6 +413,7 @@ type ItemLeveSource struct {
 type AchievementEntry struct {
 	ID               int
 	NameCn           string
+	NameZh           string
 	NameEn           string
 	NameJa           string
 	DescriptionCn    string
@@ -456,6 +459,7 @@ type AchievementSearchResponse struct {
 type ItemSummary struct {
 	ID                  int
 	NameCn              string
+	NameZh              string
 	NameEn              string
 	NameJa              string
 	IconID              int
@@ -830,4 +834,37 @@ type ItemDetail struct {
 	TurnInForLeves           []ItemLeveSource
 	RewardedFromLeves        []ItemLeveSource
 	RewardedFromAchievements []AchievementEntry
+}
+
+// GlobalSearchHitKind 标识全局搜索精准命中的所属模块。
+type GlobalSearchHitKind string
+
+const (
+	GlobalHitItem        GlobalSearchHitKind = "item"
+	GlobalHitQuest       GlobalSearchHitKind = "quest"
+	GlobalHitLeve        GlobalSearchHitKind = "leve"
+	GlobalHitAchievement GlobalSearchHitKind = "achievement"
+)
+
+// GlobalSearchHit 表示一条全局名称精准匹配结果。
+type GlobalSearchHit struct {
+	Kind         GlobalSearchHitKind
+	ID           int
+	Title        string
+	MatchedAlias string
+	Category     string
+	ItemLevel    int
+	Level        int
+	Points       int
+	IconID       int
+	RewardItemID int
+	matchRank    int
+	sortLevel    int
+}
+
+// GlobalSearchResult 汇总各模块的精准匹配命中结果。
+type GlobalSearchResult struct {
+	Query        string
+	Hits         []GlobalSearchHit
+	TotalMatched int
 }

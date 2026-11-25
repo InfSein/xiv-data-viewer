@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -87,7 +89,8 @@ var (
 
 // 排版、尺寸与动效常量。
 const (
-	fontStack = defaultEnglishFont + ", Microsoft YaHei UI, Microsoft YaHei, PingFang SC, Segoe UI, system-ui"
+	fontStack   = defaultEnglishFont + ", Microsoft YaHei UI, Microsoft YaHei, PingFang SC, Segoe UI, system-ui"
+	fontStackJA = defaultEnglishFont + ", Yu Gothic UI, Meiryo, Hiragino Sans, Noto Sans JP, Segoe UI, system-ui"
 
 	lineUI    float32 = 1.45
 	lineProse float32 = 1.62
@@ -98,7 +101,7 @@ const (
 	materialTint float32 = 0.68 // 浅色 Mica 窗口材质微透明叠层
 
 	titleBarHeight   float32 = 40
-	sidebarDefWidth  float32 = 212
+	sidebarDefWidth  float32 = 220
 	sidebarMinWidth  float32 = 176
 	sidebarMaxWidth  float32 = 276
 	itemListDefWidth float32 = 380
@@ -135,6 +138,8 @@ type textScale struct {
 // uiTokens 保存浅色与深色模式下的全部语义色彩和尺寸令牌。
 type uiTokens struct {
 	dark bool
+	lang i18n.Lang
+	font string
 
 	window       ui.Color // 窗口底层/外框色
 	sidebar      ui.Color // 侧栏与弹窗底部条底色
@@ -308,15 +313,33 @@ func darkTokens() uiTokens {
 	}
 }
 
+type themeCacheKey struct {
+	dark bool
+	font string
+}
+
 var (
 	themeMu    sync.Mutex
-	mygoThemes = map[bool]*ui.Theme{}
+	mygoThemes = map[themeCacheKey]*ui.Theme{}
 	tokByTheme = map[*ui.Theme]uiTokens{}
 )
 
-// applyAppTheme 根据用户配置与系统深浅色状态，为当前帧注入统一主题令牌。
+func fontStackForLang(lang i18n.Lang) string {
+	if i18n.NormalizeLang(string(lang)) == i18n.LangJA {
+		return fontStackJA
+	}
+	return fontStack
+}
+
+// applyAppTheme 根据用户配置与系统深浅色状态，为当前帧注入默认中文界面主题令牌。
 func applyAppTheme(c *ui.Context, mode string) uiTokens {
+	return applyAppThemeWithLang(c, mode, i18n.LangZH)
+}
+
+// applyAppThemeWithLang 根据深浅色模式与当前界面语言为当前帧注入主题令牌与字体栈。
+func applyAppThemeWithLang(c *ui.Context, mode string, lang i18n.Lang) uiTokens {
 	ensureDefaultFonts()
+	lang = i18n.NormalizeLang(string(lang))
 	dark := c.Theme().Dark
 	switch mode {
 	case "light":
@@ -329,9 +352,12 @@ func applyAppTheme(c *ui.Context, mode string) uiTokens {
 	if dark {
 		t = darkTokens()
 	}
+	t.lang = lang
+	t.font = fontStackForLang(lang)
 
+	key := themeCacheKey{dark: dark, font: t.font}
 	themeMu.Lock()
-	th, ok := mygoThemes[dark]
+	th, ok := mygoThemes[key]
 	if !ok {
 		base := *ui.LightTheme()
 		if dark {
@@ -359,10 +385,10 @@ func applyAppTheme(c *ui.Context, mode string) uiTokens {
 		base.InverseText = t.background
 		base.Radius = t.radius.lg
 		base.Spacing = 4
-		base.Font = fontStack
+		base.Font = t.font
 		base.FontSize = t.text.sm
 		th = &base
-		mygoThemes[dark] = th
+		mygoThemes[key] = th
 		tokByTheme[th] = t
 	}
 	themeMu.Unlock()
@@ -474,10 +500,14 @@ func formatInt(n int) string {
 
 // formatStars 将配方或采集星级格式化为纯文本。
 func formatStars(stars int) string {
+	return formatStarsForLang(i18n.LangZH, stars)
+}
+
+func formatStarsForLang(lang i18n.Lang, stars int) string {
 	if stars <= 0 {
 		return ""
 	}
-	return fmt.Sprintf(" · %d星", stars)
+	return i18n.Tf(lang, "common.star_suffix", "stars", strconv.Itoa(stars))
 }
 
 // ---------------------------------------------------------------------------
@@ -957,6 +987,12 @@ type kitInputOpts struct {
 
 // kitInput 绘制带平滑焦点环、前导图标与清空按钮的单行输入框。
 func kitInput(c *ui.Context, key any, val *string, o kitInputOpts) ui.Element {
+	field, _ := kitInputWithContainer(c, key, val, o)
+	return field
+}
+
+// kitInputWithContainer 绘制单行输入框并返回输入元素与外层容器（供弹出层锚点绑定）。
+func kitInputWithContainer(c *ui.Context, key any, val *string, o kitInputOpts) (ui.Element, ui.Element) {
 	t := themeOf(c)
 	var h, padX, fs float32 = 32, 10, t.text.sm
 	switch o.size {
@@ -1000,7 +1036,7 @@ func kitInput(c *ui.Context, key any, val *string, o kitInputOpts) ui.Element {
 			Disabled(o.disabled).FocusRing(false).FontSize(fs).TextColor(t.foreground).
 			Grow(1).Shrink(1).MinWidth(0).AlignSelf(ui.Stretch).Padding(0)
 		if o.clearable && *val != "" && !o.disabled {
-			clr := ui.ButtonBase(c.Key(fmt.Sprintf("inp-clr-%v", key))).Label("清空").
+			clr := ui.ButtonBase(c.Key(fmt.Sprintf("inp-clr-%v", key))).Label(i18n.T(t.lang, "common.clear")).
 				Size(18, 18).Radius(t.radius.full).Center().Cursor(ui.CursorPointer)
 			if clr.Hovered() {
 				clr.Background(t.tint(1.5))
@@ -1016,7 +1052,7 @@ func kitInput(c *ui.Context, key any, val *string, o kitInputOpts) ui.Element {
 			kitKbd(c, o.shortcut)
 		}
 	})
-	return field
+	return field, box
 }
 
 // kitKbd 绘制紧凑快捷键键帽（字号严格不低于 11px）。
@@ -1234,4 +1270,10 @@ var (
 	icoClipboard = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2.5" width="8" height="3.5" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><line x1="9" y1="11" x2="15" y2="11"/><line x1="9" y1="15" x2="13" y2="15"/></svg>`))
 
 	icoClipboardFill = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M9.5 2A1.5 1.5 0 0 0 8 3.5v.5H6a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2v-.5A1.5 1.5 0 0 0 14.5 2h-5ZM9 10.25a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1-.75-.75Zm0 4a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"/></svg>`))
+
+	icoChangelog = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><polyline points="14 3 14 8 19 8"/><circle cx="9.2" cy="12.5" r="0.8" fill="currentColor"/><line x1="12" y1="12.5" x2="15.5" y2="12.5"/><circle cx="9.2" cy="16.5" r="0.8" fill="currentColor"/><line x1="12" y1="16.5" x2="15.5" y2="16.5"/></svg>`))
+
+	icoChangelogFill = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd"><path d="M14.2 2.5H7A2.5 2.5 0 0 0 4.5 5v14A2.5 2.5 0 0 0 7 21.5h10a2.5 2.5 0 0 0 2.5-2.5V7.8a1 1 0 0 0-.29-.7l-4.3-4.3a1 1 0 0 0-.71-.3Zm-.45 2.06L17.44 8.25H14.5a.75.75 0 0 1-.75-.75V4.56ZM9.2 11.65a.85.85 0 1 0 0 1.7.85.85 0 0 0 0-1.7Zm2.8.1a.75.75 0 0 0 0 1.5h3.5a.75.75 0 0 0 0-1.5H12Zm-2.8 3.9a.85.85 0 1 0 0 1.7.85.85 0 0 0 0-1.7Zm2.8.1a.75.75 0 0 0 0 1.5h3.5a.75.75 0 0 0 0-1.5H12Z"/></svg>`))
+
+	icoGlobe = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3c2.5 2.6 4 5.7 4 9s-1.5 6.4-4 9c-2.5-2.6-4-5.7-4-9s1.5-6.4 4-9Z"/><line x1="3.6" y1="9" x2="20.4" y2="9"/><line x1="3.6" y1="15" x2="20.4" y2="15"/></svg>`))
 )

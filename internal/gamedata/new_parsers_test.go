@@ -603,3 +603,120 @@ func TestCollectablesParserAndItemIntegration(t *testing.T) {
 		t.Fatalf("票据物品详情缺少收藏品获得反向索引: %+v", detail33913)
 	}
 }
+
+func TestSearchGlobal(t *testing.T) {
+	svc := NewService(&Store{
+		ItemSummaries: []ItemSummary{
+			{ID: 44099, NameCn: "收藏用图拉尔菠萝蛋糕", NameEn: "Rarefied Turali Pineapple Ponzecake", NameJa: "収集用トラルパイナップルケーキ", CategoryName: "食品", ItemLevel: 690},
+			{ID: 44098, NameCn: "菠萝", NameEn: "Pineapple", NameJa: "パイナップル", CategoryName: "食材", ItemLevel: 10},
+			{ID: 44097, NameCn: "菠萝汁", NameEn: "Pineapple Juice", NameJa: "パインジュース", CategoryName: "食品", ItemLevel: 20},
+			{ID: 1, NameCn: "金币", NameEn: "Gil", NameJa: "ギル", CategoryName: "货币", ItemLevel: 1},
+		},
+		Quests: []QuestEntry{
+			{ID: 65536, NameCn: "\ue0be 启程之日", NameEn: "Coming to Gridania", NameJa: "旅立ちの日", GenreName: "第七星历主线", Level: 15},
+		},
+		Leves: []LeveEntry{
+			{ID: 201, NameCn: "大量制作：甜点委托", NameEn: "Sweet Treat", NameJa: "大口依頼：お菓子", AssignmentTypeName: "大量筹备", ClassJobLevel: 98},
+		},
+		Achievements: []AchievementEntry{
+			{
+				ID:               10,
+				NameCn:           "胜利的荣光1",
+				NameEn:           "To Crush Your Enemies I",
+				NameJa:           "勝利の栄光：ランク1",
+				KindName:         "战斗",
+				CategoryName:     "整体",
+				Points:           5,
+				TitleID:          1,
+				TitleMasculineCn: "沙场勇将",
+				TitleFeminineCn:  "沙场女杰",
+				TitleNameEn:      "Battleborn",
+			},
+		},
+	})
+
+	// 1. 不存在关键词返回空结果
+	if res := svc.SearchGlobal("不存在的关键词", 4); res.TotalMatched != 0 || len(res.Hits) != 0 {
+		t.Fatalf("未匹配词不应返回结果: %+v", res)
+	}
+
+	// 2. 包含检索与相关性排序：完全一致 > 前缀匹配 > 包含匹配
+	resPine := svc.SearchGlobal("菠萝", 4)
+	if resPine.TotalMatched != 3 || len(resPine.Hits) != 3 {
+		t.Fatalf("包含检索命中数异常: %+v", resPine)
+	}
+	if resPine.Hits[0].ID != 44098 || resPine.Hits[1].ID != 44097 || resPine.Hits[2].ID != 44099 {
+		t.Fatalf("期望排序为 完全一致(44098) > 前缀(44097) > 包含(44099)，实际: %+v", resPine.Hits)
+	}
+
+	// 3. 英文不区分大小写 & 日文包含匹配
+	if res := svc.SearchGlobal("gil", 4); res.TotalMatched != 1 || res.Hits[0].ID != 1 || res.Hits[0].MatchedAlias != "Gil" {
+		t.Fatalf("英文不区分大小写匹配异常: %+v", res)
+	}
+	if res := svc.SearchGlobal("旅立ち", 4); res.TotalMatched != 1 || res.Hits[0].Kind != GlobalHitQuest || res.Hits[0].ID != 65536 {
+		t.Fatalf("日文任务包含匹配异常: %+v", res)
+	}
+
+	// 4. 含 PUA 前缀的任务标题包含匹配（清理后匹配，不重复显示别名）
+	if res := svc.SearchGlobal("启程", 4); res.TotalMatched != 1 || res.Hits[0].Kind != GlobalHitQuest || res.Hits[0].Title != "启程之日" || res.Hits[0].MatchedAlias != "" {
+		t.Fatalf("含 PUA 前缀任务包含匹配异常: %+v", res)
+	}
+
+	// 5. 理符、成就及成就称号包含匹配
+	if res := svc.SearchGlobal("甜点委托", 4); res.TotalMatched != 1 || res.Hits[0].Kind != GlobalHitLeve || res.Hits[0].ID != 201 {
+		t.Fatalf("理符包含匹配异常: %+v", res)
+	}
+	if res := svc.SearchGlobal("battle", 4); res.TotalMatched != 1 || res.Hits[0].Kind != GlobalHitAchievement || res.Hits[0].ID != 10 || res.Hits[0].MatchedAlias != "Battleborn" {
+		t.Fatalf("成就称号包含匹配异常: %+v", res)
+	}
+
+	// 6. 精确 ID（支持带 # 前缀）
+	if res := svc.SearchGlobal("#44099", 50); res.TotalMatched != 1 || res.Hits[0].ID != 44099 {
+		t.Fatalf("带 # 前缀 ID 匹配异常: %+v", res)
+	}
+
+	// 7. 超过 50 项命中时限制返回前 50 条并均衡保留不同模块，同时验证分页定位辅助方法
+	manyItems := make([]ItemSummary, 0, 65)
+	for i := 1; i <= 65; i++ {
+		manyItems = append(manyItems, ItemSummary{ID: i, NameCn: "以太药剂", ItemLevel: 100 + i})
+	}
+	manyQuests := make([]QuestEntry, 0, 35)
+	for i := 1; i <= 35; i++ {
+		manyQuests = append(manyQuests, QuestEntry{ID: 65000 + i, NameCn: "以太调查", Level: i})
+	}
+	manyLeves := make([]LeveEntry, 0, 35)
+	for i := 1; i <= 35; i++ {
+		manyLeves = append(manyLeves, LeveEntry{ID: 200 + i, NameCn: "以太委托", ClassJobLevel: i})
+	}
+	manySvc := NewService(&Store{
+		ItemSummaries: manyItems,
+		Quests:        manyQuests,
+		Leves:         manyLeves,
+	})
+	top50 := manySvc.SearchGlobal("以太", 50)
+	if top50.TotalMatched != 135 || len(top50.Hits) != 50 {
+		t.Fatalf("期望返回前 50 条命中且记录总数 135，实际 len=%d total=%d", len(top50.Hits), top50.TotalMatched)
+	}
+	hasQ, hasL := false, false
+	for _, h := range top50.Hits {
+		if h.Kind == GlobalHitQuest {
+			hasQ = true
+		}
+		if h.Kind == GlobalHitLeve {
+			hasL = true
+		}
+	}
+	if !hasQ || !hasL {
+		t.Fatalf("前 50 条全局搜索结果应保留任务与理符等模块条目: hasQ=%v hasL=%v", hasQ, hasL)
+	}
+
+	if pageRes, ok := manySvc.LocateItemPage(ItemSearchQuery{Filter: "all", Sort: "id_asc", PageSize: 30}, 55); !ok || pageRes.Page != 2 || len(pageRes.Items) != 30 {
+		t.Fatalf("LocateItemPage 定位第 2 页失败: ok=%v page=%d len=%d", ok, pageRes.Page, len(pageRes.Items))
+	}
+	if pageRes, ok := manySvc.LocateQuestPage(QuestSearchQuery{SectionID: -1, ExpansionID: -1, Filter: "all", PageSize: 30}, 65033); !ok || pageRes.Page != 2 {
+		t.Fatalf("LocateQuestPage 定位第 2 页失败: ok=%v page=%d", ok, pageRes.Page)
+	}
+	if pageRes, ok := manySvc.LocateLevePage(LeveSearchQuery{Kind: "all", PageSize: 30}, 234); !ok || pageRes.Page != 2 {
+		t.Fatalf("LocateLevePage 定位第 2 页失败: ok=%v page=%d", ok, pageRes.Page)
+	}
+}

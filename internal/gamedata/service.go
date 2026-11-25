@@ -8,18 +8,34 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
-var fishingSpotCategories = map[int]string{
-	1: "海洋垂钓",
-	2: "淡水垂钓",
-	3: "沙海垂钓",
-	4: "云海垂钓",
-	5: "魔晶垂钓",
-	6: "盐湖垂钓",
-	7: "星海垂钓",
+func resolveAppLang(lang i18n.Lang) i18n.Lang {
+	if lang == "" {
+		return i18n.LangZH
+	}
+	return i18n.NormalizeLang(string(lang))
+}
+
+func (s *Service) appLang() i18n.Lang {
+	if s == nil || s.store == nil {
+		return i18n.LangZH
+	}
+	return resolveAppLang(s.store.AppLang)
+}
+
+func fishingSpotCategoryName(lang i18n.Lang, cat int) string {
+	lang = resolveAppLang(lang)
+	switch cat {
+	case 1, 2, 3, 4, 5, 6, 7:
+		return i18n.T(lang, fmt.Sprintf("gamedata.fish_cat.%d", cat))
+	default:
+		return ""
+	}
 }
 
 func hhmmToMinutes(hhmm int) int {
@@ -168,8 +184,7 @@ func (s *Service) GetSystemStatus() SystemStatus {
 	}
 }
 
-// SearchItems 按多语言关键词、分类、获取途径、职业、品级区间与排序条件分页检索道具。
-func (s *Service) SearchItems(query ItemSearchQuery) ItemSearchResponse {
+func (s *Service) filterAndSortItems(query ItemSearchQuery) []ItemSummary {
 	q := strings.ToLower(strings.TrimSpace(query.Q))
 	numericQuery := -1
 	if q != "" {
@@ -259,6 +274,7 @@ func (s *Service) SearchItems(query ItemSearchQuery) ItemSearchResponse {
 				continue
 			}
 			if !strings.Contains(strings.ToLower(it.NameCn), q) &&
+				!strings.Contains(strings.ToLower(it.NameZh), q) &&
 				!strings.Contains(strings.ToLower(it.NameEn), q) &&
 				!strings.Contains(strings.ToLower(it.NameJa), q) &&
 				strconv.Itoa(it.ID) != q {
@@ -282,10 +298,12 @@ func (s *Service) SearchItems(query ItemSearchQuery) ItemSearchResponse {
 		if q != "" {
 			aExact := a.ID == numericQuery ||
 				strings.ToLower(a.NameCn) == q ||
+				strings.ToLower(a.NameZh) == q ||
 				strings.ToLower(a.NameEn) == q ||
 				strings.ToLower(a.NameJa) == q
 			bExact := b.ID == numericQuery ||
 				strings.ToLower(b.NameCn) == q ||
+				strings.ToLower(b.NameZh) == q ||
 				strings.ToLower(b.NameEn) == q ||
 				strings.ToLower(b.NameJa) == q
 			if aExact != bExact {
@@ -317,7 +335,13 @@ func (s *Service) SearchItems(query ItemSearchQuery) ItemSearchResponse {
 			return a.ID < b.ID
 		}
 	})
+	return filtered
+}
 
+// SearchItems 按多语言关键词、分类、获取途径、职业、品级区间与排序条件分页检索道具。
+func (s *Service) SearchItems(query ItemSearchQuery) ItemSearchResponse {
+	filtered := s.filterAndSortItems(query)
+	page, totalPages, start, end := paginateRange(len(filtered), query.Page, query.PageSize)
 	pageSize := query.PageSize
 	if pageSize <= 0 {
 		pageSize = 30
@@ -325,17 +349,6 @@ func (s *Service) SearchItems(query ItemSearchQuery) ItemSearchResponse {
 	if pageSize > 100 {
 		pageSize = 100
 	}
-	total := len(filtered)
-	totalPages := max(1, (total+pageSize-1)/pageSize)
-	page := query.Page
-	if page < 1 {
-		page = 1
-	}
-	if page > totalPages {
-		page = totalPages
-	}
-	start := (page - 1) * pageSize
-	end := min(total, start+pageSize)
 	var items []ItemSummary
 	if start < end {
 		items = filtered[start:end]
@@ -343,11 +356,48 @@ func (s *Service) SearchItems(query ItemSearchQuery) ItemSearchResponse {
 
 	return ItemSearchResponse{
 		Items:      items,
-		Total:      total,
+		Total:      len(filtered),
 		Page:       page,
 		PageSize:   pageSize,
 		TotalPages: totalPages,
 	}
+}
+
+// LocateItemPage 在当前筛选排序条件下定位指定道具所在分页并返回该页结果。
+func (s *Service) LocateItemPage(query ItemSearchQuery, itemID int) (ItemSearchResponse, bool) {
+	if s == nil || s.store == nil || itemID <= 0 {
+		return ItemSearchResponse{}, false
+	}
+	filtered := s.filterAndSortItems(query)
+	idx := -1
+	for i, it := range filtered {
+		if it.ID == itemID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return ItemSearchResponse{}, false
+	}
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 30
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	page, totalPages, start, end := paginateRange(len(filtered), idx/pageSize+1, pageSize)
+	var items []ItemSummary
+	if start < end {
+		items = filtered[start:end]
+	}
+	return ItemSearchResponse{
+		Items:      items,
+		Total:      len(filtered),
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+	}, true
 }
 
 // GetItemDetail 获取单个道具的完整详情。
@@ -538,7 +588,7 @@ func (s *Service) extractEquipmentStats(row sqpack.Row) *EquipmentStats {
 		if pid > 0 && valNQ != 0 {
 			name := s.store.BaseParams[pid].name
 			if name == "" {
-				name = fmt.Sprintf("属性#%d", pid)
+				name = i18n.Tf(s.appLang(), "gamedata.param_fallback", "id", strconv.Itoa(pid))
 			}
 			bonuses = append(bonuses, EquipmentStatBonus{
 				ParamID: pid,
@@ -562,7 +612,7 @@ func (s *Service) extractEquipmentStats(row sqpack.Row) *EquipmentStats {
 		for _, pid := range extraPIDs {
 			name := s.store.BaseParams[pid].name
 			if name == "" {
-				name = fmt.Sprintf("属性#%d", pid)
+				name = i18n.Tf(s.appLang(), "gamedata.param_fallback", "id", strconv.Itoa(pid))
 			}
 			bonuses = append(bonuses, EquipmentStatBonus{
 				ParamID: pid,
@@ -680,7 +730,7 @@ func (s *Service) extractConsumableEffect(row sqpack.Row) *ConsumableEffect {
 		}
 		name := s.store.BaseParams[pid].name
 		if name == "" {
-			name = fmt.Sprintf("属性#%d", pid)
+			name = i18n.Tf(s.appLang(), "gamedata.param_fallback", "id", strconv.Itoa(pid))
 		}
 		params = append(params, ConsumableParamBonus{
 			ParamID:    pid,
@@ -701,9 +751,9 @@ func (s *Service) extractConsumableEffect(row sqpack.Row) *ConsumableEffect {
 	if cooldown > 0 {
 		cooldownHQ = int(math.Floor(float64(cooldown) * 0.9))
 	}
-	typeName := "强化药效"
+	typeName := i18n.T(s.appLang(), "gamedata.consume_med")
 	if statusID == 48 {
-		typeName = "进食加成"
+		typeName = i18n.T(s.appLang(), "gamedata.consume_food")
 	}
 	return &ConsumableEffect{
 		TypeName:        typeName,
@@ -782,8 +832,8 @@ func (s *Service) buildItemRecipes(itemID int) []RecipeDetail {
 			}
 		}
 
-		craftTypeName := "制作"
-		craftJobName := "能工巧匠"
+		craftTypeName := i18n.T(s.appLang(), "gamedata.craft_type_default")
+		craftJobName := i18n.T(s.appLang(), "gamedata.craft_job_default")
 		craftJobIcon := 62008
 		if hasCT {
 			craftTypeName = ctInfo.Name
@@ -911,7 +961,7 @@ func (s *Service) buildUsedInRecipes(itemID int) []UsedInRecipeItem {
 			continue
 		}
 		ctInfo, hasCT := s.store.CraftTypes[rRow.IntAt(1)]
-		jobName := "能工巧匠"
+		jobName := i18n.T(s.appLang(), "gamedata.craft_job_default")
 		jobIcon := 62008
 		if hasCT {
 			jobName = ctInfo.JobName
@@ -959,6 +1009,11 @@ type territoryMapLoc struct {
 }
 
 func resolveTerritoryAndMapFromTables(territoryID int, territoryTypes, maps map[int]sqpack.Row, placeNames map[int]string) *territoryMapLoc {
+	return resolveTerritoryAndMapFromTablesForLang(territoryID, territoryTypes, maps, placeNames, i18n.LangZH)
+}
+
+func resolveTerritoryAndMapFromTablesForLang(territoryID int, territoryTypes, maps map[int]sqpack.Row, placeNames map[int]string, lang i18n.Lang) *territoryMapLoc {
+	lang = resolveAppLang(lang)
 	tRow, ok := territoryTypes[territoryID]
 	if !ok {
 		return nil
@@ -973,11 +1028,11 @@ func resolveTerritoryAndMapFromTables(territoryID int, territoryTypes, maps map[
 
 	regionName := placeNames[regionID]
 	if regionName == "" {
-		regionName = "艾欧泽亚"
+		regionName = i18n.T(lang, "gamedata.region_default")
 	}
 	zoneName := placeNames[zoneID]
 	if zoneName == "" {
-		zoneName = "未知区域"
+		zoneName = i18n.T(lang, "gamedata.zone_unknown")
 	}
 
 	mapPath := ""
@@ -1075,7 +1130,7 @@ func resolveVendorNpc(npcID int, npcNames map[int]RawNpcName, npcLocations map[i
 }
 
 func (s *Service) resolveTerritoryAndMap(territoryID int) *territoryMapLoc {
-	return resolveTerritoryAndMapFromTables(territoryID, s.store.TerritoryTypes, s.store.Maps, s.store.PlaceNames)
+	return resolveTerritoryAndMapFromTablesForLang(territoryID, s.store.TerritoryTypes, s.store.Maps, s.store.PlaceNames, s.appLang())
 }
 
 func (s *Service) extractGatheringTimeWindows(pointID int) (isTimed bool, isEphemeral bool, windows []GatheringTimeWindow) {
@@ -1174,15 +1229,15 @@ func (s *Service) buildGatheringNodes(itemID int) []GatheringNodeInfo {
 			nodeLevel := baseRow.IntAt(1)
 			gTypeInfo := s.store.GatheringTypes[gTypeID]
 			isMiner := gTypeID == 0 || gTypeID == 1
-			discName := "园艺工"
+			discName := i18n.T(s.appLang(), "gamedata.disc_botanist")
 			discIcon := 62017
 			if isMiner {
-				discName = "采矿工"
+				discName = i18n.T(s.appLang(), "gamedata.disc_miner")
 				discIcon = 62016
 			}
 			gTypeName := gTypeInfo.name
 			if gTypeName == "" {
-				gTypeName = "采集"
+				gTypeName = i18n.T(s.appLang(), "gamedata.gather_default")
 			}
 			gTypeIcon := gTypeInfo.iconID
 			if gTypeIcon == 0 {
@@ -1263,9 +1318,9 @@ func (s *Service) buildFishingSpots(itemID int) []FishingSpotInfo {
 			continue
 		}
 		coordX, coordY, normX, normY := convertPixelCoordToMap(row.FloatAt(9), row.FloatAt(10), loc.sizeFactor)
-		catName := fishingSpotCategories[row.IntAt(4)]
+		catName := fishingSpotCategoryName(s.appLang(), row.IntAt(4))
 		if catName == "" {
-			catName = "垂钓"
+			catName = i18n.T(s.appLang(), "gamedata.fish_cat.default")
 		}
 		placeName := s.store.PlaceNames[row.IntAt(23)]
 		if placeName == "" {
@@ -1376,7 +1431,7 @@ func (s *Service) buildShopSources(itemID int) []ShopPurchaseSource {
 				costRow := s.store.ItemsPrimary[c.ItemID]
 				name := costRow.StringAt(9)
 				if name == "" {
-					name = fmt.Sprintf("货币#%d", c.ItemID)
+					name = i18n.Tf(s.appLang(), "gamedata.currency_fallback", "id", strconv.Itoa(c.ItemID))
 				}
 				icon := costRow.IntAt(10)
 				if icon == 0 {
@@ -1513,6 +1568,7 @@ func (s *Service) SearchAchievements(query AchievementSearchQuery) AchievementSe
 				continue
 			}
 			if !strings.Contains(strings.ToLower(ach.NameCn), q) &&
+				!strings.Contains(strings.ToLower(ach.NameZh), q) &&
 				!strings.Contains(strings.ToLower(ach.NameEn), q) &&
 				!strings.Contains(strings.ToLower(ach.NameJa), q) &&
 				!strings.Contains(strings.ToLower(ach.DescriptionCn), q) &&
@@ -1526,6 +1582,11 @@ func (s *Service) SearchAchievements(query AchievementSearchQuery) AchievementSe
 			}
 		}
 		filtered = append(filtered, ach)
+	}
+	if numericQuery > 0 && len(filtered) > 1 {
+		sort.SliceStable(filtered, func(i, j int) bool {
+			return (filtered[i].ID == numericQuery) && (filtered[j].ID != numericQuery)
+		})
 	}
 
 	pageSize := query.PageSize
@@ -1581,8 +1642,7 @@ func paginateRange(total, reqPage, pageSize int) (page, totalPages, start, end i
 	return
 }
 
-// SearchQuests 搜索与筛选任务列表。
-func (s *Service) SearchQuests(query QuestSearchQuery) QuestSearchResponse {
+func (s *Service) filterQuests(query QuestSearchQuery) []QuestEntry {
 	q := strings.ToLower(strings.TrimSpace(query.Q))
 	numericQuery := -1
 	if q != "" {
@@ -1633,6 +1693,7 @@ func (s *Service) SearchQuests(query QuestSearchQuery) QuestSearchResponse {
 				continue
 			}
 			if !strings.Contains(strings.ToLower(qe.NameCn), q) &&
+				!strings.Contains(strings.ToLower(qe.NameZh), q) &&
 				!strings.Contains(strings.ToLower(qe.NameEn), q) &&
 				!strings.Contains(strings.ToLower(qe.NameJa), q) &&
 				!strings.Contains(strings.ToLower(qe.InternalID), q) &&
@@ -1644,10 +1705,18 @@ func (s *Service) SearchQuests(query QuestSearchQuery) QuestSearchResponse {
 		}
 		filtered = append(filtered, qe)
 	}
+	return filtered
+}
 
+// SearchQuests 搜索与筛选任务列表。
+func (s *Service) SearchQuests(query QuestSearchQuery) QuestSearchResponse {
+	filtered := s.filterQuests(query)
 	pageSize := query.PageSize
 	if pageSize <= 0 {
 		pageSize = 30
+	}
+	if pageSize > 100 {
+		pageSize = 100
 	}
 	page, totalPages, start, end := paginateRange(len(filtered), query.Page, pageSize)
 	var items []QuestEntry
@@ -1663,6 +1732,43 @@ func (s *Service) SearchQuests(query QuestSearchQuery) QuestSearchResponse {
 	}
 }
 
+// LocateQuestPage 在当前筛选条件下定位指定任务所在分页并返回该页结果。
+func (s *Service) LocateQuestPage(query QuestSearchQuery, questID int) (QuestSearchResponse, bool) {
+	if s == nil || s.store == nil || questID <= 0 {
+		return QuestSearchResponse{}, false
+	}
+	filtered := s.filterQuests(query)
+	idx := -1
+	for i, qe := range filtered {
+		if qe.ID == questID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return QuestSearchResponse{}, false
+	}
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 30
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	page, totalPages, start, end := paginateRange(len(filtered), idx/pageSize+1, pageSize)
+	var items []QuestEntry
+	if start < end {
+		items = filtered[start:end]
+	}
+	return QuestSearchResponse{
+		Items:      items,
+		Total:      len(filtered),
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+	}, true
+}
+
 // GetQuestDetail 根据任务 ID 返回完整任务详情。
 func (s *Service) GetQuestDetail(questID int) *QuestEntry {
 	q, ok := s.store.QuestByID[questID]
@@ -1672,8 +1778,7 @@ func (s *Service) GetQuestDetail(questID int) *QuestEntry {
 	return &q
 }
 
-// SearchLeves 搜索与筛选理符列表。
-func (s *Service) SearchLeves(query LeveSearchQuery) LeveSearchResponse {
+func (s *Service) filterLeves(query LeveSearchQuery) []LeveEntry {
 	q := strings.ToLower(strings.TrimSpace(query.Q))
 	numericQuery := -1
 	if q != "" {
@@ -1714,6 +1819,7 @@ func (s *Service) SearchLeves(query LeveSearchQuery) LeveSearchResponse {
 			}
 			if !matchedTurnIn &&
 				!strings.Contains(strings.ToLower(lv.NameCn), q) &&
+				!strings.Contains(strings.ToLower(lv.NameZh), q) &&
 				!strings.Contains(strings.ToLower(lv.NameEn), q) &&
 				!strings.Contains(strings.ToLower(lv.NameJa), q) &&
 				!strings.Contains(strings.ToLower(lv.AssignmentTypeName), q) &&
@@ -1725,10 +1831,18 @@ func (s *Service) SearchLeves(query LeveSearchQuery) LeveSearchResponse {
 		}
 		filtered = append(filtered, lv)
 	}
+	return filtered
+}
 
+// SearchLeves 搜索与筛选理符列表。
+func (s *Service) SearchLeves(query LeveSearchQuery) LeveSearchResponse {
+	filtered := s.filterLeves(query)
 	pageSize := query.PageSize
 	if pageSize <= 0 {
 		pageSize = 30
+	}
+	if pageSize > 100 {
+		pageSize = 100
 	}
 	page, totalPages, start, end := paginateRange(len(filtered), query.Page, pageSize)
 	var items []LeveEntry
@@ -1744,6 +1858,43 @@ func (s *Service) SearchLeves(query LeveSearchQuery) LeveSearchResponse {
 	}
 }
 
+// LocateLevePage 在当前筛选条件下定位指定理符所在分页并返回该页结果。
+func (s *Service) LocateLevePage(query LeveSearchQuery, leveID int) (LeveSearchResponse, bool) {
+	if s == nil || s.store == nil || leveID <= 0 {
+		return LeveSearchResponse{}, false
+	}
+	filtered := s.filterLeves(query)
+	idx := -1
+	for i, lv := range filtered {
+		if lv.ID == leveID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return LeveSearchResponse{}, false
+	}
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 30
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	page, totalPages, start, end := paginateRange(len(filtered), idx/pageSize+1, pageSize)
+	var items []LeveEntry
+	if start < end {
+		items = filtered[start:end]
+	}
+	return LeveSearchResponse{
+		Items:      items,
+		Total:      len(filtered),
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+	}, true
+}
+
 // GetLeveDetail 根据理符 ID 返回完整理符详情。
 func (s *Service) GetLeveDetail(leveID int) *LeveEntry {
 	lv, ok := s.store.LeveByID[leveID]
@@ -1751,6 +1902,343 @@ func (s *Service) GetLeveDetail(leveID int) *LeveEntry {
 		return nil
 	}
 	return &lv
+}
+
+// toLowerFast 在无需转换（如纯小写 ASCII 或常见不含大写字母的中文/日文）时避免额外分配。
+func toLowerFast(s string) string {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b >= 'A' && b <= 'Z' {
+			return strings.ToLower(s)
+		}
+		if b >= 0x80 {
+			for _, r := range s[i:] {
+				if unicode.IsUpper(r) {
+					return strings.ToLower(s)
+				}
+			}
+			return s
+		}
+	}
+	return s
+}
+
+// matchNameByContains 按“完全一致 > 前缀匹配 > 包含匹配”评估单组主/副名称与查询词的匹配度。
+// 返回 rank（0/3/5 表示主名完全/前缀/包含，1/4/6 表示别名完全/前缀/包含）及命中的别名。
+func matchNameByContains(q, qLower, primary string, aliases ...string) (rank int, matchedAlias string, ok bool) {
+	bestRank := 99
+	bestAlias := ""
+
+	eval := func(candidate string, isAlias bool) {
+		cand := strings.TrimSpace(candidate)
+		if cand == "" {
+			return
+		}
+		var r int
+		switch {
+		case strings.EqualFold(cand, q):
+			r = 0
+		default:
+			candLower := toLowerFast(cand)
+			switch {
+			case strings.HasPrefix(candLower, qLower):
+				r = 3
+			case strings.Contains(candLower, qLower):
+				r = 5
+			default:
+				return
+			}
+		}
+		if isAlias {
+			r++
+		}
+		if r < bestRank {
+			bestRank = r
+			if isAlias {
+				bestAlias = cand
+			} else {
+				bestAlias = ""
+			}
+		}
+	}
+
+	eval(primary, false)
+	if bestRank == 0 {
+		return 0, "", true
+	}
+	for _, alias := range aliases {
+		eval(alias, true)
+	}
+	if bestRank == 99 {
+		return 0, "", false
+	}
+	return bestRank, bestAlias, true
+}
+
+// parseExactPositiveID 仅接受纯正整数或带 # 前缀的正整数（如 "44099" 或 "#44099"）。
+func parseExactPositiveID(q string) int {
+	raw := strings.TrimPrefix(q, "#")
+	if raw == "" {
+		return -1
+	}
+	for i := 0; i < len(raw); i++ {
+		if raw[i] < '0' || raw[i] > '9' {
+			return -1
+		}
+	}
+	id, err := strconv.Atoi(raw)
+	if err != nil || id <= 0 {
+		return -1
+	}
+	return id
+}
+
+func sortModuleHits(moduleHits []GlobalSearchHit) {
+	if len(moduleHits) <= 1 {
+		return
+	}
+	sort.Slice(moduleHits, func(i, j int) bool {
+		if moduleHits[i].matchRank != moduleHits[j].matchRank {
+			return moduleHits[i].matchRank < moduleHits[j].matchRank
+		}
+		if moduleHits[i].sortLevel != moduleHits[j].sortLevel {
+			return moduleHits[i].sortLevel > moduleHits[j].sortLevel
+		}
+		return moduleHits[i].ID < moduleHits[j].ID
+	})
+}
+
+// selectTopGlobalHits 按匹配度优先、各模块轮询保底的方式选出最多 maxTotal 条跨模块命中，并按匹配度与模块顺序返回。
+func selectTopGlobalHits(groups [][]GlobalSearchHit, maxTotal int) ([]GlobalSearchHit, int) {
+	total := 0
+	for _, g := range groups {
+		total += len(g)
+	}
+	if total == 0 || maxTotal <= 0 {
+		return nil, total
+	}
+	for _, g := range groups {
+		sortModuleHits(g)
+	}
+
+	offsets := make([]int, len(groups))
+	selected := make([]GlobalSearchHit, 0, min(total, maxTotal))
+
+	for len(selected) < maxTotal {
+		minRank := 99
+		for gi, g := range groups {
+			if offsets[gi] < len(g) && g[offsets[gi]].matchRank < minRank {
+				minRank = g[offsets[gi]].matchRank
+			}
+		}
+		if minRank == 99 {
+			break
+		}
+		// 统计本匹配等级下各模块的命中切片范围
+		rankCount := 0
+		rankEnds := make([]int, len(groups))
+		for gi, g := range groups {
+			end := offsets[gi]
+			for end < len(g) && g[end].matchRank == minRank {
+				end++
+			}
+			rankEnds[gi] = end
+			rankCount += end - offsets[gi]
+		}
+		if len(selected)+rankCount <= maxTotal {
+			for gi, g := range groups {
+				selected = append(selected, g[offsets[gi]:rankEnds[gi]]...)
+				offsets[gi] = rankEnds[gi]
+			}
+			continue
+		}
+		// 当前匹配等级条目超出剩余配额：轮询各模块依次取 1 条，避免单模块挤占其他模块
+		for len(selected) < maxTotal {
+			progressed := false
+			for gi, g := range groups {
+				if offsets[gi] < rankEnds[gi] {
+					selected = append(selected, g[offsets[gi]])
+					offsets[gi]++
+					progressed = true
+					if len(selected) >= maxTotal {
+						break
+					}
+				}
+			}
+			if !progressed {
+				break
+			}
+		}
+	}
+
+	// 跨模块按匹配度优先排序（主名精准 > 别名/称号精准 > ID 精准 > 主名前缀 > 别名前缀 > 主名包含 > 别名包含）
+	kindOrder := func(k GlobalSearchHitKind) int {
+		switch k {
+		case GlobalHitItem:
+			return 0
+		case GlobalHitQuest:
+			return 1
+		case GlobalHitLeve:
+			return 2
+		case GlobalHitAchievement:
+			return 3
+		default:
+			return 4
+		}
+	}
+	sort.SliceStable(selected, func(i, j int) bool {
+		if selected[i].matchRank != selected[j].matchRank {
+			return selected[i].matchRank < selected[j].matchRank
+		}
+		return kindOrder(selected[i].Kind) < kindOrder(selected[j].Kind)
+	})
+	return selected, total
+}
+
+// SearchGlobal 在物品、任务、理符与成就（含称号）中对名称进行包含检索（优先排序完全一致、前缀与精确 ID），最多返回 maxTotal 条。
+func (s *Service) SearchGlobal(rawQuery string, maxTotal int) GlobalSearchResult {
+	q := strings.TrimSpace(rawQuery)
+	if q == "" || s == nil || s.store == nil {
+		return GlobalSearchResult{Query: q}
+	}
+	if maxTotal <= 0 {
+		maxTotal = 50
+	}
+	qLower := toLowerFast(q)
+	idTarget := parseExactPositiveID(q)
+
+	var itemHits, questHits, leveHits, achHits []GlobalSearchHit
+
+	for _, it := range s.store.ItemSummaries {
+		rank, alias, ok := matchNameByContains(q, qLower, it.NameCn, it.NameZh, it.NameJa, it.NameEn)
+		if idTarget > 0 && it.ID == idTarget && (!ok || rank > 2) {
+			rank = 2
+			alias = ""
+			ok = true
+		}
+		if !ok {
+			continue
+		}
+		itemHits = append(itemHits, GlobalSearchHit{
+			Kind:         GlobalHitItem,
+			ID:           it.ID,
+			Title:        it.NameCn,
+			MatchedAlias: alias,
+			Category:     it.CategoryName,
+			ItemLevel:    it.ItemLevel,
+			IconID:       it.IconID,
+			matchRank:    rank,
+			sortLevel:    it.ItemLevel,
+		})
+	}
+
+	for _, qe := range s.store.Quests {
+		cleanTitle := CleanQuestTitle(qe.NameCn)
+		if cleanTitle == "" {
+			cleanTitle = qe.NameCn
+		}
+		cleanZh := CleanQuestTitle(qe.NameZh)
+		rank, alias, ok := matchNameByContains(q, qLower, cleanTitle, qe.NameCn, cleanZh, qe.NameJa, qe.NameEn)
+		if alias == qe.NameCn {
+			// 仅当未清理前才与清理后标题相同，避免展示重复别名
+			if strings.EqualFold(CleanQuestTitle(alias), cleanTitle) {
+				alias = ""
+			}
+		}
+		if idTarget > 0 && qe.ID == idTarget && (!ok || rank > 2) {
+			rank = 2
+			alias = ""
+			ok = true
+		}
+		if !ok {
+			continue
+		}
+		cat := qe.GenreName
+		if cat == "" {
+			cat = qe.SectionName
+		}
+		questHits = append(questHits, GlobalSearchHit{
+			Kind:         GlobalHitQuest,
+			ID:           qe.ID,
+			Title:        cleanTitle,
+			MatchedAlias: alias,
+			Category:     cat,
+			Level:        qe.Level,
+			IconID:       qe.IconID,
+			matchRank:    rank,
+			sortLevel:    qe.Level,
+		})
+	}
+
+	for _, lv := range s.store.Leves {
+		rank, alias, ok := matchNameByContains(q, qLower, lv.NameCn, lv.NameZh, lv.NameJa, lv.NameEn)
+		if idTarget > 0 && lv.ID == idTarget && (!ok || rank > 2) {
+			rank = 2
+			alias = ""
+			ok = true
+		}
+		if !ok {
+			continue
+		}
+		cat := lv.AssignmentTypeName
+		if cat == "" {
+			cat = lv.LeveKindLabel
+		}
+		iconID := lv.AssignmentTypeIconID
+		if iconID <= 0 {
+			iconID = lv.IconCityState
+		}
+		leveHits = append(leveHits, GlobalSearchHit{
+			Kind:         GlobalHitLeve,
+			ID:           lv.ID,
+			Title:        lv.NameCn,
+			MatchedAlias: alias,
+			Category:     cat,
+			Level:        lv.ClassJobLevel,
+			IconID:       iconID,
+			matchRank:    rank,
+			sortLevel:    lv.ClassJobLevel,
+		})
+	}
+
+	for _, ach := range s.store.Achievements {
+		rank, alias, ok := matchNameByContains(q, qLower, ach.NameCn, ach.NameZh, ach.NameJa, ach.NameEn, ach.TitleMasculineCn, ach.TitleFeminineCn, ach.TitleNameJa, ach.TitleNameEn)
+		if idTarget > 0 && ach.ID == idTarget && (!ok || rank > 2) {
+			rank = 2
+			alias = ""
+			ok = true
+		}
+		if !ok {
+			continue
+		}
+		cat := ach.KindName
+		if ach.CategoryName != "" && ach.CategoryName != cat {
+			if cat != "" {
+				cat += " · " + ach.CategoryName
+			} else {
+				cat = ach.CategoryName
+			}
+		}
+		achHits = append(achHits, GlobalSearchHit{
+			Kind:         GlobalHitAchievement,
+			ID:           ach.ID,
+			Title:        ach.NameCn,
+			MatchedAlias: alias,
+			Category:     cat,
+			Points:       ach.Points,
+			IconID:       ach.IconID,
+			RewardItemID: ach.RewardItemID,
+			matchRank:    rank,
+			sortLevel:    ach.Points,
+		})
+	}
+
+	hits, totalMatched := selectTopGlobalHits([][]GlobalSearchHit{itemHits, questHits, leveHits, achHits}, maxTotal)
+	return GlobalSearchResult{
+		Query:        q,
+		Hits:         hits,
+		TotalMatched: totalMatched,
+	}
 }
 
 // GetIconImage 从已挂载客户端解码道具或职业图标为 *image.RGBA。

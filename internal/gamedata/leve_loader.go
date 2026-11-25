@@ -5,11 +5,14 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
 type leveLoaderInput struct {
+	appLang               i18n.Lang
 	leves                 *sqpack.SchemaSheet
+	levesCn               *sqpack.SchemaSheet
 	levesEn               *sqpack.SchemaSheet
 	levesJa               *sqpack.SchemaSheet
 	craftLeves            *sqpack.SchemaSheet
@@ -46,41 +49,42 @@ type leveIndices struct {
 	assignmentTypeList []LeveAssignmentTypeInfo
 }
 
-func inferLeveKind(assignID int, dataID int, in leveLoaderInput) (string, string) {
+func inferLeveKind(appLang i18n.Lang, assignID int, dataID int, in leveLoaderInput) (string, string) {
 	if in.craftLeves != nil {
 		if _, ok := in.craftLeves.Rows[dataID]; ok {
-			return "craft", "制作理符"
+			return "craft", i18n.T(appLang, "gamedata.leve.craft")
 		}
 	}
 	if in.gatheringLeves != nil {
 		if _, ok := in.gatheringLeves.Rows[dataID]; ok {
-			return "gathering", "采集理符"
+			return "gathering", i18n.T(appLang, "gamedata.leve.gathering")
 		}
 	}
 	if in.battleLeves != nil {
 		if _, ok := in.battleLeves.Rows[dataID]; ok {
-			return "battle", "佣兵理符"
+			return "battle", i18n.T(appLang, "gamedata.leve.battle")
 		}
 	}
 	if in.companyLeves != nil {
 		if _, ok := in.companyLeves.Rows[dataID]; ok {
-			return "company", "军队理符"
+			return "company", i18n.T(appLang, "gamedata.leve.company")
 		}
 	}
 
 	switch assignID {
 	case 2, 3, 4:
-		return "gathering", "采集理符"
+		return "gathering", i18n.T(appLang, "gamedata.leve.gathering")
 	case 5, 6, 7, 8, 9, 10, 11, 12:
-		return "craft", "制作理符"
+		return "craft", i18n.T(appLang, "gamedata.leve.craft")
 	case 13, 14, 15, 16:
-		return "company", "军队理符"
+		return "company", i18n.T(appLang, "gamedata.leve.company")
 	default:
-		return "battle", "佣兵理符"
+		return "battle", i18n.T(appLang, "gamedata.leve.battle")
 	}
 }
 
 func buildLeveData(in leveLoaderInput) leveIndices {
+	in.appLang = resolveAppLang(in.appLang)
 	out := leveIndices{
 		leveByID:    make(map[int]LeveEntry),
 		levesByItem: make(map[int][]ItemLeveSource),
@@ -149,6 +153,12 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 			continue
 		}
 
+		nameZh := ""
+		if in.levesCn != nil {
+			if cnRow, ok := in.levesCn.Rows[leveID]; ok {
+				nameZh = strings.TrimSpace(in.levesCn.Str(cnRow, "Name"))
+			}
+		}
 		nameEn := ""
 		if in.levesEn != nil {
 			if enRow, ok := in.levesEn.Rows[leveID]; ok {
@@ -164,7 +174,7 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 
 		assignTypeID := in.leves.Int(row, "LeveAssignmentType")
 		dataID := in.leves.Int(row, "DataId")
-		kind, kindLabel := inferLeveKind(assignTypeID, dataID, in)
+		kind, kindLabel := inferLeveKind(in.appLang, assignTypeID, dataID, in)
 
 		assignName := kindLabel
 		assignIconID := 0
@@ -228,6 +238,7 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 		entry := LeveEntry{
 			ID:                    leveID,
 			NameCn:                nameCn,
+			NameZh:                nameZh,
 			NameEn:                nameEn,
 			NameJa:                nameJa,
 			DescriptionCn:         strings.TrimSpace(in.leves.Str(row, "Description")),
@@ -275,7 +286,7 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 						it := in.itemSummaryByID[itemID]
 						itemName := it.NameCn
 						if itemName == "" {
-							itemName = fmt.Sprintf("物品 #%d", itemID)
+							itemName = i18n.Tf(in.appLang, "gamedata.item_fallback", "id", fmt.Sprintf("%d", itemID))
 						}
 						entry.TurnInItems = append(entry.TurnInItems, LeveTurnInItem{
 							ItemID:   itemID,
@@ -465,7 +476,7 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 						it := in.itemSummaryByID[itemID]
 						itemName := it.NameCn
 						if itemName == "" {
-							itemName = fmt.Sprintf("物品 #%d", itemID)
+							itemName = i18n.Tf(in.appLang, "gamedata.item_fallback", "id", fmt.Sprintf("%d", itemID))
 						}
 						grpEntries = append(grpEntries, LeveRewardEntry{
 							ItemID:   itemID,

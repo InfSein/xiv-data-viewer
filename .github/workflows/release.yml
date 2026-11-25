@@ -163,20 +163,16 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
         run: |
           cat > release-notes.md <<EOF
-          ## 艾欧泽亚数据工作台 (XIV Data Viewer) ${TAG}
+          ## Release ${TAG}
 
-          基于 **egoist/mygo** 构建的纯 Go 原生 Windows 桌面客户端（Direct3D 11 原生绘制，无需 WebView2 或 Node.js 运行时）。
+          Please read our [CHANGELOG.md](https://github.com/InfSein/xiv-data-viewer/blob/master/CHANGELOG.md) for more details.
 
-          ### 下载说明
-          - **Windows 安装包 (推荐)**：\`${SLUG}-setup-${VERSION}-amd64.exe\`（ARM64 设备请下载 \`arm64\` 版）
-          - **绿色便携压缩包**：\`${SLUG}-portable-${VERSION}-windows-amd64.zip\`（解压后直接运行 \`XIV Data Viewer.exe\`）
-          - **校验文件**：\`SHA256SUMS.txt\`
-
-          ### 首次使用
-          启动客户端后，根据引导界面选择本地 **FF14 国服** 或 **国际服** 客户端目录（至少配置其中一项），之后可随时在「设置」中修改路径。所有游戏文件仅执行严格只读访问。
+          ### 我该下载哪个文件?
+          - **Windows**: \`${SLUG}-setup-${VERSION}-amd64.exe\`
+          - **Windows on arm**: \`${SLUG}-setup-${VERSION}-arm64.exe\`
 
           ---
-          构建提交：\`${COMMIT_SHA}\`
+          Commit Hash: \`${COMMIT_SHA}\`
           EOF
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/InfSein/xiv-data-viewer/internal/config"
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 )
 
 func TestEorzeaTime(t *testing.T) {
@@ -154,5 +155,62 @@ func TestRealGameDataService(t *testing.T) {
 			t.Fatalf("仅国际服模式道具名回退异常: %+v", glOnly.ItemSummaryByID[44099])
 		}
 		_ = glOnly.Close()
+
+		// 验证切换主数据语言为日语 (ja) 与英语 (en) 时，主显示名与三语检索均正常
+		storeJA, err := LoadGameDataStoreForLang(resolved, schemasFS, i18n.LangJA, nil)
+		if err != nil {
+			t.Fatalf("加载日语主数据失败: %v", err)
+		}
+		defer storeJA.Close()
+		itemJA := storeJA.ItemSummaryByID[44099]
+		if itemJA.NameCn != "トラルパイナップルケーキ" || itemJA.NameJa != "トラルパイナップルケーキ" || itemJA.NameEn != "Turali Pineapple Ponzecake" {
+			t.Fatalf("日语主数据道具名异常: %+v", itemJA)
+		}
+		svcJA := NewService(storeJA)
+		if resolved.HasCN() {
+			if itemJA.NameZh != "图拉尔菠萝蛋糕" {
+				t.Fatalf("双服挂载时日语模式下应保留中文检索名 NameZh: %+v", itemJA)
+			}
+			if res := svcJA.SearchItems(ItemSearchQuery{Q: "图拉尔菠萝蛋糕"}); res.Total == 0 || res.Items[0].ID != 44099 {
+				t.Fatalf("日语模式下中文关键词搜索应继续命中 #44099: %+v", res)
+			}
+		}
+
+		storeEN, err := LoadGameDataStoreForLang(resolved, schemasFS, i18n.LangEN, nil)
+		if err != nil {
+			t.Fatalf("加载英语主数据失败: %v", err)
+		}
+		defer storeEN.Close()
+		itemEN := storeEN.ItemSummaryByID[44099]
+		if itemEN.NameCn != "Turali Pineapple Ponzecake" || itemEN.NameEn != "Turali Pineapple Ponzecake" || itemEN.NameJa != "トラルパイナップルケーキ" {
+			t.Fatalf("英语主数据道具名异常: %+v", itemEN)
+		}
+		svcEN := NewService(storeEN)
+		if res := svcEN.SearchItems(ItemSearchQuery{Q: "トラルパイナップルケーキ"}); res.Total == 0 || res.Items[0].ID != 44099 {
+			t.Fatalf("英语模式下日文关键词搜索应继续命中 #44099: %+v", res)
+		}
+
+		// 验证通过 StoreLoadOptions 复用 BaseStore 的只读句柄与语言无关表
+		sharedEN, err := LoadGameDataStoreWithOptions(resolved, schemasFS, StoreLoadOptions{
+			AppLang:       i18n.LangEN,
+			BaseStore:     storeJA,
+			SharedReaders: true,
+		})
+		if err != nil {
+			t.Fatalf("复用 BaseStore 加载英语主数据失败: %v", err)
+		}
+		if sharedEN.GlobalReader != storeJA.GlobalReader || sharedEN.Recipes == nil || len(sharedEN.Recipes) != len(storeJA.Recipes) {
+			t.Fatalf("未能复用共享 GlobalReader 或语言无关配方表")
+		}
+		if err := sharedEN.Close(); err != nil {
+			t.Fatalf("SharedReaders 模式下 Close 不应报错: %v", err)
+		}
+		if _, err := storeJA.GlobalReader.HasFile("exd/root.exl"); err != nil {
+			t.Fatalf("SharedReaders 子 Store 关闭后不应关闭底层共享句柄: %v", err)
+		}
+		sharedDetail := NewService(sharedEN).GetItemDetail(34577)
+		if sharedDetail == nil || len(sharedDetail.Recipes) == 0 {
+			t.Fatalf("复用加载后装备 #34577 配方解析异常: %+v", sharedDetail)
+		}
 	}
 }

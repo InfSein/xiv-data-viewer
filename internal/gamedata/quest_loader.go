@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
@@ -52,7 +53,9 @@ var questNeededFields = func() []string {
 }()
 
 type questLoaderInput struct {
+	appLang                 i18n.Lang
 	quests                  *sqpack.SchemaSheet
+	questsCn                *sqpack.SchemaSheet
 	questsEn                *sqpack.SchemaSheet
 	questsJa                *sqpack.SchemaSheet
 	journalGenres           *sqpack.SchemaSheet
@@ -112,21 +115,22 @@ func resolveQuestTypeIcon(isMSQ, isFeature, isRepeatable bool) int {
 	}
 }
 
-func repeatIntervalText(repeatType int, isRepeatable bool) string {
+func repeatIntervalText(appLang i18n.Lang, repeatType int, isRepeatable bool) string {
 	switch repeatType {
 	case 1:
-		return "每日可重复"
+		return i18n.T(appLang, "gamedata.quest.repeat_daily")
 	case 2:
-		return "每周可重复"
+		return i18n.T(appLang, "gamedata.quest.repeat_weekly")
 	default:
 		if isRepeatable {
-			return "可重复"
+			return i18n.T(appLang, "gamedata.quest.repeat_generic")
 		}
 		return ""
 	}
 }
 
 func buildQuestData(in questLoaderInput) questIndices {
+	in.appLang = resolveAppLang(in.appLang)
 	out := questIndices{
 		questByID:          make(map[int]QuestEntry),
 		questsByRewardItem: make(map[int][]ItemQuestSource),
@@ -198,6 +202,12 @@ func buildQuestData(in questLoaderInput) questIndices {
 			continue
 		}
 
+		nameZh := ""
+		if in.questsCn != nil {
+			if r, ok := in.questsCn.Rows[questID]; ok {
+				nameZh = strings.TrimSpace(in.questsCn.Str(r, "Name"))
+			}
+		}
 		nameEn := ""
 		if in.questsEn != nil {
 			if r, ok := in.questsEn.Rows[questID]; ok {
@@ -295,7 +305,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 				prevIDs = append(prevIDs, pqID)
 				pName := readQuestName(pqID)
 				if pName == "" {
-					pName = fmt.Sprintf("任务 #%d", pqID)
+					pName = i18n.Tf(in.appLang, "gamedata.quest_fallback", "id", fmt.Sprintf("%d", pqID))
 				}
 				prevNames = append(prevNames, pName)
 			}
@@ -309,7 +319,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 				lockIDs = append(lockIDs, lID)
 				lName := readQuestName(lID)
 				if lName == "" {
-					lName = fmt.Sprintf("任务 #%d", lID)
+					lName = i18n.Tf(in.appLang, "gamedata.quest_fallback", "id", fmt.Sprintf("%d", lID))
 				}
 				lockNames = append(lockNames, lName)
 			}
@@ -367,7 +377,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 		tomeName, tomeIcon := resolveItem(tomeItemID)
 
 		isRepeatable := in.quests.Bool(row, "IsRepeatable")
-		repeatLabel := repeatIntervalText(in.quests.Int(row, "RepeatIntervalType"), isRepeatable)
+		repeatLabel := repeatIntervalText(in.appLang, in.quests.Int(row, "RepeatIntervalType"), isRepeatable)
 		if repeatLabel != "" {
 			isRepeatable = true
 		}
@@ -408,6 +418,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 			ID:                    questID,
 			InternalID:            strings.TrimSpace(in.quests.Str(row, "Id")),
 			NameCn:                nameCn,
+			NameZh:                nameZh,
 			NameEn:                nameEn,
 			NameJa:                nameJa,
 			IconID:                iconID,
@@ -482,7 +493,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 			}
 			iName, iIcon := resolveItem(itemID)
 			if iName == "" {
-				iName = fmt.Sprintf("物品 #%d", itemID)
+				iName = i18n.Tf(in.appLang, "gamedata.item_fallback", "id", fmt.Sprintf("%d", itemID))
 			}
 			dedupKey := fmt.Sprintf("%d#%s#%s#%t", itemID, groupLabel, cjCatName, isHQ)
 			if rewardSeen[dedupKey] {
@@ -508,6 +519,14 @@ func buildQuestData(in questLoaderInput) questIndices {
 			})
 		}
 
+		grpJob := i18n.T(in.appLang, "gamedata.quest.reward_job")
+		grpTribe := i18n.T(in.appLang, "gamedata.quest.reward_tribe")
+		grpFixed := i18n.T(in.appLang, "gamedata.quest.reward_fixed")
+		grpFixedMale := i18n.T(in.appLang, "gamedata.quest.reward_fixed_male")
+		grpFixedFemale := i18n.T(in.appLang, "gamedata.quest.reward_fixed_female")
+		grpOptional := i18n.T(in.appLang, "gamedata.quest.reward_optional")
+		grpCatalyst := i18n.T(in.appLang, "gamedata.quest.reward_catalyst")
+
 		rewardType := in.quests.Int(row, "ItemRewardType")
 		for idx := 0; idx < 7; idx++ {
 			rewVal := in.quests.Int(row, fmt.Sprintf("Reward[%d]", idx))
@@ -524,7 +543,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 							itID := in.questClassJobRewards.Int(sub.Data, fmt.Sprintf("RewardItem[%d]", k))
 							itCnt := in.questClassJobRewards.Int(sub.Data, fmt.Sprintf("RewardAmount[%d]", k))
 							if itID > 0 {
-								addRewardItem(itID, itCnt, false, "职业奖励", subCJ)
+								addRewardItem(itID, itCnt, false, grpJob, subCJ)
 							}
 						}
 					}
@@ -540,19 +559,19 @@ func buildQuestData(in questLoaderInput) questIndices {
 								break
 							}
 						}
-						addRewardItem(itID, itCnt, false, "部族奖励", "")
+						addRewardItem(itID, itCnt, false, grpTribe, "")
 					}
 				}
 			case 3:
-				grp := "固定奖励"
+				grp := grpFixed
 				if idx == 0 {
-					grp = "固定奖励（男）"
+					grp = grpFixedMale
 				} else if idx == 1 {
-					grp = "固定奖励（女）"
+					grp = grpFixedFemale
 				}
 				addRewardItem(rewVal, rewCnt, false, grp, "")
 			default:
-				addRewardItem(rewVal, rewCnt, false, "固定奖励", "")
+				addRewardItem(rewVal, rewCnt, false, grpFixed, "")
 			}
 		}
 
@@ -563,7 +582,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 			}
 			optCnt := in.quests.Int(row, fmt.Sprintf("OptionalItemCountReward[%d]", idx))
 			optHQ := in.quests.Bool(row, fmt.Sprintf("OptionalItemIsHQReward[%d]", idx))
-			addRewardItem(optID, optCnt, optHQ, "自选奖励", "")
+			addRewardItem(optID, optCnt, optHQ, grpOptional, "")
 		}
 
 		for idx := 0; idx < 3; idx++ {
@@ -572,7 +591,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 				continue
 			}
 			catCnt := in.quests.Int(row, fmt.Sprintf("ItemCountCatalyst[%d]", idx))
-			addRewardItem(catID, catCnt, false, "额外道具", "")
+			addRewardItem(catID, catCnt, false, grpCatalyst, "")
 		}
 
 		if currItemID > 0 && currCount > 0 {
@@ -582,7 +601,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 				GenreName:  genreName,
 				Level:      lvl,
 				Count:      currCount,
-				GroupLabel: "货币奖励",
+				GroupLabel: i18n.T(in.appLang, "gamedata.quest.reward_currency"),
 			})
 		}
 		if tomeItemID > 0 && tomeCount > 0 {
@@ -592,7 +611,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 				GenreName:  genreName,
 				Level:      lvl,
 				Count:      tomeCount,
-				GroupLabel: "神典石奖励",
+				GroupLabel: i18n.T(in.appLang, "gamedata.quest.reward_tomestone"),
 			})
 		}
 
@@ -601,14 +620,14 @@ func buildQuestData(in questLoaderInput) questIndices {
 			if cjName := in.classJobs[cjUnlock].name; cjName != "" {
 				entry.Unlocks = append(entry.Unlocks, QuestUnlockReward{
 					Kind:  "job",
-					Label: "解锁职业：" + cjName,
+					Label: i18n.Tf(in.appLang, "gamedata.quest.unlock_job", "name", cjName),
 				})
 			}
 		}
 		if icUnlockName := resolveInstanceName(in.quests.Int(row, "InstanceContentUnlock")); icUnlockName != "" {
 			entry.Unlocks = append(entry.Unlocks, QuestUnlockReward{
 				Kind:  "instance",
-				Label: "解锁副本：" + icUnlockName,
+				Label: i18n.Tf(in.appLang, "gamedata.quest.unlock_instance", "name", icUnlockName),
 			})
 		}
 		if emoteID := in.quests.Int(row, "EmoteReward"); emoteID > 0 && in.emotes != nil {
@@ -616,7 +635,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 				if eName := strings.TrimSpace(in.emotes.Str(eRow, "Name")); eName != "" {
 					entry.Unlocks = append(entry.Unlocks, QuestUnlockReward{
 						Kind:   "emote",
-						Label:  "情感动作：" + eName,
+						Label:  i18n.Tf(in.appLang, "gamedata.quest.unlock_emote", "name", eName),
 						IconID: in.emotes.Int(eRow, "Icon"),
 					})
 				}
@@ -627,7 +646,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 				if aName := strings.TrimSpace(in.actions.Str(aRow, "Name")); aName != "" {
 					entry.Unlocks = append(entry.Unlocks, QuestUnlockReward{
 						Kind:   "action",
-						Label:  "技能：" + aName,
+						Label:  i18n.Tf(in.appLang, "gamedata.quest.unlock_action", "name", aName),
 						IconID: in.actions.Int(aRow, "Icon"),
 					})
 				}
@@ -640,7 +659,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 					if gName := strings.TrimSpace(in.generalActions.Str(gRow, "Name")); gName != "" {
 						entry.Unlocks = append(entry.Unlocks, QuestUnlockReward{
 							Kind:   "general",
-							Label:  "共通技能：" + gName,
+							Label:  i18n.Tf(in.appLang, "gamedata.quest.unlock_general", "name", gName),
 							IconID: in.generalActions.Int(gRow, "Icon"),
 						})
 					}

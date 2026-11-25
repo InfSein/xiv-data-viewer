@@ -247,12 +247,17 @@ func (r Row) StringAt(idx int) string {
 
 // StringDisplayAt 将行中指定列解码为面向界面展示的可读文本，并展开表引用与玩家占位符。
 func (r Row) StringDisplayAt(idx int, resolve SeSheetResolver) string {
+	return r.StringDisplayAtLang(idx, LangChineseSimplified, resolve)
+}
+
+// StringDisplayAtLang 按指定语言将行中指定列解码为面向界面展示的可读文本。
+func (r Row) StringDisplayAtLang(idx int, lang Language, resolve SeSheetResolver) string {
 	if idx < 0 || idx >= len(r) || r[idx] == nil {
 		return ""
 	}
 	switch v := r[idx].(type) {
 	case []byte:
-		return DecodeSeStringDisplay(v, resolve)
+		return DecodeSeStringDisplayForLang(v, lang, resolve)
 	case string:
 		return CleanPUARunes(v)
 	default:

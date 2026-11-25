@@ -8,16 +8,18 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-var questScopeFilters = []itemScopeDef{
-	{mode: "all", label: "全部"},
-	{mode: "msq", label: "主线任务"},
-	{mode: "feature", label: "功能解锁"},
-	{mode: "repeatable", label: "可重复"},
-	{mode: "with_item", label: "含道具奖励"},
+func (a *App) questScopeFilters() []itemScopeDef {
+	return []itemScopeDef{
+		{mode: "all", label: a.t("quests.scope_all")},
+		{mode: "msq", label: a.t("quests.scope_msq")},
+		{mode: "feature", label: a.t("quests.scope_feature")},
+		{mode: "repeatable", label: a.t("quests.scope_repeatable")},
+		{mode: "with_item", label: a.t("quests.scope_with_item")},
+	}
 }
 
 func (a *App) renderQuestsView(c *ui.Context) {
-	kitResizer(c, "quest-split", &a.listW, itemListMinWidth, itemListMaxWidth, 8, "调整任务列表宽度",
+	kitResizer(c, "quest-split", &a.listW, itemListMinWidth, itemListMaxWidth, 8, a.t("shell.resize_quest_list"),
 		func() { a.renderQuestListPane(c) },
 		func() { a.renderQuestDetailPane(c) },
 	)
@@ -48,16 +50,16 @@ func (a *App) renderQuestListPane(c *ui.Context) {
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Children(func() {
 			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
 				ui.Row(c).Gap(6).AlignItems(ui.Baseline).Grow(1).Shrink(1).Children(func() {
-					ui.Text(c, "任务").FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
-					numTextf(c, "%s 项", formatInt(a.questRes.Total)).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+					ui.Text(c, a.t("quests.title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
+					numText(c, a.tf("common.items_count", "count", formatInt(a.questRes.Total))).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
 				})
 				ui.Row(c).Gap(4).AlignItems(ui.Center).Shrink(0).Children(func() {
 					if a.hasQuestFilter() {
-						if kitButton(c, "quest-reset", "重置", btnOpts{variant: btnGhost, size: btnSizeSm}) {
+						if kitButton(c, "quest-reset", a.t("common.reset"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
 							a.resetQuestFilters()
 						}
 					}
-					secOpts := []selectOption[int]{{value: -1, label: "全部分类"}}
+					secOpts := []selectOption[int]{{value: -1, label: a.t("quests.all_sections")}}
 					if a.status != nil {
 						for _, sec := range a.status.QuestSections {
 							secOpts = append(secOpts, selectOption[int]{
@@ -73,8 +75,14 @@ func (a *App) renderQuestListPane(c *ui.Context) {
 				})
 			})
 
+			// 页面内置搜索栏
+			a.renderPageSearchInput(c, "quest-page-search", &a.questQuery.Q, a.t("search.quest_placeholder"), a.t("search.quest_label"), func() {
+				a.questQuery.Page = 1
+				a.refreshQuests()
+			})
+
 			ui.Row(c).FillWidth().Gap(4).Wrap().AlignItems(ui.Center).Children(func() {
-				for _, f := range questScopeFilters {
+				for _, f := range a.questScopeFilters() {
 					active := a.questQuery.Filter == f.mode
 					if kitToggleChip(c, "q-scope-"+f.mode, f.label, "", active, nil) {
 						a.questQuery.Filter = f.mode
@@ -86,8 +94,8 @@ func (a *App) renderQuestListPane(c *ui.Context) {
 		})
 
 		if len(a.questRes.Items) == 0 {
-			kitEmpty(c, icoScroll, "没有匹配的任务", "尝试在顶部搜索框调整关键词，或切换筛选分类。", func() {
-				if kitButton(c, "quest-empty-reset", "重置筛选", btnOpts{variant: btnOutline, size: btnSizeSm}) {
+			kitEmpty(c, icoScroll, a.t("quests.empty_title"), a.t("quests.empty_desc"), func() {
+				if kitButton(c, "quest-empty-reset", a.t("common.reset_filters"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
 					a.resetQuestFilters()
 				}
 			})
@@ -123,13 +131,17 @@ func (a *App) renderQuestListPane(c *ui.Context) {
 									numTextf(c, "#%d", q.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
 								})
 								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-									ui.Text(c, formatQuestRowType(q)).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
+									ui.Text(c, a.formatQuestRowType(q)).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
 									numText(c, formatQuestRowMeta(q)).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
 								})
 							})
 						})
 						if row.Clicked() {
 							a.selectQuest(q.ID)
+						}
+						if q.ID == a.scrollQuestListToID {
+							row.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollCenter})
+							a.scrollQuestListToID = 0
 						}
 					}
 				})
@@ -151,9 +163,9 @@ func (a *App) renderQuestListPane(c *ui.Context) {
 }
 
 // formatQuestRowType 生成任务列表行左下角的任务类型文本。
-func formatQuestRowType(q gamedata.QuestEntry) string {
+func (a *App) formatQuestRowType(q gamedata.QuestEntry) string {
 	if q.IsMSQ {
-		return "主线任务"
+		return a.t("quests.type_msq")
 	}
 	if q.GenreName != "" {
 		return q.GenreName
@@ -162,15 +174,18 @@ func formatQuestRowType(q gamedata.QuestEntry) string {
 		return q.SectionName
 	}
 	if q.IsFeature {
-		return "功能解锁"
+		return a.t("quests.type_feature")
 	}
 	if q.IsRepeatable {
-		if q.RepeatIntervalLabel == "每日可重复" {
-			return "日常任务"
+		if q.RepeatIntervalLabel == a.t("gamedata.quest.repeat_daily") || q.RepeatIntervalLabel == "每日可重复" {
+			return a.t("quests.type_daily")
 		}
-		return "可重复任务"
+		if q.RepeatIntervalLabel == a.t("gamedata.quest.repeat_weekly") || q.RepeatIntervalLabel == "每周可重复" {
+			return a.t("quests.type_weekly")
+		}
+		return a.t("quests.type_repeatable")
 	}
-	return "支线任务"
+	return a.t("quests.type_side")
 }
 
 // formatQuestRowMeta 生成任务列表行右下角的等级文本。
@@ -186,14 +201,14 @@ func (a *App) renderQuestDetailPane(c *ui.Context) {
 	kitPanel(c, a.panelRadius(c)).Grow(1).Shrink(1).FillHeight().Children(func() {
 		q := a.selectedQuest
 		if q == nil {
-			kitEmpty(c, icoScroll, "选择任务查看详情", "点击左侧任意任务，可查看任务插图、报酬、前置任务与剧情概要。", nil)
+			kitEmpty(c, icoScroll, a.t("quests.detail_empty_title"), a.t("quests.detail_empty_desc"), nil)
 			return
 		}
 
 		ui.Row(c).FillWidth().Height(42).Padding(0, 16).Gap(10).
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).
 			Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
-			numTextf(c, "任务 #%d  %s", q.ID, q.InternalID).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+			numText(c, a.tf("quests.id_header", "id", fmt.Sprintf("%d", q.ID), "internal", q.InternalID)).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
 			if q.ExpansionName != "" {
 				drawPill(c, q.ExpansionName, pillNeutral)
 			}
@@ -243,13 +258,10 @@ func (a *App) renderQuestDetailHero(c *ui.Context, q *gamedata.QuestEntry) {
 				ui.Text(c, title).FontSize(t.text.xl).FontWeight(600).LetterSpacing(-0.3).TextColor(t.foreground).Selectable()
 				numTextf(c, "#%d", q.ID).FontSize(t.text.xs).TextColor(t.muted).Selectable()
 			})
-			if q.NameJa != "" || q.NameEn != "" {
+			if secLines := a.secondaryDataLines(title, q.NameJa, q.NameEn); len(secLines) > 0 {
 				ui.Row(c).Gap(12).Wrap().Children(func() {
-					if q.NameJa != "" {
-						ui.Textf(c, "JA  %s", q.NameJa).FontSize(t.text.xs).TextColor(t.muted).Selectable()
-					}
-					if q.NameEn != "" {
-						ui.Textf(c, "EN  %s", q.NameEn).FontSize(t.text.xs).TextColor(t.muted).Selectable()
+					for _, sec := range secLines {
+						ui.Textf(c, "%s  %s", sec.badge, sec.text).FontSize(t.text.xs).TextColor(t.muted).Selectable()
 					}
 				})
 			}
@@ -282,23 +294,23 @@ func (a *App) renderQuestDetailHero(c *ui.Context, q *gamedata.QuestEntry) {
 					numText(c, strings.Join(meta, " · ")).FontSize(t.text.xs).TextColor(t.subdued)
 				}
 				if q.IsMSQ {
-					drawPill(c, "主线任务", pillWarning)
+					drawPill(c, a.t("quests.type_msq"), pillWarning)
 				}
 				if q.IsFeature {
-					drawPill(c, "功能解锁", pillAccent)
+					drawPill(c, a.t("quests.type_feature"), pillAccent)
 				}
 				if q.IsRepeatable {
 					lbl := q.RepeatIntervalLabel
 					if lbl == "" {
-						lbl = "可重复"
+						lbl = a.t("quests.badge_repeatable")
 					}
 					drawPill(c, lbl, pillPositive)
 				}
 				if q.HasLevelSync {
-					drawPill(c, "等级调整", pillNeutral)
+					drawPill(c, a.t("quests.badge_level_sync"), pillNeutral)
 				}
 				if q.IsJobFixed {
-					drawPill(c, "固定职业", pillNeutral)
+					drawPill(c, a.t("quests.badge_job_fixed"), pillNeutral)
 				}
 			})
 		})
@@ -331,17 +343,17 @@ func (a *App) renderQuestBannerImage(c *ui.Context, q *gamedata.QuestEntry) {
 func (a *App) renderQuestRewardsSection(c *ui.Context, q *gamedata.QuestEntry) {
 	t := themeOf(c)
 
-	gilStr := "无"
+	gilStr := a.t("common.none")
 	if q.GilReward > 0 {
-		gilStr = fmt.Sprintf("%s 金币", formatInt(q.GilReward))
+		gilStr = a.tf("common.gil_amount", "amount", formatInt(q.GilReward))
 	}
-	expStr := "无"
+	expStr := a.t("common.none")
 	if q.ExpReward > 0 {
-		expStr = fmt.Sprintf("%s EXP", formatInt(q.ExpReward))
+		expStr = a.tf("common.exp_amount", "amount", formatInt(q.ExpReward))
 	} else if q.ExpFactor > 0 {
-		expStr = fmt.Sprintf("系数 %d%%", q.ExpFactor)
+		expStr = a.tf("quests.exp_factor", "factor", fmt.Sprintf("%d", q.ExpFactor))
 	}
-	extraLabel := "特殊货币 / 声望"
+	extraLabel := a.t("quests.extra_currency_rep")
 	var extraParts []string
 	if q.CurrencyRewardName != "" && q.CurrencyRewardCount > 0 {
 		extraParts = append(extraParts, fmt.Sprintf("%s ×%s", q.CurrencyRewardName, formatInt(q.CurrencyRewardCount)))
@@ -350,24 +362,24 @@ func (a *App) renderQuestRewardsSection(c *ui.Context, q *gamedata.QuestEntry) {
 		extraParts = append(extraParts, fmt.Sprintf("%s ×%s", q.TomestoneName, formatInt(q.TomestoneCount)))
 	}
 	if q.ReputationReward > 0 {
-		extraParts = append(extraParts, fmt.Sprintf("友好声望 +%s", formatInt(q.ReputationReward)))
+		extraParts = append(extraParts, a.tf("quests.reputation_plus", "rep", formatInt(q.ReputationReward)))
 	}
-	extraVal := "无"
+	extraVal := a.t("common.none")
 	if len(extraParts) > 0 {
 		extraVal = strings.Join(extraParts, " · ")
 	}
 
 	kitBlock(c, ui.Row(c).FillWidth().Clip(), toneCard).Children(func() {
-		drawMetricSplitCell(c, "金币奖励", gilStr, false)
-		drawMetricSplitCell(c, "经验值奖励", expStr, true)
+		drawMetricSplitCell(c, a.t("quests.gil_reward"), gilStr, false)
+		drawMetricSplitCell(c, a.t("quests.exp_reward"), expStr, true)
 		drawMetricSplitCell(c, extraLabel, extraVal, true)
 	})
 
 	if len(q.RewardItems) > 0 {
-		drawDetailSection(c, "道具奖励", fmt.Sprintf("%d 项", len(q.RewardItems)), nil, func() {
+		drawDetailSection(c, a.t("quests.item_rewards"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(q.RewardItems))), nil, func() {
 			ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 				for rIdx, ri := range q.RewardItems {
-					btn := ui.ButtonBase(c.Key(fmt.Sprintf("qrew-%d-%d-%d", q.ID, ri.ItemID, rIdx))).Label("查看 "+ri.ItemName).
+					btn := ui.ButtonBase(c.Key(fmt.Sprintf("qrew-%d-%d-%d", q.ID, ri.ItemID, rIdx))).Label(a.tf("common.view_item", "name", ri.ItemName)).
 						MinWidth(230).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
 						Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
 						Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
@@ -402,7 +414,7 @@ func (a *App) renderQuestRewardsSection(c *ui.Context, q *gamedata.QuestEntry) {
 	}
 
 	if len(q.Unlocks) > 0 {
-		drawDetailSection(c, "解锁与特殊奖励", fmt.Sprintf("%d 项", len(q.Unlocks)), nil, func() {
+		drawDetailSection(c, a.t("quests.unlocks_title"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(q.Unlocks))), nil, func() {
 			ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 				for uIdx, u := range q.Unlocks {
 					ui.Row(c.Key(fmt.Sprintf("qunl-%d-%d", q.ID, uIdx))).Padding(6, 10).Radius(t.radius.md).
@@ -423,12 +435,12 @@ func (a *App) renderQuestNPCsSection(c *ui.Context, q *gamedata.QuestEntry) {
 		return
 	}
 	t := themeOf(c)
-	drawDetailSection(c, "接取与交付", "", nil, func() {
+	drawDetailSection(c, a.t("quests.npcs_title"), "", nil, func() {
 		ui.Column(c).FillWidth().Gap(8).Children(func() {
 			if q.IssuerName != "" || q.IssuerLocation != nil {
 				ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Wrap().Children(func() {
 					ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-						drawPill(c, "接取", pillAccent)
+						drawPill(c, a.t("quests.issuer_badge"), pillAccent)
 						lbl := q.IssuerName
 						if lbl == "" {
 							lbl = fmt.Sprintf("NPC #%d", q.IssuerNpcID)
@@ -436,14 +448,14 @@ func (a *App) renderQuestNPCsSection(c *ui.Context, q *gamedata.QuestEntry) {
 						ui.Text(c, lbl).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
 					})
 					if q.IssuerLocation != nil {
-						a.renderMapLocationBtn(c, fmt.Sprintf("q-issuer-map-%d", q.ID), gamedata.CleanQuestTitle(q.NameCn), "接取点："+q.IssuerName, q.IssuerLocation)
+						a.renderMapLocationBtn(c, fmt.Sprintf("q-issuer-map-%d", q.ID), gamedata.CleanQuestTitle(q.NameCn), a.tf("quests.issuer_point", "name", q.IssuerName), q.IssuerLocation)
 					}
 				})
 			}
 			if q.TargetName != "" || q.TargetLocation != nil {
 				ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Wrap().Children(func() {
 					ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-						drawPill(c, "目标/交付", pillPositive)
+						drawPill(c, a.t("quests.target_badge"), pillPositive)
 						lbl := q.TargetName
 						if lbl == "" {
 							lbl = fmt.Sprintf("NPC #%d", q.TargetNpcID)
@@ -451,7 +463,7 @@ func (a *App) renderQuestNPCsSection(c *ui.Context, q *gamedata.QuestEntry) {
 						ui.Text(c, lbl).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
 					})
 					if q.TargetLocation != nil {
-						a.renderMapLocationBtn(c, fmt.Sprintf("q-target-map-%d", q.ID), gamedata.CleanQuestTitle(q.NameCn), "交付点："+q.TargetName, q.TargetLocation)
+						a.renderMapLocationBtn(c, fmt.Sprintf("q-target-map-%d", q.ID), gamedata.CleanQuestTitle(q.NameCn), a.tf("quests.target_point", "name", q.TargetName), q.TargetLocation)
 					}
 				})
 			}
@@ -466,18 +478,18 @@ func (a *App) renderQuestRequirementsSection(c *ui.Context, q *gamedata.QuestEnt
 		return
 	}
 	t := themeOf(c)
-	drawDetailSection(c, "接取条件与前置要求", "", nil, func() {
+	drawDetailSection(c, a.t("quests.reqs_title"), "", nil, func() {
 		ui.Column(c).FillWidth().Gap(8).Children(func() {
 			if len(q.PreviousQuestIDs) > 0 {
 				ui.Row(c).FillWidth().Gap(6).Wrap().AlignItems(ui.Center).Children(func() {
-					lbl := "前置任务（需全部完成）："
+					lbl := a.t("quests.prev_all")
 					if q.PreviousQuestJoin == 1 {
-						lbl = "前置任务（任一即可）："
+						lbl = a.t("quests.prev_any")
 					}
 					ui.Text(c, lbl).FontSize(t.text.xs).TextColor(t.muted)
 					for idx, pqID := range q.PreviousQuestIDs {
 						pqName := gamedata.CleanQuestTitle(q.PreviousQuestNames[idx])
-						btn := ui.ButtonBase(c.Key(fmt.Sprintf("pq-%d-%d", q.ID, pqID))).Label("查看任务 "+pqName).
+						btn := ui.ButtonBase(c.Key(fmt.Sprintf("pq-%d-%d", q.ID, pqID))).Label(a.tf("common.view_quest", "name", pqName)).
 							Padding(4, 9).Radius(t.radius.md).Background(t.card).Border(hairline, t.border).
 							Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 						if btn.Hovered() {
@@ -487,44 +499,44 @@ func (a *App) renderQuestRequirementsSection(c *ui.Context, q *gamedata.QuestEnt
 							ui.Text(c, pqName).FontSize(t.text.xs).FontWeight(500).TextColor(t.infoText)
 						})
 						if btn.Clicked() {
-							a.selectQuest(pqID)
+							a.jumpToQuest(pqID)
 						}
 					}
 				})
 			}
 			if len(q.QuestLockIDs) > 0 {
 				ui.Row(c).FillWidth().Gap(6).Wrap().AlignItems(ui.Center).Children(func() {
-					ui.Text(c, "互斥/锁定任务：").FontSize(t.text.xs).TextColor(t.muted)
+					ui.Text(c, a.t("quests.lock_quests")).FontSize(t.text.xs).TextColor(t.muted)
 					for idx, lID := range q.QuestLockIDs {
 						lName := gamedata.CleanQuestTitle(q.QuestLockNames[idx])
 						if kitButton(c, fmt.Sprintf("qlock-%d-%d", q.ID, lID), lName, btnOpts{variant: btnOutline, size: btnSizeXs}) {
-							a.selectQuest(lID)
+							a.jumpToQuest(lID)
 						}
 					}
 				})
 			}
 			var extraConds []string
 			if q.ClassJobRequiredName != "" {
-				extraConds = append(extraConds, "限定职业："+q.ClassJobRequiredName)
+				extraConds = append(extraConds, a.tf("quests.req_job", "name", q.ClassJobRequiredName))
 			}
 			if q.GrandCompanyName != "" {
-				extraConds = append(extraConds, "大国防联军："+q.GrandCompanyName)
+				extraConds = append(extraConds, a.tf("quests.req_gc", "name", q.GrandCompanyName))
 			}
 			if q.BeastTribeName != "" {
-				s := "友好部族：" + q.BeastTribeName
+				s := a.tf("quests.req_tribe", "name", q.BeastTribeName)
 				if q.BeastReputationRank != "" {
 					s += " · " + q.BeastReputationRank
 				}
 				extraConds = append(extraConds, s)
 			}
 			if q.MountRequiredName != "" {
-				extraConds = append(extraConds, "需坐骑："+q.MountRequiredName)
+				extraConds = append(extraConds, a.tf("quests.req_mount", "name", q.MountRequiredName))
 			}
 			if q.IsHouseRequired {
-				extraConds = append(extraConds, "需持有房屋或房间")
+				extraConds = append(extraConds, a.t("quests.req_house"))
 			}
 			for _, inst := range q.InstanceContentNames {
-				extraConds = append(extraConds, "完成副本："+inst)
+				extraConds = append(extraConds, a.tf("quests.req_instance", "name", inst))
 			}
 			if len(extraConds) > 0 {
 				ui.Text(c, strings.Join(extraConds, "   ·   ")).FontSize(t.text.xs).TextColor(t.subdued)
@@ -534,7 +546,7 @@ func (a *App) renderQuestRequirementsSection(c *ui.Context, q *gamedata.QuestEnt
 }
 
 // renderQuestCollapsibleSection 绘制防剧透默认折叠区块（仅保留清晰顶部细线与可点击标题行）。
-func renderQuestCollapsibleSection(c *ui.Context, key, title, countMeta string, open *bool, body func()) {
+func (a *App) renderQuestCollapsibleSection(c *ui.Context, key, title, countMeta string, open *bool, body func()) {
 	t := themeOf(c)
 	ui.Column(c).FillWidth().Padding(14, 0, 0, 0).Gap(10).
 		BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).Children(func() {
@@ -561,9 +573,9 @@ func renderQuestCollapsibleSection(c *ui.Context, key, title, countMeta string, 
 					numText(c, countMeta).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
 				}
 			})
-			hint := "已折叠防剧透 · 点击展开"
+			hint := a.t("quests.spoiler_collapsed")
 			if *open {
-				hint = "点击收起"
+				hint = a.t("quests.spoiler_expanded")
 			}
 			ui.Text(c, hint).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
 		})
@@ -584,8 +596,8 @@ func (a *App) renderQuestSummarySection(c *ui.Context, q *gamedata.QuestEntry) {
 			t := themeOf(c)
 			ui.Row(c).FillWidth().Padding(14, 0, 0, 0).Gap(8).AlignItems(ui.Center).
 				BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).Children(func() {
-				ui.Spinner(c).FontSize(13).TextColor(t.primary).Label("加载任务文本")
-				ui.Text(c, "正在解析任务概要与对话文本...").FontSize(t.text.xs).TextColor(t.muted)
+				ui.Spinner(c).FontSize(13).TextColor(t.primary).Label(a.t("quests.loading_text"))
+				ui.Text(c, a.t("quests.loading_text_desc")).FontSize(t.text.xs).TextColor(t.muted)
 			})
 		}
 		return
@@ -597,23 +609,23 @@ func (a *App) renderQuestSummarySection(c *ui.Context, q *gamedata.QuestEntry) {
 	t := themeOf(c)
 	var metaParts []string
 	if len(qt.Journals) > 0 {
-		metaParts = append(metaParts, fmt.Sprintf("%d 段概要", len(qt.Journals)))
+		metaParts = append(metaParts, a.tf("quests.summary_journals_meta", "count", fmt.Sprintf("%d", len(qt.Journals))))
 	}
 	if len(qt.Objectives) > 0 {
-		metaParts = append(metaParts, fmt.Sprintf("%d 项步骤", len(qt.Objectives)))
+		metaParts = append(metaParts, a.tf("quests.summary_objectives_meta", "count", fmt.Sprintf("%d", len(qt.Objectives))))
 	}
 
-	renderQuestCollapsibleSection(c, fmt.Sprintf("q-summary-fold-%d", q.ID), "任务概要与目的", strings.Join(metaParts, " · "), &a.questSummaryOpen, func() {
+	a.renderQuestCollapsibleSection(c, fmt.Sprintf("q-summary-fold-%d", q.ID), a.t("quests.summary_title"), strings.Join(metaParts, " · "), &a.questSummaryOpen, func() {
 		ui.Column(c).FillWidth().Gap(12).Children(func() {
 			if len(qt.Journals) > 0 {
 				ui.Column(c).FillWidth().Gap(8).Children(func() {
-					ui.Text(c, "概要").FontSize(t.text.xs).FontWeight(600).TextColor(t.subdued)
+					ui.Text(c, a.t("quests.journals_heading")).FontSize(t.text.xs).FontWeight(600).TextColor(t.subdued)
 					for idx, jText := range qt.Journals {
 						kitBlock(c, ui.Column(c).FillWidth().Padding(10, 14).Gap(6), toneCard).Children(func() {
 							if len(qt.Journals) > 1 {
-								lbl := fmt.Sprintf("阶段 %d", idx+1)
+								lbl := a.tf("quests.journal_step", "step", fmt.Sprintf("%d", idx+1))
 								if idx == 0 {
-									lbl = "起始概要"
+									lbl = a.t("quests.journal_start")
 								}
 								drawPill(c, lbl, pillNeutral)
 							}
@@ -625,7 +637,7 @@ func (a *App) renderQuestSummarySection(c *ui.Context, q *gamedata.QuestEntry) {
 
 			if len(qt.Objectives) > 0 {
 				ui.Column(c).FillWidth().Gap(6).Children(func() {
-					ui.Text(c, "目的").FontSize(t.text.xs).FontWeight(600).TextColor(t.subdued)
+					ui.Text(c, a.t("quests.objectives_heading")).FontSize(t.text.xs).FontWeight(600).TextColor(t.subdued)
 					kitBlock(c, ui.Column(c).FillWidth().Padding(10, 14).Gap(6), toneCard).Children(func() {
 						for idx, obj := range qt.Objectives {
 							ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Start).Children(func() {
@@ -646,9 +658,9 @@ func (a *App) renderQuestDialogueSection(c *ui.Context, q *gamedata.QuestEntry) 
 		return
 	}
 	t := themeOf(c)
-	meta := fmt.Sprintf("%d 段文本", len(qt.Dialogues))
+	meta := a.tf("quests.dialogue_meta", "count", fmt.Sprintf("%d", len(qt.Dialogues)))
 
-	renderQuestCollapsibleSection(c, fmt.Sprintf("q-dialogue-fold-%d", q.ID), "任务对话", meta, &a.questDialogueOpen, func() {
+	a.renderQuestCollapsibleSection(c, fmt.Sprintf("q-dialogue-fold-%d", q.ID), a.t("quests.dialogue_title"), meta, &a.questDialogueOpen, func() {
 		ui.Column(c).FillWidth().Gap(8).Children(func() {
 			for _, line := range qt.Dialogues {
 				padL := float32(14)

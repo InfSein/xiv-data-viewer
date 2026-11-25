@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 )
 
 // ErrNoClientConfigured 表示用户尚未配置国服或国际服客户端路径。
@@ -17,7 +19,8 @@ type AppConfig struct {
 	CNPath          string `json:"cnPath"`
 	GlobalPath      string `json:"globalPath"`
 	ExportOutputDir string `json:"exportOutputDir"`
-	Theme           string `json:"theme,omitempty"` // "system" | "light" | "dark"，空值默认跟随系统
+	Theme           string `json:"theme,omitempty"`    // "system" | "light" | "dark"，空值默认跟随系统
+	Language        string `json:"language,omitempty"` // "zh" | "ja" | "en"，空值表示自动跟随系统语言
 }
 
 // ClientInfo 表示经过只读校验后的单个服务器客户端目录信息。
@@ -45,6 +48,20 @@ func (r *ResolvedPaths) HasGlobal() bool {
 
 // PrimaryVersion 返回主客户端版本号（优先国服，其次国际服）。
 func (r *ResolvedPaths) PrimaryVersion() string {
+	return r.VersionForClient(false)
+}
+
+// VersionForClient 返回首选客户端的版本号；若指定客户端未配置则自动回退。
+func (r *ResolvedPaths) VersionForClient(preferGlobal bool) string {
+	if preferGlobal {
+		if r.HasGlobal() {
+			return r.Global.Version
+		}
+		if r.HasCN() {
+			return r.CN.Version
+		}
+		return "未知版本"
+	}
 	if r.HasCN() {
 		return r.CN.Version
 	}
@@ -52,6 +69,17 @@ func (r *ResolvedPaths) PrimaryVersion() string {
 		return r.Global.Version
 	}
 	return "未知版本"
+}
+
+func normalizeConfigFields(cfg *AppConfig) {
+	cfg.CNPath = strings.TrimSpace(cfg.CNPath)
+	cfg.GlobalPath = strings.TrimSpace(cfg.GlobalPath)
+	cfg.ExportOutputDir = strings.TrimSpace(cfg.ExportOutputDir)
+	if lang, ok := i18n.ParseLang(cfg.Language); ok {
+		cfg.Language = string(lang)
+	} else {
+		cfg.Language = ""
+	}
 }
 
 // ConfigFilePath 返回指定数据目录下的配置文件路径。
@@ -73,9 +101,7 @@ func LoadAppConfig(dataDir string) (AppConfig, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return AppConfig{}, fmt.Errorf("解析配置文件 JSON 失败: %w", err)
 	}
-	cfg.CNPath = strings.TrimSpace(cfg.CNPath)
-	cfg.GlobalPath = strings.TrimSpace(cfg.GlobalPath)
-	cfg.ExportOutputDir = strings.TrimSpace(cfg.ExportOutputDir)
+	normalizeConfigFields(&cfg)
 	return cfg, nil
 }
 
@@ -84,9 +110,7 @@ func SaveAppConfig(dataDir string, cfg AppConfig) error {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("创建应用配置目录失败: %w", err)
 	}
-	cfg.CNPath = strings.TrimSpace(cfg.CNPath)
-	cfg.GlobalPath = strings.TrimSpace(cfg.GlobalPath)
-	cfg.ExportOutputDir = strings.TrimSpace(cfg.ExportOutputDir)
+	normalizeConfigFields(&cfg)
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

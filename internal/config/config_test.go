@@ -63,3 +63,30 @@ func TestSaveLoadAndValidateConfig(t *testing.T) {
 		t.Fatalf("game 目录归一化错误: %+v", resolvedFromGame.Global)
 	}
 }
+
+func TestConfigLanguagePersistenceAndNormalization(t *testing.T) {
+	tmp := t.TempDir()
+
+	// 1. 保存并加载各类语言标记，验证持久化与规范化一致
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{in: "zh-CN", want: "zh"},
+		{in: "ja-JP", want: "ja"},
+		{in: "EN", want: "en"},
+		{in: "fr-FR", want: ""},
+	}
+	for _, tc := range cases {
+		if err := SaveAppConfig(tmp, AppConfig{Language: tc.in}); err != nil {
+			t.Fatalf("SaveAppConfig(%q) 失败: %v", tc.in, err)
+		}
+		got, err := LoadAppConfig(tmp)
+		if err != nil {
+			t.Fatalf("LoadAppConfig 失败: %v", err)
+		}
+		if got.Language != tc.want {
+			t.Fatalf("Language(%q) 归一化结果 = %q, want %q", tc.in, got.Language, tc.want)
+		}
+	}
+}

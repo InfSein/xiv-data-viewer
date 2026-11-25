@@ -1,6 +1,6 @@
 {
   "name": "xiv-data-viewer",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "description": "基于 egoist/mygo 的本地最终幻想XIV游戏数据解析展示桌面客户端",
   "scripts": {

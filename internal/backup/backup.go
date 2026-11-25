@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 )
 
 // VersionBackupMeta 保存单个本地版本快照的元信息。
@@ -60,6 +61,7 @@ type DiffItemEntry struct {
 	ChangeType           string            `json:"changeType"` // added|modified|removed
 	NameCn               string            `json:"nameCn"`
 	NameEn               string            `json:"nameEn"`
+	NameJa               string            `json:"nameJa,omitempty"`
 	IconID               int               `json:"iconId"`
 	ItemLevel            int               `json:"itemLevel"`
 	EquipLevel           int               `json:"equipLevel"`
@@ -128,6 +130,7 @@ type compactItemRecord struct {
 	ID                  int    `json:"id"`
 	NameCn              string `json:"nameCn"`
 	NameEn              string `json:"nameEn"`
+	NameJa              string `json:"nameJa,omitempty"`
 	IconID              int    `json:"iconId"`
 	ItemLevel           int    `json:"itemLevel"`
 	EquipLevel          int    `json:"equipLevel"`
@@ -147,6 +150,7 @@ type compactQuestRecord struct {
 	ID            int    `json:"id"`
 	NameCn        string `json:"nameCn"`
 	NameEn        string `json:"nameEn"`
+	NameJa        string `json:"nameJa,omitempty"`
 	IconID        int    `json:"iconId"`
 	Level         int    `json:"level"`
 	GenreName     string `json:"genreName"`
@@ -166,6 +170,7 @@ type compactLeveRecord struct {
 	ID                 int    `json:"id"`
 	NameCn             string `json:"nameCn"`
 	NameEn             string `json:"nameEn"`
+	NameJa             string `json:"nameJa,omitempty"`
 	IconID             int    `json:"iconId"`
 	LeveKind           string `json:"leveKind"`
 	LeveKindLabel      string `json:"leveKindLabel"`
@@ -182,6 +187,7 @@ type compactAchievementRecord struct {
 	ID               int    `json:"id"`
 	NameCn           string `json:"nameCn"`
 	NameEn           string `json:"nameEn"`
+	NameJa           string `json:"nameJa,omitempty"`
 	DescriptionCn    string `json:"descriptionCn"`
 	Points           int    `json:"points"`
 	IconID           int    `json:"iconId"`
@@ -223,18 +229,41 @@ type Service struct {
 	manifestPath string
 
 	mu            sync.Mutex
+	uiLang        i18n.Lang
 	manifest      *backupManifest
 	snapshotCache map[string]*snapshotPayload
 }
 
 // NewService 创建版本快照备份服务，快照保存在 backupDir 下。
 func NewService(store *gamedata.Store, backupDir string) *Service {
+	lang := i18n.LangZH
+	if store != nil && store.AppLang != "" {
+		lang = i18n.NormalizeLang(string(store.AppLang))
+	}
 	return &Service{
 		store:         store,
 		backupDir:     backupDir,
 		manifestPath:  filepath.Join(backupDir, "manifest.json"),
+		uiLang:        lang,
 		snapshotCache: make(map[string]*snapshotPayload),
 	}
+}
+
+// SetLang 切换版本对比文案输出所使用的界面语言。
+func (s *Service) SetLang(lang i18n.Lang) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.uiLang = i18n.NormalizeLang(string(lang))
+	s.mu.Unlock()
+}
+
+func (s *Service) langLocked() i18n.Lang {
+	if s.uiLang == "" {
+		return i18n.LangZH
+	}
+	return s.uiLang
 }
 
 func (s *Service) snapshotFilePath(version string) string {
@@ -310,9 +339,9 @@ func (s *Service) InitializeOnStartup() (VersionStatusResponse, error) {
 		return VersionStatusResponse{}, fmt.Errorf("创建版本备份目录失败: %w", err)
 	}
 
-	currentVersion := s.store.PrimaryVersion
+	currentVersion := s.store.DataVersion()
 	existing := s.readManifest()
-	currentSnap := s.buildLiveSnapshot(currentVersion)
+	currentSnap := s.buildLiveSnapshot(currentVersion, s.langLocked())
 
 	baselineVer := deriveBaselineVersionName(currentVersion)
 	var baselineMeta *VersionBackupMeta
@@ -409,7 +438,7 @@ func (s *Service) statusLocked() VersionStatusResponse {
 		lastAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	return VersionStatusResponse{
-		CurrentVersion:   s.store.PrimaryVersion,
+		CurrentVersion:   s.store.DataVersion(),
 		GlobalVersion:    s.store.GlobalVersion,
 		PreviousVersion:  prev,
 		HasVersionUpdate: hasUpd,
@@ -431,8 +460,8 @@ func (s *Service) CreateOrRefreshBackup() (VersionStatusResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	currentVersion := s.store.PrimaryVersion
-	payload := s.buildLiveSnapshot(currentVersion)
+	currentVersion := s.store.DataVersion()
+	payload := s.buildLiveSnapshot(currentVersion, s.langLocked())
 	if err := s.writeSnapshot(currentVersion, payload); err != nil {
 		return VersionStatusResponse{}, err
 	}
@@ -487,21 +516,23 @@ func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, 
 	}
 	defer s.mu.Unlock()
 
+	liveVer := s.store.DataVersion()
+	lang := s.langLocked()
 	toVersion := query.To
 	if toVersion == "" {
-		toVersion = s.store.PrimaryVersion
+		toVersion = liveVer
 	}
 	fromVersion := query.From
 	if fromVersion == "" && s.manifest != nil {
 		fromVersion = s.manifest.PreviousVersion
 	}
 	if fromVersion == "" {
-		fromVersion = deriveBaselineVersionName(s.store.PrimaryVersion)
+		fromVersion = deriveBaselineVersionName(liveVer)
 	}
 
 	toSnap := s.loadSnapshot(toVersion)
 	if toSnap == nil {
-		toSnap = s.buildLiveSnapshot(s.store.PrimaryVersion)
+		toSnap = s.buildLiveSnapshot(liveVer, lang)
 	}
 	fromSnap := s.loadSnapshot(fromVersion)
 	if fromSnap == nil {
@@ -511,10 +542,10 @@ func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, 
 	var allEntries []DiffItemEntry
 	var summary DiffSummary
 
-	allEntries = append(allEntries, diffItems(fromSnap, toSnap, &summary)...)
-	allEntries = append(allEntries, diffQuests(fromSnap, toSnap, &summary)...)
-	allEntries = append(allEntries, diffLeves(fromSnap, toSnap, &summary)...)
-	allEntries = append(allEntries, diffAchievements(fromSnap, toSnap, &summary)...)
+	allEntries = append(allEntries, diffItems(lang, fromSnap, toSnap, &summary)...)
+	allEntries = append(allEntries, diffQuests(lang, fromSnap, toSnap, &summary)...)
+	allEntries = append(allEntries, diffLeves(lang, fromSnap, toSnap, &summary)...)
+	allEntries = append(allEntries, diffAchievements(lang, fromSnap, toSnap, &summary)...)
 	summary.AddedRecipes = max(0, toSnap.Meta.RecipeCount-fromSnap.Meta.RecipeCount)
 
 	filter := query.Filter
@@ -588,6 +619,7 @@ func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, 
 func diffEntryMatchesQuery(e DiffItemEntry, q string) bool {
 	if strings.Contains(strings.ToLower(e.NameCn), q) ||
 		strings.Contains(strings.ToLower(e.NameEn), q) ||
+		strings.Contains(strings.ToLower(e.NameJa), q) ||
 		strings.Contains(strings.ToLower(e.CategoryName), q) ||
 		strings.Contains(strings.ToLower(e.TitleNameCn), q) ||
 		strings.Contains(strings.ToLower(e.RewardItemNameCn), q) ||
@@ -602,7 +634,7 @@ func diffEntryMatchesQuery(e DiffItemEntry, q string) bool {
 	return false
 }
 
-func diffItems(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffItemEntry {
+func diffItems(lang i18n.Lang, fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffItemEntry {
 	fromItems := make(map[int]compactItemRecord, len(fromSnap.Items))
 	for _, it := range fromSnap.Items {
 		fromItems[it.ID] = it
@@ -612,6 +644,7 @@ func diffItems(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 		toItems[it.ID] = it
 	}
 
+	noneStr := i18n.T(lang, "common.none")
 	var entries []DiffItemEntry
 	for _, toItem := range toSnap.Items {
 		fromItem, exists := fromItems[toItem.ID]
@@ -630,18 +663,18 @@ func diffItems(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 			if toCol {
 				summary.NewCollectableTurnInItems++
 			}
-			afterDesc := fmt.Sprintf("品级 %d · %s", toItem.ItemLevel, toItem.CategoryName)
+			afterDesc := i18n.Tf(lang, "backup.ilvl_value", "ilvl", strconv.Itoa(toItem.ItemLevel)) + " · " + toItem.CategoryName
 			changes := []ItemFieldChange{{
 				Field:  "status",
-				Label:  "版本新增",
-				Before: "无",
+				Label:  i18n.T(lang, "backup.status_added"),
+				Before: noneStr,
 				After:  afterDesc,
 			}}
 			if toCol && toItem.CollectableSummary != "" {
 				changes = append(changes, ItemFieldChange{
 					Field:  "collectableSummary",
-					Label:  "收藏品交纳",
-					Before: "无",
+					Label:  i18n.T(lang, "backup.collectable_turnin"),
+					Before: noneStr,
 					After:  toItem.CollectableSummary,
 				})
 			}
@@ -651,6 +684,7 @@ func diffItems(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 				ChangeType:           "added",
 				NameCn:               toItem.NameCn,
 				NameEn:               toItem.NameEn,
+				NameJa:               toItem.NameJa,
 				IconID:               toItem.IconID,
 				ItemLevel:            toItem.ItemLevel,
 				EquipLevel:           toItem.EquipLevel,
@@ -665,7 +699,7 @@ func diffItems(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 			continue
 		}
 
-		changes, colChanged := diffSingleItem(fromItem, toItem)
+		changes, colChanged := diffSingleItem(lang, fromItem, toItem)
 		if len(changes) > 0 {
 			summary.ModifiedItems++
 			if !fromItem.IsCraftable && toItem.IsCraftable {
@@ -689,6 +723,7 @@ func diffItems(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 				ChangeType:           "modified",
 				NameCn:               toItem.NameCn,
 				NameEn:               toItem.NameEn,
+				NameJa:               toItem.NameJa,
 				IconID:               toItem.IconID,
 				ItemLevel:            toItem.ItemLevel,
 				EquipLevel:           toItem.EquipLevel,
@@ -712,6 +747,7 @@ func diffItems(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 				ChangeType:    "removed",
 				NameCn:        fromItem.NameCn,
 				NameEn:        fromItem.NameEn,
+				NameJa:        fromItem.NameJa,
 				IconID:        fromItem.IconID,
 				ItemLevel:     fromItem.ItemLevel,
 				EquipLevel:    fromItem.EquipLevel,
@@ -722,9 +758,9 @@ func diffItems(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 				IsPurchasable: fromItem.IsPurchasable,
 				Changes: []ItemFieldChange{{
 					Field:  "status",
-					Label:  "版本移除",
-					Before: fmt.Sprintf("品级 %d", fromItem.ItemLevel),
-					After:  "已移除",
+					Label:  i18n.T(lang, "backup.status_removed"),
+					Before: i18n.Tf(lang, "backup.ilvl_value", "ilvl", strconv.Itoa(fromItem.ItemLevel)),
+					After:  i18n.T(lang, "diff.change_removed"),
 				}},
 			})
 		}
@@ -732,15 +768,15 @@ func diffItems(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 	return entries
 }
 
-func questCategoryLabel(q compactQuestRecord) string {
+func questCategoryLabel(lang i18n.Lang, q compactQuestRecord) string {
 	genre := nonEmptyOr(q.GenreName, q.SectionName)
 	if genre != "" {
-		return "任务 · " + genre
+		return i18n.Tf(lang, "backup.quest_cat_genre", "genre", genre)
 	}
-	return "任务"
+	return i18n.T(lang, "backup.quest_cat")
 }
 
-func diffQuests(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffItemEntry {
+func diffQuests(lang i18n.Lang, fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffItemEntry {
 	fromMap := make(map[int]compactQuestRecord, len(fromSnap.Quests))
 	for _, q := range fromSnap.Quests {
 		fromMap[q.ID] = q
@@ -750,6 +786,7 @@ func diffQuests(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffI
 		toMap[q.ID] = q
 	}
 
+	noneStr := i18n.T(lang, "common.none")
 	var entries []DiffItemEntry
 	for _, toQ := range toSnap.Quests {
 		fromQ, exists := fromMap[toQ.ID]
@@ -757,15 +794,15 @@ func diffQuests(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffI
 			summary.AddedQuests++
 			parts := []string{fmt.Sprintf("Lv.%d", toQ.Level)}
 			if toQ.IsMSQ {
-				parts = append(parts, "主线")
+				parts = append(parts, i18n.T(lang, "backup.quest_msq"))
 			} else if toQ.IsFeature {
-				parts = append(parts, "功能解锁")
+				parts = append(parts, i18n.T(lang, "backup.quest_feature"))
 			}
 			if toQ.IssuerName != "" {
-				parts = append(parts, "接取:"+toQ.IssuerName)
+				parts = append(parts, i18n.Tf(lang, "backup.quest_issuer", "name", toQ.IssuerName))
 			}
 			if toQ.RewardSummary != "" {
-				parts = append(parts, "奖励:"+toQ.RewardSummary)
+				parts = append(parts, i18n.Tf(lang, "backup.quest_reward", "summary", toQ.RewardSummary))
 			}
 			entries = append(entries, DiffItemEntry{
 				ID:           toQ.ID,
@@ -773,20 +810,21 @@ func diffQuests(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffI
 				ChangeType:   "added",
 				NameCn:       toQ.NameCn,
 				NameEn:       toQ.NameEn,
+				NameJa:       toQ.NameJa,
 				IconID:       toQ.IconID,
 				ItemLevel:    toQ.Level,
-				CategoryName: questCategoryLabel(toQ),
+				CategoryName: questCategoryLabel(lang, toQ),
 				RewardItemID: toQ.PrimaryItemID,
 				Changes: []ItemFieldChange{{
 					Field:  "quest",
-					Label:  "新增任务",
-					Before: "无",
+					Label:  i18n.T(lang, "backup.quest_added"),
+					Before: noneStr,
 					After:  strings.Join(parts, " · "),
 				}},
 			})
 			continue
 		}
-		if changes := diffSingleQuest(fromQ, toQ); len(changes) > 0 {
+		if changes := diffSingleQuest(lang, fromQ, toQ); len(changes) > 0 {
 			summary.ModifiedQuests++
 			entries = append(entries, DiffItemEntry{
 				ID:           toQ.ID,
@@ -794,9 +832,10 @@ func diffQuests(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffI
 				ChangeType:   "modified",
 				NameCn:       toQ.NameCn,
 				NameEn:       toQ.NameEn,
+				NameJa:       toQ.NameJa,
 				IconID:       toQ.IconID,
 				ItemLevel:    toQ.Level,
-				CategoryName: questCategoryLabel(toQ),
+				CategoryName: questCategoryLabel(lang, toQ),
 				RewardItemID: toQ.PrimaryItemID,
 				Changes:      changes,
 			})
@@ -812,14 +851,15 @@ func diffQuests(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffI
 				ChangeType:   "removed",
 				NameCn:       fromQ.NameCn,
 				NameEn:       fromQ.NameEn,
+				NameJa:       fromQ.NameJa,
 				IconID:       fromQ.IconID,
 				ItemLevel:    fromQ.Level,
-				CategoryName: questCategoryLabel(fromQ),
+				CategoryName: questCategoryLabel(lang, fromQ),
 				Changes: []ItemFieldChange{{
 					Field:  "quest",
-					Label:  "任务移除",
+					Label:  i18n.T(lang, "backup.quest_removed"),
 					Before: fmt.Sprintf("Lv.%d", fromQ.Level),
-					After:  "已移除",
+					After:  i18n.T(lang, "diff.change_removed"),
 				}},
 			})
 		}
@@ -827,14 +867,14 @@ func diffQuests(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffI
 	return entries
 }
 
-func leveCategoryLabel(lv compactLeveRecord) string {
+func leveCategoryLabel(lang i18n.Lang, lv compactLeveRecord) string {
 	if lv.AssignmentTypeName != "" && lv.AssignmentTypeName != lv.LeveKindLabel {
-		return fmt.Sprintf("理符 · %s (%s)", lv.LeveKindLabel, lv.AssignmentTypeName)
+		return i18n.Tf(lang, "backup.leve_cat_type", "kind", lv.LeveKindLabel, "type", lv.AssignmentTypeName)
 	}
-	return "理符 · " + nonEmptyOr(lv.LeveKindLabel, "委托")
+	return i18n.Tf(lang, "backup.leve_cat", "kind", nonEmptyOr(lv.LeveKindLabel, i18n.T(lang, "backup.leve_default_kind")))
 }
 
-func diffLeves(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffItemEntry {
+func diffLeves(lang i18n.Lang, fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffItemEntry {
 	fromMap := make(map[int]compactLeveRecord, len(fromSnap.Leves))
 	for _, lv := range fromSnap.Leves {
 		fromMap[lv.ID] = lv
@@ -844,6 +884,7 @@ func diffLeves(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 		toMap[lv.ID] = lv
 	}
 
+	noneStr := i18n.T(lang, "common.none")
 	var entries []DiffItemEntry
 	for _, toLv := range toSnap.Leves {
 		fromLv, exists := fromMap[toLv.ID]
@@ -851,15 +892,15 @@ func diffLeves(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 			summary.AddedLeves++
 			parts := []string{fmt.Sprintf("Lv.%d", toLv.ClassJobLevel)}
 			if toLv.ExpReward > 0 {
-				parts = append(parts, fmt.Sprintf("%d EXP", toLv.ExpReward))
+				parts = append(parts, i18n.Tf(lang, "common.exp_amount", "amount", strconv.Itoa(toLv.ExpReward)))
 			}
 			if toLv.GilReward > 0 {
-				parts = append(parts, fmt.Sprintf("%d金币", toLv.GilReward))
+				parts = append(parts, i18n.Tf(lang, "common.gil_amount", "amount", strconv.Itoa(toLv.GilReward)))
 			}
 			if toLv.TurnInSummary != "" {
-				parts = append(parts, "交纳:"+toLv.TurnInSummary)
+				parts = append(parts, i18n.Tf(lang, "backup.leve_turnin", "summary", toLv.TurnInSummary))
 			} else if toLv.RewardSummary != "" {
-				parts = append(parts, "奖励:"+toLv.RewardSummary)
+				parts = append(parts, i18n.Tf(lang, "backup.leve_reward", "summary", toLv.RewardSummary))
 			}
 			entries = append(entries, DiffItemEntry{
 				ID:           toLv.ID,
@@ -867,19 +908,20 @@ func diffLeves(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 				ChangeType:   "added",
 				NameCn:       toLv.NameCn,
 				NameEn:       toLv.NameEn,
+				NameJa:       toLv.NameJa,
 				IconID:       toLv.IconID,
 				ItemLevel:    toLv.ClassJobLevel,
-				CategoryName: leveCategoryLabel(toLv),
+				CategoryName: leveCategoryLabel(lang, toLv),
 				Changes: []ItemFieldChange{{
 					Field:  "leve",
-					Label:  "新增理符",
-					Before: "无",
+					Label:  i18n.T(lang, "backup.leve_added"),
+					Before: noneStr,
 					After:  strings.Join(parts, " · "),
 				}},
 			})
 			continue
 		}
-		if changes := diffSingleLeve(fromLv, toLv); len(changes) > 0 {
+		if changes := diffSingleLeve(lang, fromLv, toLv); len(changes) > 0 {
 			summary.ModifiedLeves++
 			entries = append(entries, DiffItemEntry{
 				ID:           toLv.ID,
@@ -887,9 +929,10 @@ func diffLeves(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 				ChangeType:   "modified",
 				NameCn:       toLv.NameCn,
 				NameEn:       toLv.NameEn,
+				NameJa:       toLv.NameJa,
 				IconID:       toLv.IconID,
 				ItemLevel:    toLv.ClassJobLevel,
-				CategoryName: leveCategoryLabel(toLv),
+				CategoryName: leveCategoryLabel(lang, toLv),
 				Changes:      changes,
 			})
 		}
@@ -904,14 +947,15 @@ func diffLeves(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 				ChangeType:   "removed",
 				NameCn:       fromLv.NameCn,
 				NameEn:       fromLv.NameEn,
+				NameJa:       fromLv.NameJa,
 				IconID:       fromLv.IconID,
 				ItemLevel:    fromLv.ClassJobLevel,
-				CategoryName: leveCategoryLabel(fromLv),
+				CategoryName: leveCategoryLabel(lang, fromLv),
 				Changes: []ItemFieldChange{{
 					Field:  "leve",
-					Label:  "理符移除",
+					Label:  i18n.T(lang, "backup.leve_removed"),
 					Before: fmt.Sprintf("Lv.%d", fromLv.ClassJobLevel),
-					After:  "已移除",
+					After:  i18n.T(lang, "diff.change_removed"),
 				}},
 			})
 		}
@@ -919,7 +963,7 @@ func diffLeves(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffIt
 	return entries
 }
 
-func diffAchievements(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffItemEntry {
+func diffAchievements(lang i18n.Lang, fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffItemEntry {
 	fromAchs := make(map[int]compactAchievementRecord, len(fromSnap.Achievements))
 	for _, a := range fromSnap.Achievements {
 		fromAchs[a.ID] = a
@@ -929,6 +973,7 @@ func diffAchievements(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) [
 		toAchs[a.ID] = a
 	}
 
+	noneStr := i18n.T(lang, "common.none")
 	var entries []DiffItemEntry
 	for _, toAch := range toSnap.Achievements {
 		titleDisp := toAch.TitleMasculineCn
@@ -942,14 +987,14 @@ func diffAchievements(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) [
 				summary.AddedTitles++
 			}
 			parts := []string{
-				fmt.Sprintf("%d点", toAch.Points),
+				i18n.Tf(lang, "backup.ach_points", "pts", strconv.Itoa(toAch.Points)),
 				fmt.Sprintf("%s · %s", toAch.KindName, toAch.CategoryName),
 			}
 			if titleDisp != "" {
-				parts = append(parts, fmt.Sprintf("称号《%s》", titleDisp))
+				parts = append(parts, i18n.Tf(lang, "backup.ach_title_tag", "title", titleDisp))
 			}
 			if toAch.RewardItemNameCn != "" {
-				parts = append(parts, "奖励: "+toAch.RewardItemNameCn)
+				parts = append(parts, i18n.Tf(lang, "backup.ach_reward_item", "name", toAch.RewardItemNameCn))
 			}
 			entries = append(entries, DiffItemEntry{
 				ID:               toAch.ID,
@@ -957,23 +1002,24 @@ func diffAchievements(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) [
 				ChangeType:       "added",
 				NameCn:           toAch.NameCn,
 				NameEn:           toAch.NameEn,
+				NameJa:           toAch.NameJa,
 				IconID:           toAch.IconID,
 				ItemLevel:        toAch.Points,
-				CategoryName:     fmt.Sprintf("成就 · %s (%s)", toAch.KindName, toAch.CategoryName),
+				CategoryName:     i18n.Tf(lang, "backup.ach_cat", "kind", toAch.KindName, "cat", toAch.CategoryName),
 				Points:           toAch.Points,
 				TitleNameCn:      titleDisp,
 				RewardItemID:     toAch.RewardItemID,
 				RewardItemNameCn: toAch.RewardItemNameCn,
 				Changes: []ItemFieldChange{{
 					Field:  "achievement",
-					Label:  "新增成就",
-					Before: "无",
+					Label:  i18n.T(lang, "backup.ach_added"),
+					Before: noneStr,
 					After:  strings.Join(parts, " · "),
 				}},
 			})
 			continue
 		}
-		achChanges := diffSingleAchievement(fromAch, toAch)
+		achChanges := diffSingleAchievement(lang, fromAch, toAch)
 		if len(achChanges) > 0 {
 			summary.ModifiedAchievements++
 			if fromAch.TitleID == 0 && toAch.TitleID > 0 {
@@ -985,9 +1031,10 @@ func diffAchievements(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) [
 				ChangeType:       "modified",
 				NameCn:           toAch.NameCn,
 				NameEn:           toAch.NameEn,
+				NameJa:           toAch.NameJa,
 				IconID:           toAch.IconID,
 				ItemLevel:        toAch.Points,
-				CategoryName:     fmt.Sprintf("成就 · %s (%s)", toAch.KindName, toAch.CategoryName),
+				CategoryName:     i18n.Tf(lang, "backup.ach_cat", "kind", toAch.KindName, "cat", toAch.CategoryName),
 				Points:           toAch.Points,
 				TitleNameCn:      titleDisp,
 				RewardItemID:     toAch.RewardItemID,
@@ -1006,15 +1053,16 @@ func diffAchievements(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) [
 				ChangeType:   "removed",
 				NameCn:       fromAch.NameCn,
 				NameEn:       fromAch.NameEn,
+				NameJa:       fromAch.NameJa,
 				IconID:       fromAch.IconID,
 				ItemLevel:    fromAch.Points,
-				CategoryName: fmt.Sprintf("成就 · %s (%s)", fromAch.KindName, fromAch.CategoryName),
+				CategoryName: i18n.Tf(lang, "backup.ach_cat", "kind", fromAch.KindName, "cat", fromAch.CategoryName),
 				Points:       fromAch.Points,
 				Changes: []ItemFieldChange{{
 					Field:  "achievement",
-					Label:  "成就移除",
-					Before: fmt.Sprintf("%d点", fromAch.Points),
-					After:  "已移除",
+					Label:  i18n.T(lang, "backup.ach_removed"),
+					Before: i18n.Tf(lang, "backup.ach_points", "pts", strconv.Itoa(fromAch.Points)),
+					After:  i18n.T(lang, "diff.change_removed"),
 				}},
 			})
 		}
@@ -1022,121 +1070,161 @@ func diffAchievements(fromSnap, toSnap *snapshotPayload, summary *DiffSummary) [
 	return entries
 }
 
-func diffSingleItem(before, after compactItemRecord) ([]ItemFieldChange, bool) {
+func diffSingleItem(lang i18n.Lang, before, after compactItemRecord) ([]ItemFieldChange, bool) {
 	var changes []ItemFieldChange
 	colChanged := false
+	noneStr := i18n.T(lang, "common.none")
 	if before.NameCn != after.NameCn {
-		changes = append(changes, ItemFieldChange{Field: "nameCn", Label: "名称", Before: before.NameCn, After: after.NameCn})
+		changes = append(changes, ItemFieldChange{Field: "nameCn", Label: i18n.T(lang, "backup.field_name"), Before: before.NameCn, After: after.NameCn})
 	}
 	if before.ItemLevel != after.ItemLevel {
-		changes = append(changes, ItemFieldChange{Field: "itemLevel", Label: "品级 (iLvl)", Before: strconv.Itoa(before.ItemLevel), After: strconv.Itoa(after.ItemLevel)})
+		changes = append(changes, ItemFieldChange{Field: "itemLevel", Label: i18n.T(lang, "backup.field_ilvl"), Before: strconv.Itoa(before.ItemLevel), After: strconv.Itoa(after.ItemLevel)})
 	}
 	if before.EquipLevel != after.EquipLevel {
-		changes = append(changes, ItemFieldChange{Field: "equipLevel", Label: "装备等级", Before: strconv.Itoa(before.EquipLevel), After: strconv.Itoa(after.EquipLevel)})
+		changes = append(changes, ItemFieldChange{Field: "equipLevel", Label: i18n.T(lang, "backup.field_equip_lv"), Before: strconv.Itoa(before.EquipLevel), After: strconv.Itoa(after.EquipLevel)})
 	}
 	if before.IsCraftable != after.IsCraftable {
-		changes = append(changes, ItemFieldChange{Field: "isCraftable", Label: "制作配方", Before: boolLabel(before.IsCraftable, "可制作", "无配方"), After: boolLabel(after.IsCraftable, "可制作", "无配方")})
+		y, n := i18n.T(lang, "backup.craft_yes"), i18n.T(lang, "backup.craft_no")
+		changes = append(changes, ItemFieldChange{Field: "isCraftable", Label: i18n.T(lang, "backup.field_craftable"), Before: boolLabel(before.IsCraftable, y, n), After: boolLabel(after.IsCraftable, y, n)})
 	}
 	if before.IsGatherable != after.IsGatherable {
-		changes = append(changes, ItemFieldChange{Field: "isGatherable", Label: "采集获取", Before: boolLabel(before.IsGatherable, "可采集", "不可采集"), After: boolLabel(after.IsGatherable, "可采集", "不可采集")})
+		y, n := i18n.T(lang, "backup.gather_yes"), i18n.T(lang, "backup.gather_no")
+		changes = append(changes, ItemFieldChange{Field: "isGatherable", Label: i18n.T(lang, "backup.field_gatherable"), Before: boolLabel(before.IsGatherable, y, n), After: boolLabel(after.IsGatherable, y, n)})
 	}
 	if before.IsPurchasable != after.IsPurchasable {
-		changes = append(changes, ItemFieldChange{Field: "isPurchasable", Label: "商店购买", Before: boolLabel(before.IsPurchasable, "可购买", "不可购买"), After: boolLabel(after.IsPurchasable, "可购买", "不可购买")})
+		y, n := i18n.T(lang, "backup.purch_yes"), i18n.T(lang, "backup.purch_no")
+		changes = append(changes, ItemFieldChange{Field: "isPurchasable", Label: i18n.T(lang, "backup.field_purchasable"), Before: boolLabel(before.IsPurchasable, y, n), After: boolLabel(after.IsPurchasable, y, n)})
 	}
 	if before.IsRetainerVenture != nil && after.IsRetainerVenture != nil && *before.IsRetainerVenture != *after.IsRetainerVenture {
-		changes = append(changes, ItemFieldChange{Field: "isRetainerVenture", Label: "雇员探险", Before: boolLabel(*before.IsRetainerVenture, "可探险获取", "不可探险获取"), After: boolLabel(*after.IsRetainerVenture, "可探险获取", "不可探险获取")})
+		y, n := i18n.T(lang, "backup.ret_yes"), i18n.T(lang, "backup.ret_no")
+		changes = append(changes, ItemFieldChange{Field: "isRetainerVenture", Label: i18n.T(lang, "backup.field_retainer"), Before: boolLabel(*before.IsRetainerVenture, y, n), After: boolLabel(*after.IsRetainerVenture, y, n)})
 	}
 	if before.IsCollectableTurnIn != nil && after.IsCollectableTurnIn != nil && *before.IsCollectableTurnIn != *after.IsCollectableTurnIn {
 		colChanged = true
-		changes = append(changes, ItemFieldChange{Field: "isCollectableTurnIn", Label: "收藏品交纳", Before: boolLabel(*before.IsCollectableTurnIn, "可作收藏品", "非收藏品"), After: boolLabel(*after.IsCollectableTurnIn, "可作收藏品", "非收藏品")})
+		y, n := i18n.T(lang, "backup.col_turnin_yes"), i18n.T(lang, "backup.col_turnin_no")
+		changes = append(changes, ItemFieldChange{Field: "isCollectableTurnIn", Label: i18n.T(lang, "backup.collectable_turnin"), Before: boolLabel(*before.IsCollectableTurnIn, y, n), After: boolLabel(*after.IsCollectableTurnIn, y, n)})
 	}
 	if before.IsCollectableReward != nil && after.IsCollectableReward != nil && *before.IsCollectableReward != *after.IsCollectableReward {
 		colChanged = true
-		changes = append(changes, ItemFieldChange{Field: "isCollectableReward", Label: "收藏品回报", Before: boolLabel(*before.IsCollectableReward, "可经交纳获得", "不可经交纳获得"), After: boolLabel(*after.IsCollectableReward, "可经交纳获得", "不可经交纳获得")})
+		y, n := i18n.T(lang, "backup.col_reward_yes"), i18n.T(lang, "backup.col_reward_no")
+		changes = append(changes, ItemFieldChange{Field: "isCollectableReward", Label: i18n.T(lang, "backup.collectable_reward"), Before: boolLabel(*before.IsCollectableReward, y, n), After: boolLabel(*after.IsCollectableReward, y, n)})
 	}
 	if before.CollectableSummary != after.CollectableSummary && (before.CollectableSummary != "" || after.CollectableSummary != "") {
 		colChanged = true
 		changes = append(changes, ItemFieldChange{
 			Field:  "collectableSummary",
-			Label:  "收藏品交易",
-			Before: nonEmptyOr(before.CollectableSummary, "无"),
-			After:  nonEmptyOr(after.CollectableSummary, "无"),
+			Label:  i18n.T(lang, "backup.collectable_trade"),
+			Before: nonEmptyOr(before.CollectableSummary, noneStr),
+			After:  nonEmptyOr(after.CollectableSummary, noneStr),
 		})
 	}
 	return changes, colChanged
 }
 
-func diffSingleQuest(before, after compactQuestRecord) []ItemFieldChange {
+func diffSingleQuest(lang i18n.Lang, before, after compactQuestRecord) []ItemFieldChange {
 	var changes []ItemFieldChange
+	noneStr := i18n.T(lang, "common.none")
 	if before.NameCn != after.NameCn {
-		changes = append(changes, ItemFieldChange{Field: "nameCn", Label: "任务名称", Before: before.NameCn, After: after.NameCn})
+		changes = append(changes, ItemFieldChange{Field: "nameCn", Label: i18n.T(lang, "backup.quest_field_name"), Before: before.NameCn, After: after.NameCn})
 	}
 	if before.Level != after.Level {
-		changes = append(changes, ItemFieldChange{Field: "level", Label: "接取等级", Before: fmt.Sprintf("Lv.%d", before.Level), After: fmt.Sprintf("Lv.%d", after.Level)})
+		changes = append(changes, ItemFieldChange{Field: "level", Label: i18n.T(lang, "backup.quest_field_level"), Before: fmt.Sprintf("Lv.%d", before.Level), After: fmt.Sprintf("Lv.%d", after.Level)})
 	}
 	if before.GenreName != after.GenreName {
-		changes = append(changes, ItemFieldChange{Field: "genreName", Label: "任务分类", Before: nonEmptyOr(before.GenreName, "无"), After: nonEmptyOr(after.GenreName, "无")})
+		changes = append(changes, ItemFieldChange{Field: "genreName", Label: i18n.T(lang, "backup.quest_field_genre"), Before: nonEmptyOr(before.GenreName, noneStr), After: nonEmptyOr(after.GenreName, noneStr)})
 	}
 	if before.IssuerName != after.IssuerName {
-		changes = append(changes, ItemFieldChange{Field: "issuerName", Label: "接取 NPC", Before: nonEmptyOr(before.IssuerName, "无"), After: nonEmptyOr(after.IssuerName, "无")})
+		changes = append(changes, ItemFieldChange{Field: "issuerName", Label: i18n.T(lang, "backup.quest_field_issuer"), Before: nonEmptyOr(before.IssuerName, noneStr), After: nonEmptyOr(after.IssuerName, noneStr)})
 	}
 	if before.GilReward != after.GilReward {
-		changes = append(changes, ItemFieldChange{Field: "gilReward", Label: "金币奖励", Before: fmt.Sprintf("%d 金币", before.GilReward), After: fmt.Sprintf("%d 金币", after.GilReward)})
+		changes = append(changes, ItemFieldChange{
+			Field:  "gilReward",
+			Label:  i18n.T(lang, "backup.quest_field_gil"),
+			Before: i18n.Tf(lang, "common.gil_amount", "amount", strconv.Itoa(before.GilReward)),
+			After:  i18n.Tf(lang, "common.gil_amount", "amount", strconv.Itoa(after.GilReward)),
+		})
 	}
 	if before.ExpReward != after.ExpReward {
-		changes = append(changes, ItemFieldChange{Field: "expReward", Label: "经验奖励", Before: fmt.Sprintf("%d EXP", before.ExpReward), After: fmt.Sprintf("%d EXP", after.ExpReward)})
+		changes = append(changes, ItemFieldChange{
+			Field:  "expReward",
+			Label:  i18n.T(lang, "backup.quest_field_exp"),
+			Before: i18n.Tf(lang, "common.exp_amount", "amount", strconv.Itoa(before.ExpReward)),
+			After:  i18n.Tf(lang, "common.exp_amount", "amount", strconv.Itoa(after.ExpReward)),
+		})
 	}
 	if before.RewardSummary != after.RewardSummary {
-		changes = append(changes, ItemFieldChange{Field: "rewardSummary", Label: "任务奖励", Before: nonEmptyOr(before.RewardSummary, "无"), After: nonEmptyOr(after.RewardSummary, "无")})
+		changes = append(changes, ItemFieldChange{Field: "rewardSummary", Label: i18n.T(lang, "backup.quest_field_reward"), Before: nonEmptyOr(before.RewardSummary, noneStr), After: nonEmptyOr(after.RewardSummary, noneStr)})
 	}
 	return changes
 }
 
-func diffSingleLeve(before, after compactLeveRecord) []ItemFieldChange {
+func diffSingleLeve(lang i18n.Lang, before, after compactLeveRecord) []ItemFieldChange {
 	var changes []ItemFieldChange
+	noneStr := i18n.T(lang, "common.none")
 	if before.NameCn != after.NameCn {
-		changes = append(changes, ItemFieldChange{Field: "nameCn", Label: "理符名称", Before: before.NameCn, After: after.NameCn})
+		changes = append(changes, ItemFieldChange{Field: "nameCn", Label: i18n.T(lang, "backup.leve_field_name"), Before: before.NameCn, After: after.NameCn})
 	}
 	if before.ClassJobLevel != after.ClassJobLevel {
-		changes = append(changes, ItemFieldChange{Field: "classJobLevel", Label: "等级", Before: fmt.Sprintf("Lv.%d", before.ClassJobLevel), After: fmt.Sprintf("Lv.%d", after.ClassJobLevel)})
+		changes = append(changes, ItemFieldChange{Field: "classJobLevel", Label: i18n.T(lang, "backup.leve_field_level"), Before: fmt.Sprintf("Lv.%d", before.ClassJobLevel), After: fmt.Sprintf("Lv.%d", after.ClassJobLevel)})
 	}
 	if before.AssignmentTypeName != after.AssignmentTypeName {
-		changes = append(changes, ItemFieldChange{Field: "assignmentTypeName", Label: "职能分类", Before: nonEmptyOr(before.AssignmentTypeName, "无"), After: nonEmptyOr(after.AssignmentTypeName, "无")})
+		changes = append(changes, ItemFieldChange{Field: "assignmentTypeName", Label: i18n.T(lang, "backup.leve_field_type"), Before: nonEmptyOr(before.AssignmentTypeName, noneStr), After: nonEmptyOr(after.AssignmentTypeName, noneStr)})
 	}
 	if before.ExpReward != after.ExpReward {
-		changes = append(changes, ItemFieldChange{Field: "expReward", Label: "基础经验", Before: fmt.Sprintf("%d EXP", before.ExpReward), After: fmt.Sprintf("%d EXP", after.ExpReward)})
+		changes = append(changes, ItemFieldChange{
+			Field:  "expReward",
+			Label:  i18n.T(lang, "backup.leve_field_exp"),
+			Before: i18n.Tf(lang, "common.exp_amount", "amount", strconv.Itoa(before.ExpReward)),
+			After:  i18n.Tf(lang, "common.exp_amount", "amount", strconv.Itoa(after.ExpReward)),
+		})
 	}
 	if before.GilReward != after.GilReward {
-		changes = append(changes, ItemFieldChange{Field: "gilReward", Label: "金币报酬", Before: fmt.Sprintf("%d 金币", before.GilReward), After: fmt.Sprintf("%d 金币", after.GilReward)})
+		changes = append(changes, ItemFieldChange{
+			Field:  "gilReward",
+			Label:  i18n.T(lang, "backup.leve_field_gil"),
+			Before: i18n.Tf(lang, "common.gil_amount", "amount", strconv.Itoa(before.GilReward)),
+			After:  i18n.Tf(lang, "common.gil_amount", "amount", strconv.Itoa(after.GilReward)),
+		})
 	}
 	if before.CraftRepeats != after.CraftRepeats {
-		changes = append(changes, ItemFieldChange{Field: "craftRepeats", Label: "追加轮次", Before: fmt.Sprintf("%d 次", before.CraftRepeats), After: fmt.Sprintf("%d 次", after.CraftRepeats)})
+		changes = append(changes, ItemFieldChange{
+			Field:  "craftRepeats",
+			Label:  i18n.T(lang, "backup.leve_field_repeats"),
+			Before: i18n.Tf(lang, "backup.leve_repeats_val", "count", strconv.Itoa(before.CraftRepeats)),
+			After:  i18n.Tf(lang, "backup.leve_repeats_val", "count", strconv.Itoa(after.CraftRepeats)),
+		})
 	}
 	if before.TurnInSummary != after.TurnInSummary {
-		changes = append(changes, ItemFieldChange{Field: "turnInSummary", Label: "交纳物品", Before: nonEmptyOr(before.TurnInSummary, "无"), After: nonEmptyOr(after.TurnInSummary, "无")})
+		changes = append(changes, ItemFieldChange{Field: "turnInSummary", Label: i18n.T(lang, "backup.leve_field_turnin"), Before: nonEmptyOr(before.TurnInSummary, noneStr), After: nonEmptyOr(after.TurnInSummary, noneStr)})
 	}
 	if before.RewardSummary != after.RewardSummary {
-		changes = append(changes, ItemFieldChange{Field: "rewardSummary", Label: "奖励道具池", Before: nonEmptyOr(before.RewardSummary, "无"), After: nonEmptyOr(after.RewardSummary, "无")})
+		changes = append(changes, ItemFieldChange{Field: "rewardSummary", Label: i18n.T(lang, "backup.leve_field_pool"), Before: nonEmptyOr(before.RewardSummary, noneStr), After: nonEmptyOr(after.RewardSummary, noneStr)})
 	}
 	return changes
 }
 
-func diffSingleAchievement(before, after compactAchievementRecord) []ItemFieldChange {
+func diffSingleAchievement(lang i18n.Lang, before, after compactAchievementRecord) []ItemFieldChange {
 	var changes []ItemFieldChange
+	noneStr := i18n.T(lang, "common.none")
 	if before.NameCn != after.NameCn {
-		changes = append(changes, ItemFieldChange{Field: "nameCn", Label: "成就名称", Before: before.NameCn, After: after.NameCn})
+		changes = append(changes, ItemFieldChange{Field: "nameCn", Label: i18n.T(lang, "backup.ach_field_name"), Before: before.NameCn, After: after.NameCn})
 	}
 	if before.DescriptionCn != after.DescriptionCn {
-		changes = append(changes, ItemFieldChange{Field: "descriptionCn", Label: "达成条件", Before: before.DescriptionCn, After: after.DescriptionCn})
+		changes = append(changes, ItemFieldChange{Field: "descriptionCn", Label: i18n.T(lang, "backup.ach_field_desc"), Before: before.DescriptionCn, After: after.DescriptionCn})
 	}
 	if before.Points != after.Points {
-		changes = append(changes, ItemFieldChange{Field: "points", Label: "成就点数", Before: fmt.Sprintf("%d点", before.Points), After: fmt.Sprintf("%d点", after.Points)})
+		changes = append(changes, ItemFieldChange{
+			Field:  "points",
+			Label:  i18n.T(lang, "backup.ach_field_points"),
+			Before: i18n.Tf(lang, "backup.ach_points", "pts", strconv.Itoa(before.Points)),
+			After:  i18n.Tf(lang, "backup.ach_points", "pts", strconv.Itoa(after.Points)),
+		})
 	}
 	if before.TitleMasculineCn != after.TitleMasculineCn {
-		changes = append(changes, ItemFieldChange{Field: "title", Label: "奖励称号", Before: nonEmptyOr(before.TitleMasculineCn, "无"), After: nonEmptyOr(after.TitleMasculineCn, "无")})
+		changes = append(changes, ItemFieldChange{Field: "title", Label: i18n.T(lang, "backup.ach_field_title"), Before: nonEmptyOr(before.TitleMasculineCn, noneStr), After: nonEmptyOr(after.TitleMasculineCn, noneStr)})
 	}
 	if before.RewardItemID != after.RewardItemID {
-		changes = append(changes, ItemFieldChange{Field: "rewardItem", Label: "奖励道具", Before: nonEmptyOr(before.RewardItemNameCn, "无"), After: nonEmptyOr(after.RewardItemNameCn, "无")})
+		changes = append(changes, ItemFieldChange{Field: "rewardItem", Label: i18n.T(lang, "backup.ach_field_reward_item"), Before: nonEmptyOr(before.RewardItemNameCn, noneStr), After: nonEmptyOr(after.RewardItemNameCn, noneStr)})
 	}
 	return changes
 }
@@ -1155,10 +1243,11 @@ func nonEmptyOr(s, fallback string) string {
 	return s
 }
 
-func summarizeCollectableTurnIns(list []gamedata.CollectableTurnInSource) string {
+func summarizeCollectableTurnIns(lang i18n.Lang, list []gamedata.CollectableTurnInSource) string {
 	if len(list) == 0 {
 		return ""
 	}
+	scripFallback := i18n.T(lang, "backup.scrip_fallback")
 	limit := min(2, len(list))
 	parts := make([]string, 0, limit+1)
 	for _, src := range list[:limit] {
@@ -1170,27 +1259,27 @@ func summarizeCollectableTurnIns(list []gamedata.CollectableTurnInSource) string
 			lo := src.Tiers[0]
 			hi := src.Tiers[len(src.Tiers)-1]
 			if len(src.Tiers) > 1 {
-				s += fmt.Sprintf(" %d+→%d/%d+→%d(%s)", lo.MinCollectability, lo.RewardAmount, hi.MinCollectability, hi.RewardAmount, nonEmptyOr(hi.RewardItemName, "票据"))
+				s += fmt.Sprintf(" %d+→%d/%d+→%d(%s)", lo.MinCollectability, lo.RewardAmount, hi.MinCollectability, hi.RewardAmount, nonEmptyOr(hi.RewardItemName, scripFallback))
 			} else {
-				s += fmt.Sprintf(" %d+→%d(%s)", hi.MinCollectability, hi.RewardAmount, nonEmptyOr(hi.RewardItemName, "票据"))
+				s += fmt.Sprintf(" %d+→%d(%s)", hi.MinCollectability, hi.RewardAmount, nonEmptyOr(hi.RewardItemName, scripFallback))
 			}
 		}
 		parts = append(parts, s)
 	}
 	if len(list) > limit {
-		parts = append(parts, fmt.Sprintf("等%d项", len(list)))
+		parts = append(parts, i18n.Tf(lang, "backup.etc_items", "count", strconv.Itoa(len(list))))
 	}
 	return strings.Join(parts, "; ")
 }
 
-func summarizeQuestRewards(q gamedata.QuestEntry) string {
+func summarizeQuestRewards(lang i18n.Lang, q gamedata.QuestEntry) string {
 	var parts []string
 	limit := min(3, len(q.RewardItems))
 	for _, ri := range q.RewardItems[:limit] {
 		parts = append(parts, fmt.Sprintf("%s×%d", ri.ItemName, ri.Count))
 	}
 	if len(q.RewardItems) > limit {
-		parts = append(parts, fmt.Sprintf("等%d件", len(q.RewardItems)))
+		parts = append(parts, i18n.Tf(lang, "backup.etc_pieces", "count", strconv.Itoa(len(q.RewardItems))))
 	}
 	if q.CurrencyRewardName != "" && q.CurrencyRewardCount > 0 {
 		parts = append(parts, fmt.Sprintf("%s×%d", q.CurrencyRewardName, q.CurrencyRewardCount))
@@ -1201,10 +1290,10 @@ func summarizeQuestRewards(q gamedata.QuestEntry) string {
 	if len(q.Unlocks) > 0 {
 		parts = append(parts, q.Unlocks[0].Label)
 	}
-	return strings.Join(parts, "、")
+	return strings.Join(parts, ", ")
 }
 
-func summarizeLeveTurnIns(lv gamedata.LeveEntry) string {
+func summarizeLeveTurnIns(lang i18n.Lang, lv gamedata.LeveEntry) string {
 	if len(lv.TurnInItems) == 0 {
 		return ""
 	}
@@ -1213,12 +1302,12 @@ func summarizeLeveTurnIns(lv gamedata.LeveEntry) string {
 		parts = append(parts, fmt.Sprintf("%s×%d", ti.ItemName, ti.Count))
 	}
 	if lv.CraftRepeats > 0 {
-		parts = append(parts, fmt.Sprintf("可追加%d轮", lv.CraftRepeats))
+		parts = append(parts, i18n.Tf(lang, "backup.leve_extra_rounds", "count", strconv.Itoa(lv.CraftRepeats)))
 	}
-	return strings.Join(parts, "、")
+	return strings.Join(parts, ", ")
 }
 
-func summarizeLeveRewards(lv gamedata.LeveEntry) string {
+func summarizeLeveRewards(lang i18n.Lang, lv gamedata.LeveEntry) string {
 	if len(lv.RewardGroups) == 0 {
 		return ""
 	}
@@ -1231,7 +1320,7 @@ func summarizeLeveRewards(lv gamedata.LeveEntry) string {
 		first := grp.Items[0]
 		s := fmt.Sprintf("%d%%:%s×%d", grp.ProbabilityPercent, first.ItemName, first.Count)
 		if len(grp.Items) > 1 {
-			s += fmt.Sprintf("等%d种", len(grp.Items))
+			s += i18n.Tf(lang, "backup.etc_kinds", "count", strconv.Itoa(len(grp.Items)))
 		}
 		parts = append(parts, s)
 	}
@@ -1243,7 +1332,7 @@ func boolPtr(b bool) *bool {
 	return &v
 }
 
-func (s *Service) buildLiveSnapshot(version string) *snapshotPayload {
+func (s *Service) buildLiveSnapshot(version string, lang i18n.Lang) *snapshotPayload {
 	var gatherCnt, purchCnt, colTurnInCnt int
 	items := make([]compactItemRecord, 0, len(s.store.ItemSummaries))
 	for _, it := range s.store.ItemSummaries {
@@ -1260,6 +1349,7 @@ func (s *Service) buildLiveSnapshot(version string) *snapshotPayload {
 			ID:                  it.ID,
 			NameCn:              it.NameCn,
 			NameEn:              it.NameEn,
+			NameJa:              it.NameJa,
 			IconID:              it.IconID,
 			ItemLevel:           it.ItemLevel,
 			EquipLevel:          it.EquipLevel,
@@ -1272,7 +1362,7 @@ func (s *Service) buildLiveSnapshot(version string) *snapshotPayload {
 			IsRetainerVenture:   boolPtr(it.IsRetainerVenture),
 			IsCollectableTurnIn: boolPtr(it.IsCollectableTurnIn),
 			IsCollectableReward: boolPtr(it.IsCollectableReward),
-			CollectableSummary:  summarizeCollectableTurnIns(s.store.CollectableTurnInsByItem[it.ID]),
+			CollectableSummary:  summarizeCollectableTurnIns(lang, s.store.CollectableTurnInsByItem[it.ID]),
 		})
 	}
 
@@ -1288,6 +1378,7 @@ func (s *Service) buildLiveSnapshot(version string) *snapshotPayload {
 			ID:            q.ID,
 			NameCn:        q.NameCn,
 			NameEn:        q.NameEn,
+			NameJa:        q.NameJa,
 			IconID:        q.IconID,
 			Level:         q.Level,
 			GenreName:     q.GenreName,
@@ -1296,7 +1387,7 @@ func (s *Service) buildLiveSnapshot(version string) *snapshotPayload {
 			IssuerName:    q.IssuerName,
 			GilReward:     q.GilReward,
 			ExpReward:     q.ExpReward,
-			RewardSummary: summarizeQuestRewards(q),
+			RewardSummary: summarizeQuestRewards(lang, q),
 			PrimaryItemID: primaryItem,
 			IsMSQ:         q.IsMSQ,
 			IsFeature:     q.IsFeature,
@@ -1314,6 +1405,7 @@ func (s *Service) buildLiveSnapshot(version string) *snapshotPayload {
 			ID:                 lv.ID,
 			NameCn:             lv.NameCn,
 			NameEn:             lv.NameEn,
+			NameJa:             lv.NameJa,
 			IconID:             iconID,
 			LeveKind:           lv.LeveKind,
 			LeveKindLabel:      lv.LeveKindLabel,
@@ -1322,8 +1414,8 @@ func (s *Service) buildLiveSnapshot(version string) *snapshotPayload {
 			ExpReward:          lv.ExpReward,
 			GilReward:          lv.GilReward,
 			CraftRepeats:       lv.CraftRepeats,
-			TurnInSummary:      summarizeLeveTurnIns(lv),
-			RewardSummary:      summarizeLeveRewards(lv),
+			TurnInSummary:      summarizeLeveTurnIns(lang, lv),
+			RewardSummary:      summarizeLeveRewards(lang, lv),
 		})
 	}
 
@@ -1337,6 +1429,7 @@ func (s *Service) buildLiveSnapshot(version string) *snapshotPayload {
 			ID:               a.ID,
 			NameCn:           a.NameCn,
 			NameEn:           a.NameEn,
+			NameJa:           a.NameJa,
 			DescriptionCn:    a.DescriptionCn,
 			Points:           a.Points,
 			IconID:           a.IconID,

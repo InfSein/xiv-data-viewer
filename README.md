@@ -1,28 +1,42 @@
 # XIV Data Viewer
 
-基于 [egoist/mygo](https://github.com/egoist/mygo) 构建的本地最终幻想XIV游戏数据解析展示桌面客户端，数据解包参考 [ffcafe/elpis](https://github.com/thewakingsands/elpis)。
+**Languages:** **简体中文** | [English](docs/README.en.md) | [日本語](docs/README.ja.md)
 
-![界面示例](docs/assets/398A26122664912D725C02F94870AD02.png)
+基于 [egoist/mygo](https://github.com/egoist/mygo) 构建的本地最终幻想XIV游戏数据解析展示桌面客户端。
+
+![界面示例](docs/assets/app-preview.zh.png)
+
+---
+
+## 下载使用
+
+请到 [Release](https://github.com/InfSein/xiv-data-viewer/releases) 中下载。
 
 ---
 
 ## 本地开发与构建
 
 ### 1. 环境准备
-需要 [Go](https://go.dev/)（1.27 或更高版本）及 [Node.js](https://nodejs.org/)（用于快捷 npm 脚本），克隆仓库后请初始化子模块 `git submodule update --init`。
+* [Go](https://go.dev/), 1.27+
+* [Node.js](https://nodejs.org/), 22+
 
-### 2. 本地调试
+### 2. 拉取仓库
 ```bash
-npm run dev
-```
-首次启动按界面引导填写本地国服或国际服客户端路径（至少一项）即可，后续可在「设置」中随时调整。
-
-### 3. 构建 Windows 客户端
-```bash
-npm run build
+git clone https://github.com/InfSein/xiv-data-viewer
+cd xiv-data-viewer
+git submodule update --init
 ```
 
-### 4. 自动化测试
-```bash
-npm test
-```
+### 3. 开发构建
+|   操作  |         指令        |
+| :----: | :-----------------: |
+|  本地调试 |  `npm run dev`  |
+| 构建客户端 | `npm run build` |
+| 自动化测试 |    `npm test`   |
+
+---
+
+## 参考项目
+
+* [ffcafe/elpis](https://github.com/thewakingsands/elpis)
+* [xivdev/EXDSchema](https://github.com/xivdev/EXDSchema)

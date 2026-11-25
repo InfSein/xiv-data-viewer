@@ -16,7 +16,7 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 	kitPanel(c, a.panelRadius(c)).Grow(1).Shrink(1).FillHeight().Children(func() {
 		item := a.selectedDetail
 		if item == nil {
-			kitEmpty(c, icoPackage, "选择物品查看详情", "点击左侧任意物品，可查看属性、制作配方、采集点与兑换来源。", nil)
+			kitEmpty(c, icoPackage, a.t("detail.empty_title"), a.t("detail.empty_desc"), nil)
 			return
 		}
 
@@ -28,7 +28,7 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 			Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
 			ui.Row(c).Gap(4).AlignItems(ui.Center).Grow(1).Shrink(1).ClipX().Children(func() {
 				if len(a.history) > 1 {
-					ui.Text(c, "最近").FontSize(t.text.micro).TextColor(t.muted).Shrink(0).SingleLine()
+					ui.Text(c, a.t("detail.recent")).FontSize(t.text.micro).TextColor(t.muted).Shrink(0).SingleLine()
 					maxHist := min(6, len(a.history))
 					for _, h := range a.history[:maxHist] {
 						isSel := h.id == a.selectedItemID
@@ -50,20 +50,20 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 							ui.Text(c, h.nameCn).FontSize(t.text.xs).FontWeight(fw).TextColor(fg).SingleLine()
 						})
 						if chip.Clicked() && !isSel {
-							a.selectItem(h.id)
+							a.jumpToItem(h.id)
 						}
 					}
 				} else {
-					numTextf(c, "物品 #%d", item.ID).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+					numText(c, a.tf("detail.item_id", "id", fmt.Sprintf("%d", item.ID))).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
 				}
 			})
 
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Shrink(0).Children(func() {
 				copied := a.copiedItemID == item.ID && time.Now().Before(a.copiedUntil)
-				copyLabel := "复制名称"
+				copyLabel := a.t("detail.copy_name")
 				copyIco := icoCopy
 				if copied {
-					copyLabel = "已复制"
+					copyLabel = a.t("detail.copied")
 					copyIco = icoCheck
 				}
 				if kitButton(c, "copy-item-name", copyLabel, btnOpts{variant: btnOutline, size: btnSizeSm, icon: copyIco}) {
@@ -79,7 +79,7 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 					if a.showHQ {
 						selIdx = 1
 					}
-					if nextIdx, chg := kitSegmentedTabs(c, "hq-toggle", selIdx, []string{"NQ", "HQ"}); chg {
+					if nextIdx, chg := kitSegmentedTabs(c, "hq-toggle", selIdx, []string{a.t("common.nq"), a.t("common.hq")}); chg {
 						a.showHQ = nextIdx == 1
 					}
 				}
@@ -133,11 +133,11 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 					}
 
 					if hasLeveTurnIn {
-						a.renderLeveSourcesSection(c, "理符交纳委托", item.TurnInForLeves, true)
+						a.renderLeveSourcesSection(c, a.t("detail.leve_turnins"), item.TurnInForLeves, true)
 					}
 
 					if hasLeveReward {
-						a.renderLeveSourcesSection(c, "理符奖励掉落", item.RewardedFromLeves, false)
+						a.renderLeveSourcesSection(c, a.t("detail.leve_rewards"), item.RewardedFromLeves, false)
 					}
 
 					if hasShops {
@@ -165,7 +165,7 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 						ui.Row(c).FillWidth().Padding(16, 0, 0, 0).Gap(8).AlignItems(ui.Center).
 							BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).Children(func() {
 							ui.Icon(c, icoInfo).Size(iconSm, iconSm).Shrink(0).TextColor(t.muted)
-							ui.Text(c, "暂无常规商店、制作、采集、任务或收藏品来源，可能出自副本掉落或限时活动。").
+							ui.Text(c, a.t("detail.no_source")).
 								FontSize(t.text.xs).TextColor(t.muted).Grow(1).Shrink(1)
 						})
 					}
@@ -190,13 +190,10 @@ func (a *App) renderDetailHero(c *ui.Context, item *gamedata.ItemDetail, isHQ bo
 					numTextf(c, "#%d", item.ID).FontSize(t.text.xs).TextColor(t.muted).Selectable()
 				})
 
-				if item.NameEn != "" || item.NameJa != "" {
+				if secLines := a.secondaryDataLines(item.NameCn, item.NameJa, item.NameEn); len(secLines) > 0 {
 					ui.Row(c).Gap(12).Wrap().Children(func() {
-						if item.NameEn != "" {
-							ui.Textf(c, "EN  %s", item.NameEn).FontSize(t.text.xs).TextColor(t.muted).Selectable()
-						}
-						if item.NameJa != "" {
-							ui.Textf(c, "JA  %s", item.NameJa).FontSize(t.text.xs).TextColor(t.muted).Selectable()
+						for _, sec := range secLines {
+							ui.Textf(c, "%s  %s", sec.badge, sec.text).FontSize(t.text.xs).TextColor(t.muted).Selectable()
 						}
 					})
 				}
@@ -204,10 +201,10 @@ func (a *App) renderDetailHero(c *ui.Context, item *gamedata.ItemDetail, isHQ bo
 				// 结构化内联元数据行：用纯排版替代原本 6+ 个无意义彩色胶囊
 				metaParts := []string{
 					item.CategoryName,
-					fmt.Sprintf("品级 %d", item.ItemLevel),
+					a.tf("detail.ilvl", "ilvl", fmt.Sprintf("%d", item.ItemLevel)),
 				}
 				if item.EquipLevel > 0 {
-					metaParts = append(metaParts, fmt.Sprintf("装备 Lv.%d", item.EquipLevel))
+					metaParts = append(metaParts, a.tf("detail.equip_lv", "lv", fmt.Sprintf("%d", item.EquipLevel)))
 				}
 				if item.EquipSlotName != "" {
 					metaParts = append(metaParts, item.EquipSlotName)
@@ -223,27 +220,27 @@ func (a *App) renderDetailHero(c *ui.Context, item *gamedata.ItemDetail, isHQ bo
 				}
 				var specialFlags []flagTag
 				if !item.IsTradable {
-					specialFlags = append(specialFlags, flagTag{"不可交易", pillNegative})
+					specialFlags = append(specialFlags, flagTag{a.t("detail.untradable"), pillNegative})
 				}
 				if !item.IsMarketable {
-					specialFlags = append(specialFlags, flagTag{"不可上架", pillWarning})
+					specialFlags = append(specialFlags, flagTag{a.t("detail.unmarketable"), pillWarning})
 				}
 				if !item.IsSellable {
-					specialFlags = append(specialFlags, flagTag{"不可出售", pillNegative})
+					specialFlags = append(specialFlags, flagTag{a.t("detail.unsellable"), pillNegative})
 				}
 				if item.IsUnique {
-					specialFlags = append(specialFlags, flagTag{"独占", pillWarning})
+					specialFlags = append(specialFlags, flagTag{a.t("detail.unique"), pillWarning})
 				}
 				if item.IsCollectable {
-					specialFlags = append(specialFlags, flagTag{"收藏品", pillAccent})
+					specialFlags = append(specialFlags, flagTag{a.t("detail.collectable"), pillAccent})
 				}
 				if item.CanAetherialReduce {
-					specialFlags = append(specialFlags, flagTag{"可精选", pillNeutral})
+					specialFlags = append(specialFlags, flagTag{a.t("detail.aetherial_reduce"), pillNeutral})
 				}
 				if item.IsTradable && item.IsMarketable {
-					metaParts = append(metaParts, "可交易 · 可上架市场")
+					metaParts = append(metaParts, a.t("detail.tradable_marketable"))
 				} else if item.IsTradable {
-					metaParts = append(metaParts, "可交易")
+					metaParts = append(metaParts, a.t("detail.tradable"))
 				}
 
 				ui.Row(c).Gap(6).AlignItems(ui.Center).Wrap().Children(func() {
@@ -264,10 +261,10 @@ func (a *App) renderDetailHero(c *ui.Context, item *gamedata.ItemDetail, isHQ bo
 
 		// 三栏核心参数概览条（单层轻底色 + 1px 竖线分隔）
 		showRepair := item.IsEquipment && item.RepairClassJobName != ""
-		thirdLabel := "获取途径"
+		thirdLabel := a.t("detail.obtain_methods")
 		thirdValue := ""
 		if showRepair {
-			thirdLabel = "修理职业"
+			thirdLabel = a.t("detail.repair_job")
 			thirdValue = item.RepairClassJobName
 			if item.RepairItemName != "" {
 				thirdValue += fmt.Sprintf("（%s）", item.RepairItemName)
@@ -275,50 +272,50 @@ func (a *App) renderDetailHero(c *ui.Context, item *gamedata.ItemDetail, isHQ bo
 		} else {
 			var srcParts []string
 			if item.IsGilShop {
-				srcParts = append(srcParts, "金币商店")
+				srcParts = append(srcParts, a.t("detail.src_gil"))
 			}
 			if item.IsSpecialShop {
-				srcParts = append(srcParts, "特殊兑换")
+				srcParts = append(srcParts, a.t("detail.src_special"))
 			}
 			if item.IsCraftable {
-				srcParts = append(srcParts, "配方制作")
+				srcParts = append(srcParts, a.t("detail.src_craft"))
 			}
 			if item.IsGatherable {
-				srcParts = append(srcParts, "采集/垂钓")
+				srcParts = append(srcParts, a.t("detail.src_gather"))
 			}
 			if item.IsRetainerVenture {
-				srcParts = append(srcParts, "雇员探险")
+				srcParts = append(srcParts, a.t("detail.src_retainer"))
 			}
 			if len(item.CollectableTurnIns) > 0 {
-				srcParts = append(srcParts, "收藏品交纳")
+				srcParts = append(srcParts, a.t("detail.src_collectable_turnin"))
 			}
 			if len(item.CollectableRewards) > 0 {
-				srcParts = append(srcParts, "收藏品回报")
+				srcParts = append(srcParts, a.t("detail.src_collectable_reward"))
 			}
 			if len(item.RewardedFromQuests) > 0 {
-				srcParts = append(srcParts, "任务奖励")
+				srcParts = append(srcParts, a.t("detail.src_quest"))
 			}
 			if len(item.TurnInForLeves) > 0 || len(item.RewardedFromLeves) > 0 {
-				srcParts = append(srcParts, "理符委托")
+				srcParts = append(srcParts, a.t("detail.src_leve"))
 			}
 			if hasAch {
-				srcParts = append(srcParts, "成就奖励")
+				srcParts = append(srcParts, a.t("detail.src_achievement"))
 			}
 			if len(srcParts) == 0 {
-				thirdValue = "副本掉落 / 活动奖励"
+				thirdValue = a.t("detail.src_dungeon_event")
 			} else {
 				thirdValue = strings.Join(srcParts, " · ")
 			}
 		}
 
-		sellStr := "不可出售"
+		sellStr := a.t("detail.unsellable")
 		if item.IsSellable {
-			sellStr = fmt.Sprintf("%s 金币", formatInt(item.PriceLow))
+			sellStr = a.tf("common.gil_amount", "amount", formatInt(item.PriceLow))
 		}
 
 		kitBlock(c, ui.Row(c).FillWidth().Clip(), toneCard).Children(func() {
-			drawMetricSplitCell(c, "堆叠上限", fmt.Sprintf("%s 个", formatInt(item.StackSize)), false)
-			drawMetricSplitCell(c, "出售价格", sellStr, true)
+			drawMetricSplitCell(c, a.t("detail.stack_size"), a.tf("common.count_pieces", "count", formatInt(item.StackSize)), false)
+			drawMetricSplitCell(c, a.t("detail.sell_price"), sellStr, true)
 			drawMetricSplitCell(c, thirdLabel, thirdValue, true)
 		})
 	})
@@ -340,13 +337,13 @@ func (a *App) renderEquipmentStatsSection(c *ui.Context, st *gamedata.EquipmentS
 	t := themeOf(c)
 	meta := ""
 	if st.MateriaSlotCount > 0 {
-		meld := "不可禁断"
+		meld := a.t("detail.meld_no")
 		if st.IsAdvancedMeldingPermitted {
-			meld = "可禁断"
+			meld = a.t("detail.meld_yes")
 		}
-		meta = fmt.Sprintf("魔晶石 %d 孔 · %s", st.MateriaSlotCount, meld)
+		meta = a.tf("detail.materia_meta", "count", fmt.Sprintf("%d", st.MateriaSlotCount), "meld", meld)
 	}
-	drawDetailSection(c, "装备属性", meta, nil, func() {
+	drawDetailSection(c, a.t("detail.equip_stats"), meta, nil, func() {
 		ui.Column(c).FillWidth().Gap(10).Children(func() {
 			type coreStat struct {
 				label string
@@ -360,52 +357,52 @@ func (a *App) renderEquipmentStatsSection(c *ui.Context, st *gamedata.EquipmentS
 				if isHQ && st.DamagePhysHQ > st.DamagePhys {
 					v, sub = st.DamagePhysHQ, fmt.Sprintf("NQ %d", st.DamagePhys)
 				}
-				core = append(core, coreStat{"物理基本性能", fmt.Sprintf("%d", v), sub, t.foreground})
+				core = append(core, coreStat{a.t("detail.phys_dmg"), fmt.Sprintf("%d", v), sub, t.foreground})
 			}
 			if st.DamageMag > 0 {
 				v, sub := st.DamageMag, ""
 				if isHQ && st.DamageMagHQ > st.DamageMag {
 					v, sub = st.DamageMagHQ, fmt.Sprintf("NQ %d", st.DamageMag)
 				}
-				core = append(core, coreStat{"魔法基本性能", fmt.Sprintf("%d", v), sub, t.infoText})
+				core = append(core, coreStat{a.t("detail.mag_dmg"), fmt.Sprintf("%d", v), sub, t.infoText})
 			}
 			if st.AutoAttack > 0 {
 				v, sub := st.AutoAttack, ""
 				if isHQ && st.AutoAttackHQ > st.AutoAttack {
 					v, sub = st.AutoAttackHQ, fmt.Sprintf("NQ %.2f", st.AutoAttack)
 				}
-				core = append(core, coreStat{"物理自动攻击", fmt.Sprintf("%.2f", v), sub, t.foreground})
+				core = append(core, coreStat{a.t("detail.auto_attack"), fmt.Sprintf("%.2f", v), sub, t.foreground})
 			}
 			if st.DelaySec > 0 {
-				core = append(core, coreStat{"攻击间隔", fmt.Sprintf("%.2fs", st.DelaySec), "", t.foreground})
+				core = append(core, coreStat{a.t("detail.delay"), fmt.Sprintf("%.2fs", st.DelaySec), "", t.foreground})
 			}
 			if st.BlockRate > 0 {
 				v, sub := st.BlockRate, ""
 				if isHQ && st.BlockRateHQ > st.BlockRate {
 					v, sub = st.BlockRateHQ, fmt.Sprintf("NQ %d", st.BlockRate)
 				}
-				core = append(core, coreStat{"格挡发动力", fmt.Sprintf("%d", v), sub, t.foreground})
+				core = append(core, coreStat{a.t("detail.block_rate"), fmt.Sprintf("%d", v), sub, t.foreground})
 			}
 			if st.Block > 0 {
 				v, sub := st.Block, ""
 				if isHQ && st.BlockHQ > st.Block {
 					v, sub = st.BlockHQ, fmt.Sprintf("NQ %d", st.Block)
 				}
-				core = append(core, coreStat{"格挡性能", fmt.Sprintf("%d", v), sub, t.foreground})
+				core = append(core, coreStat{a.t("detail.block_str"), fmt.Sprintf("%d", v), sub, t.foreground})
 			}
 			if st.DefensePhys > 0 {
 				v, sub := st.DefensePhys, ""
 				if isHQ && st.DefensePhysHQ > st.DefensePhys {
 					v, sub = st.DefensePhysHQ, fmt.Sprintf("NQ %d", st.DefensePhys)
 				}
-				core = append(core, coreStat{"物理防御力", fmt.Sprintf("%d", v), sub, t.foreground})
+				core = append(core, coreStat{a.t("detail.phys_def"), fmt.Sprintf("%d", v), sub, t.foreground})
 			}
 			if st.DefenseMag > 0 {
 				v, sub := st.DefenseMag, ""
 				if isHQ && st.DefenseMagHQ > st.DefenseMag {
 					v, sub = st.DefenseMagHQ, fmt.Sprintf("NQ %d", st.DefenseMag)
 				}
-				core = append(core, coreStat{"魔法防御力", fmt.Sprintf("%d", v), sub, t.foreground})
+				core = append(core, coreStat{a.t("detail.mag_def"), fmt.Sprintf("%d", v), sub, t.foreground})
 			}
 
 			if len(core) > 0 {
@@ -455,29 +452,29 @@ func (a *App) renderEquipmentStatsSection(c *ui.Context, st *gamedata.EquipmentS
 
 func (a *App) renderEquipmentAttrsSection(c *ui.Context, attr *gamedata.EquipmentAttributes) {
 	t := themeOf(c)
-	drawDetailSection(c, "装备特性", "", nil, func() {
-		desynthTxt := "不可分解"
+	drawDetailSection(c, a.t("detail.equip_attrs"), "", nil, func() {
+		desynthTxt := a.t("detail.desynth_no")
 		if attr.CanDesynth {
-			desynthTxt = "可分解"
+			desynthTxt = a.t("detail.desynth_yes")
 			if attr.DesynthClassJobName != "" {
-				desynthTxt = fmt.Sprintf("可分解（%s）", attr.DesynthClassJobName)
+				desynthTxt = a.tf("detail.desynth_job", "job", attr.DesynthClassJobName)
 			}
 		}
-		dyeTxt := "不可染色"
+		dyeTxt := a.t("detail.dye_no")
 		if attr.DyeCount > 0 {
-			dyeTxt = fmt.Sprintf("可染色（%d通道）", attr.DyeCount)
+			dyeTxt = a.tf("detail.dye_yes", "count", fmt.Sprintf("%d", attr.DyeCount))
 		}
 		entries := []struct {
 			text string
 			pos  bool
 		}{
-			{boolText(attr.CanExtractMateria, "可精制魔晶石", "不可精制"), attr.CanExtractMateria},
-			{boolText(attr.IsProjectable, "可投影", "不可投影"), attr.IsProjectable},
+			{boolText(attr.CanExtractMateria, a.t("detail.extract_yes"), a.t("detail.extract_no")), attr.CanExtractMateria},
+			{boolText(attr.IsProjectable, a.t("detail.glamour_yes"), a.t("detail.glamour_no")), attr.IsProjectable},
 			{desynthTxt, attr.CanDesynth},
 			{dyeTxt, attr.DyeCount > 0},
-			{boolText(attr.IsCrestWorthy, "可印部队徽记", "不可印徽记"), attr.IsCrestWorthy},
-			{boolText(attr.CanStoreInGlamourDresser, "可入投影台", "不可入投影台"), attr.CanStoreInGlamourDresser},
-			{boolText(attr.CanStoreInArmoire, "可入收藏柜", "不可入收藏柜"), attr.CanStoreInArmoire},
+			{boolText(attr.IsCrestWorthy, a.t("detail.crest_yes"), a.t("detail.crest_no")), attr.IsCrestWorthy},
+			{boolText(attr.CanStoreInGlamourDresser, a.t("detail.dresser_yes"), a.t("detail.dresser_no")), attr.CanStoreInGlamourDresser},
+			{boolText(attr.CanStoreInArmoire, a.t("detail.armoire_yes"), a.t("detail.armoire_no")), attr.CanStoreInArmoire},
 		}
 
 		// 以清爽无框内联清单呈现布尔特性，避免 7 个套娃卡片 + 7 个胶囊的视觉轰炸
@@ -500,27 +497,32 @@ func (a *App) renderEquipmentAttrsSection(c *ui.Context, attr *gamedata.Equipmen
 func (a *App) renderConsumableSection(c *ui.Context, item *gamedata.ItemDetail, isHQ bool) {
 	t := themeOf(c)
 	ce := item.ConsumableEffect
-	durTxt := fmt.Sprintf("%d秒", ce.DurationSec)
+	durTxt := a.tf("detail.dur_sec", "sec", ce.DurationSec)
 	if ce.DurationSec/60 > 0 {
-		durTxt = fmt.Sprintf("%d分", ce.DurationSec/60)
+		durTxt = a.tf("detail.dur_min", "min", ce.DurationSec/60)
 	}
-	meta := fmt.Sprintf("持续 %s", durTxt)
+	meta := a.tf("detail.consumable_meta", "dur", durTxt)
 	if ce.CooldownSec > 0 {
 		cd := ce.CooldownSec
 		if isHQ {
 			cd = ce.CooldownHQSec
 		}
-		meta += fmt.Sprintf(" · 复唱 %d秒", cd)
+		meta += a.tf("detail.consumable_recast", "sec", cd)
 	}
 	var trailing func()
 	if ce.ExpBonusPercent > 0 {
-		expTxt := fmt.Sprintf("经验值 +%d%%", ce.ExpBonusPercent)
+		expTxt := a.tf("detail.exp_bonus", "pct", ce.ExpBonusPercent)
 		trailing = func() {
 			drawPill(c, expTxt, pillPositive)
 		}
 	}
 
-	drawDetailSection(c, ce.TypeName+"效果", meta, trailing, func() {
+	sectionTitle := a.t("detail.consumable_title_food")
+	if ce.TypeName == a.t("gamedata.consume_med") || ce.TypeName == "药品" || ce.TypeName == "Medicine" || ce.TypeName == "薬品" {
+		sectionTitle = a.t("detail.consumable_title_med")
+	}
+
+	drawDetailSection(c, sectionTitle, meta, trailing, func() {
 		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 			for _, p := range ce.Params {
 				val, mx := p.ValueNQ, p.MaxNQ
@@ -529,7 +531,7 @@ func (a *App) renderConsumableSection(c *ui.Context, item *gamedata.ItemDetail, 
 				}
 				mainStr := fmt.Sprintf("+%d", val)
 				if p.IsRelative {
-					mainStr = fmt.Sprintf("+%d%%（上限 %d）", val, mx)
+					mainStr = a.tf("detail.consumable_cap", "val", val, "max", mx)
 				}
 				kitBlock(c, ui.Column(c).MinWidth(200).Grow(1).Shrink(1).Padding(10, 12).Gap(3), toneCard).Children(func() {
 					ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Baseline).Gap(8).Children(func() {
@@ -541,10 +543,10 @@ func (a *App) renderConsumableSection(c *ui.Context, item *gamedata.ItemDetail, 
 						if isHQ {
 							alt = fmt.Sprintf("NQ +%d", p.ValueNQ)
 							if p.IsRelative {
-								alt = fmt.Sprintf("NQ +%d%%（上限 %d）", p.ValueNQ, p.MaxNQ)
+								alt = a.tf("detail.consumable_nq_cap", "val", p.ValueNQ, "max", p.MaxNQ)
 							}
 						} else if p.IsRelative {
-							alt = fmt.Sprintf("HQ +%d%%（上限 %d）", p.ValueHQ, p.MaxHQ)
+							alt = a.tf("detail.consumable_hq_cap", "val", p.ValueHQ, "max", p.MaxHQ)
 						}
 						numText(c, alt).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 					}
@@ -556,7 +558,7 @@ func (a *App) renderConsumableSection(c *ui.Context, item *gamedata.ItemDetail, 
 
 func (a *App) renderRewardAchievementsSection(c *ui.Context, achs []gamedata.AchievementEntry) {
 	t := themeOf(c)
-	drawDetailSection(c, "成就奖励", fmt.Sprintf("%d 项", len(achs)), nil, func() {
+	drawDetailSection(c, a.t("detail.ach_rewards"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(achs))), nil, func() {
 		ui.Column(c).FillWidth().Children(func() {
 			for i, ach := range achs {
 				if i > 0 {
@@ -568,7 +570,7 @@ func (a *App) renderRewardAchievementsSection(c *ui.Context, achs []gamedata.Ach
 						ui.Column(c).Gap(2).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 							ui.Row(c).Gap(8).AlignItems(ui.Baseline).Wrap().Children(func() {
 								ui.Text(c, ach.NameCn).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
-								numTextf(c, "#%d · %d 点", ach.ID, ach.Points).FontSize(t.text.micro).TextColor(t.muted)
+								numText(c, a.tf("detail.ach_points_meta", "id", fmt.Sprintf("%d", ach.ID), "pts", fmt.Sprintf("%d", ach.Points))).FontSize(t.text.micro).TextColor(t.muted)
 							})
 							ui.Text(c, ach.DescriptionCn).FontSize(t.text.xs).TextColor(t.muted)
 						})
@@ -595,7 +597,7 @@ func shopTypePillKind(shopType string) pillKind {
 
 func (a *App) renderShopsSection(c *ui.Context, itemName string, shops []gamedata.ShopPurchaseSource) {
 	t := themeOf(c)
-	drawDetailSection(c, "商店兑换", fmt.Sprintf("%d 项", len(shops)), nil, func() {
+	drawDetailSection(c, a.t("detail.shops"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(shops))), nil, func() {
 		ui.Column(c).FillWidth().Children(func() {
 			for sIdx, shop := range shops {
 				if sIdx > 0 {
@@ -608,9 +610,9 @@ func (a *App) renderShopsSection(c *ui.Context, itemName string, shops []gamedat
 						ui.Row(c).Gap(6).AlignItems(ui.Center).Wrap().Children(func() {
 							drawPill(c, shop.ShopTypeLabel, shopTypePillKind(shop.ShopType))
 							ui.Text(c, shop.ShopName).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
-							numTextf(c, "产出 ×%d", shop.ReceiveAmount).FontSize(t.text.xs).TextColor(t.muted)
+							numText(c, a.tf("detail.shop_receive", "count", fmt.Sprintf("%d", shop.ReceiveAmount))).FontSize(t.text.xs).TextColor(t.muted)
 							if shop.ReceiveHQ {
-								drawPill(c, "HQ", pillWarning)
+								drawPill(c, a.t("common.hq"), pillWarning)
 							}
 						})
 
@@ -630,7 +632,7 @@ func (a *App) renderShopsSection(c *ui.Context, itemName string, shops []gamedat
 									continue
 								}
 								btn := ui.ButtonBase(c.Key(fmt.Sprintf("cost-%d-%d-%d", shop.ShopID, sIdx, cIdx))).
-									Label("查看 "+cost.NameCn).
+									Label(a.tf("common.view_item", "name", cost.NameCn)).
 									Padding(3, 8).Radius(t.radius.md).Background(t.card).Border(hairline, t.border).
 									Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 								if btn.Hovered() {
@@ -646,14 +648,14 @@ func (a *App) renderShopsSection(c *ui.Context, itemName string, shops []gamedat
 									})
 								})
 								if btn.Clicked() {
-									a.selectItem(cost.ItemID)
+									a.jumpToItem(cost.ItemID)
 								}
 							}
 						})
 					})
 
 					// 第二行：售卖 NPC 与坐标按钮
-					a.renderVendorNpcChips(c, fmt.Sprintf("npcmap-%d-%d", shop.ShopID, sIdx), fmt.Sprintf("%s · %s", shop.ShopName, itemName), "通用柜台 / 住宅区或军需官兑换", shop.NPCs)
+					a.renderVendorNpcChips(c, fmt.Sprintf("npcmap-%d-%d", shop.ShopID, sIdx), fmt.Sprintf("%s · %s", shop.ShopName, itemName), a.t("detail.shop_generic_npc"), shop.NPCs)
 				})
 			}
 		})
@@ -671,7 +673,7 @@ func (a *App) renderMapLocationBtn(c *ui.Context, key, title, subtitle string, l
 	}
 	if loc.MapPath != "" {
 		coordLbl := fmt.Sprintf("%s (%.1f, %.1f)", locTxt, loc.CoordX, loc.CoordY)
-		btn := ui.ButtonBase(c.Key(key)).Label("查看地图："+coordLbl).
+		btn := ui.ButtonBase(c.Key(key)).Label(a.tf("common.view_map", "coord", coordLbl)).
 			Height(24).Padding(0, 8).Radius(t.radius.md).Gap(5).
 			Background(t.card).Border(hairline, t.border).AlignItems(ui.Center).
 			Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
@@ -720,7 +722,7 @@ func (a *App) renderVendorNpcChips(c *ui.Context, keyPrefix, subtitle, emptyHint
 			if npc.MapPath != "" {
 				coordLbl := fmt.Sprintf("%s  (%.1f, %.1f)", txt, npc.CoordX, npc.CoordY)
 				btn := ui.ButtonBase(c.Key(fmt.Sprintf("%s-%d", keyPrefix, npc.NpcID))).
-					Label("查看地图："+coordLbl).
+					Label(a.tf("common.view_map", "coord", coordLbl)).
 					Height(24).Padding(0, 8).Radius(t.radius.md).Gap(5).
 					Background(t.card).AlignItems(ui.Center).
 					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
@@ -755,7 +757,7 @@ func (a *App) renderVendorNpcChips(c *ui.Context, keyPrefix, subtitle, emptyHint
 			}
 		}
 		if len(npcs) > maxShow {
-			numTextf(c, "等共 %d 名 NPC", len(npcs)).FontSize(t.text.micro).TextColor(t.muted)
+			numText(c, a.tf("detail.more_npcs", "count", fmt.Sprintf("%d", len(npcs)))).FontSize(t.text.micro).TextColor(t.muted)
 		}
 	})
 }
@@ -773,7 +775,7 @@ func collectableKindPill(kind string) pillKind {
 
 func (a *App) renderCollectableTurnInsSection(c *ui.Context, itemName string, list []gamedata.CollectableTurnInSource) {
 	t := themeOf(c)
-	drawDetailSection(c, "收藏品交易交纳", fmt.Sprintf("%d 项", len(list)), nil, func() {
+	drawDetailSection(c, a.t("detail.col_turnin_title"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(list))), nil, func() {
 		ui.Column(c).FillWidth().Children(func() {
 			for idx, src := range list {
 				if idx > 0 {
@@ -788,7 +790,7 @@ func (a *App) renderCollectableTurnInsSection(c *ui.Context, itemName string, li
 								ui.Text(c, src.GroupName).FontSize(t.text.xs).TextColor(t.muted)
 							}
 							if src.IsBonus {
-								drawPill(c, "需求奖励加成", pillWarning)
+								drawPill(c, a.t("detail.col_bonus"), pillWarning)
 							}
 						})
 						var metas []string
@@ -798,10 +800,10 @@ func (a *App) renderCollectableTurnInsSection(c *ui.Context, itemName string, li
 							metas = append(metas, fmt.Sprintf("Lv.%d", src.LevelMin))
 						}
 						if src.Stars > 0 {
-							metas = append(metas, fmt.Sprintf("%d星", src.Stars))
+							metas = append(metas, a.tf("common.stars", "stars", fmt.Sprintf("%d", src.Stars)))
 						}
 						if src.RequiredQuestName != "" {
-							metas = append(metas, "前置："+src.RequiredQuestName)
+							metas = append(metas, a.tf("detail.col_req_quest", "name", src.RequiredQuestName))
 						}
 						if len(metas) > 0 {
 							numText(c, strings.Join(metas, " · ")).FontSize(t.text.xs).TextColor(t.muted)
@@ -816,12 +818,12 @@ func (a *App) renderCollectableTurnInsSection(c *ui.Context, itemName string, li
 									cell.BorderWidth(0, 0, 0, hairline).BorderColor(t.border)
 								}
 								cell.Children(func() {
-									numTextf(c, "%s · 价值 %d+", tier.Label, tier.MinCollectability).
+									numText(c, a.tf("detail.col_tier_val", "tier", tier.Label, "val", fmt.Sprintf("%d", tier.MinCollectability))).
 										FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 
 									if tier.RewardItemID > 0 && tier.RewardAmount > 0 {
 										btn := ui.ButtonBase(c.Key(fmt.Sprintf("coltier-%d-%d-%d", src.ShopID, idx, ti))).
-											Label("查看 "+tier.RewardItemName).Padding(2, 4).Radius(t.radius.sm).
+											Label(a.tf("common.view_item", "name", tier.RewardItemName)).Padding(2, 4).Radius(t.radius.sm).
 											Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 										if btn.Hovered() {
 											btn.Background(t.tint(1.5))
@@ -836,7 +838,7 @@ func (a *App) renderCollectableTurnInsSection(c *ui.Context, itemName string, li
 											})
 										})
 										if btn.Clicked() {
-											a.selectItem(tier.RewardItemID)
+											a.jumpToItem(tier.RewardItemID)
 										}
 									}
 
@@ -845,18 +847,18 @@ func (a *App) renderCollectableTurnInsSection(c *ui.Context, itemName string, li
 										extras = append(extras, fmt.Sprintf("%s ×%d", tier.SecondaryItemName, tier.SecondaryAmount))
 									}
 									if tier.GilReward > 0 {
-										extras = append(extras, fmt.Sprintf("%s 金币", formatInt(tier.GilReward)))
+										extras = append(extras, a.tf("common.gil_amount", "amount", formatInt(tier.GilReward)))
 									}
 									if tier.Satisfaction > 0 {
-										extras = append(extras, fmt.Sprintf("信赖度 +%d", tier.Satisfaction))
+										extras = append(extras, a.tf("detail.col_satisfaction_up", "val", fmt.Sprintf("%d", tier.Satisfaction)))
 									}
 									if tier.ExpReward > 0 {
-										extras = append(extras, fmt.Sprintf("%s EXP", formatInt(tier.ExpReward)))
+										extras = append(extras, a.tf("common.exp_amount", "amount", formatInt(tier.ExpReward)))
 									} else if tier.ExpRatio > 0 {
-										extras = append(extras, fmt.Sprintf("EXP 系数 %d", tier.ExpRatio))
+										extras = append(extras, a.tf("detail.col_exp_ratio", "ratio", fmt.Sprintf("%d", tier.ExpRatio)))
 									}
 									if tier.Points > 0 {
-										extras = append(extras, fmt.Sprintf("技巧点 %d", tier.Points))
+										extras = append(extras, a.tf("detail.col_points", "pts", fmt.Sprintf("%d", tier.Points)))
 									}
 									if len(extras) > 0 {
 										numText(c, strings.Join(extras, " · ")).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
@@ -875,11 +877,11 @@ func (a *App) renderCollectableTurnInsSection(c *ui.Context, itemName string, li
 
 func (a *App) renderCollectableRewardsSection(c *ui.Context, itemName string, list []gamedata.CollectableRewardSource) {
 	t := themeOf(c)
-	drawDetailSection(c, "通过收藏品交纳获得", fmt.Sprintf("%d 项", len(list)), nil, func() {
+	drawDetailSection(c, a.t("detail.col_reward_title"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(list))), nil, func() {
 		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 			for idx, rew := range list {
 				btn := ui.ButtonBase(c.Key(fmt.Sprintf("colrew-%d-%d", rew.TurnInItemID, idx))).
-					Label("查看 "+rew.TurnInItemName).MinWidth(250).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
+					Label(a.tf("common.view_item", "name", rew.TurnInItemName)).MinWidth(250).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
 					Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
 					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 				if btn.Hovered() {
@@ -892,7 +894,7 @@ func (a *App) renderCollectableRewardsSection(c *ui.Context, itemName string, li
 							ui.Text(c, rew.TurnInItemName).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
 							sub := rew.ShopName
 							if rew.MinCollectability > 0 {
-								sub += fmt.Sprintf(" · 价值 %d+", rew.MinCollectability)
+								sub += a.tf("detail.col_min_val", "val", fmt.Sprintf("%d", rew.MinCollectability))
 							}
 							numText(c, sub).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 						})
@@ -904,7 +906,7 @@ func (a *App) renderCollectableRewardsSection(c *ui.Context, itemName string, li
 					numText(c, amtStr).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
 				})
 				if btn.Clicked() {
-					a.selectItem(rew.TurnInItemID)
+					a.jumpToItem(rew.TurnInItemID)
 				}
 			}
 		})
@@ -913,11 +915,11 @@ func (a *App) renderCollectableRewardsSection(c *ui.Context, itemName string, li
 
 func (a *App) renderQuestSourcesSection(c *ui.Context, quests []gamedata.ItemQuestSource) {
 	t := themeOf(c)
-	drawDetailSection(c, "任务奖励", fmt.Sprintf("%d 项", len(quests)), nil, func() {
+	drawDetailSection(c, a.t("detail.quest_rewards"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(quests))), nil, func() {
 		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 			for idx, qs := range quests {
 				btn := ui.ButtonBase(c.Key(fmt.Sprintf("item-qsrc-%d-%d", qs.QuestID, idx))).
-					Label("查看任务 "+qs.NameCn).MinWidth(240).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
+					Label(a.tf("common.view_quest", "name", qs.NameCn)).MinWidth(240).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
 					Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
 					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 				if btn.Hovered() {
@@ -947,11 +949,11 @@ func (a *App) renderQuestSourcesSection(c *ui.Context, quests []gamedata.ItemQue
 
 func (a *App) renderLeveSourcesSection(c *ui.Context, title string, leves []gamedata.ItemLeveSource, isTurnIn bool) {
 	t := themeOf(c)
-	drawDetailSection(c, title, fmt.Sprintf("%d 项", len(leves)), nil, func() {
+	drawDetailSection(c, title, a.tf("common.items_count", "count", fmt.Sprintf("%d", len(leves))), nil, func() {
 		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 			for idx, ls := range leves {
 				btn := ui.ButtonBase(c.Key(fmt.Sprintf("item-lsrc-%t-%d-%d", isTurnIn, ls.LeveID, idx))).
-					Label("查看理符 "+ls.NameCn).MinWidth(240).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
+					Label(a.tf("common.view_leve", "name", ls.NameCn)).MinWidth(240).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
 					Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
 					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 				if btn.Hovered() {
@@ -1003,37 +1005,37 @@ func (a *App) renderRecipesSection(c *ui.Context, item *gamedata.ItemDetail) {
 		}
 	}
 
-	meta := fmt.Sprintf("%d 种职业", len(item.Recipes))
+	meta := a.tf("detail.recipes_jobs_meta", "count", len(item.Recipes))
 	if len(item.Recipes) == 1 {
 		meta = ""
 	}
-	drawDetailSection(c, "制作配方", meta, trailing, func() {
+	drawDetailSection(c, a.t("detail.recipes_title"), meta, trailing, func() {
 		ui.Column(c).FillWidth().Gap(12).Children(func() {
 			// 配方头部摘要
 			ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Center).Children(func() {
 				a.drawGameIcon(c, cur.CraftJobIconID, false, 32, t.radius.md)
 				ui.Column(c).Gap(3).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 					ui.Row(c).Gap(8).AlignItems(ui.Baseline).Wrap().Children(func() {
-						ui.Textf(c, "%s · Lv.%d%s", cur.CraftJobName, cur.RecipeLevel, formatStars(cur.Stars)).
+						ui.Textf(c, "%s · Lv.%d%s", cur.CraftJobName, cur.RecipeLevel, formatStarsForLang(a.Language(), cur.Stars)).
 							FontSize(t.text.sm).FontWeight(600).TextColor(t.foreground)
 						if cur.ResultAmount > 1 {
-							numTextf(c, "单次产出 ×%d", cur.ResultAmount).FontSize(t.text.xs).FontWeight(500).TextColor(t.successText)
+							numText(c, a.tf("detail.recipe_yield", "count", cur.ResultAmount)).FontSize(t.text.xs).FontWeight(500).TextColor(t.successText)
 						}
 						numTextf(c, "Recipe #%d", cur.ID).FontSize(t.text.micro).TextColor(t.muted)
 					})
 					if cur.SecretRecipeBookName != "" || cur.IsSpecializationRequired || cur.IsExpert || cur.CanQuickSynth {
 						ui.Row(c).Gap(6).AlignItems(ui.Center).Wrap().Children(func() {
 							if cur.SecretRecipeBookName != "" {
-								drawPill(c, "秘籍："+cur.SecretRecipeBookName, pillWarning)
+								drawPill(c, a.tf("detail.recipe_book", "name", cur.SecretRecipeBookName), pillWarning)
 							}
 							if cur.IsSpecializationRequired {
-								drawPill(c, "需专家之证", pillNegative)
+								drawPill(c, a.t("detail.recipe_specialist"), pillNegative)
 							}
 							if cur.IsExpert {
-								drawPill(c, "高难配方", pillWarning)
+								drawPill(c, a.t("detail.recipe_expert"), pillWarning)
 							}
 							if cur.CanQuickSynth {
-								ui.Text(c, "支持简易制作").FontSize(t.text.micro).TextColor(t.muted)
+								ui.Text(c, a.t("detail.recipe_quick_synth")).FontSize(t.text.micro).TextColor(t.muted)
 							}
 						})
 					}
@@ -1041,10 +1043,10 @@ func (a *App) renderRecipesSection(c *ui.Context, item *gamedata.ItemDetail) {
 			})
 
 			// 6 项制作参数：单层轻底色自适应流式指标条（窄屏优雅折行，绝不挤爆）
-			reqCraftLabel := "推荐作业"
+			reqCraftLabel := a.t("detail.recipe_sug_craft")
 			reqCraftVal := cur.SuggestedCraftsmanship
 			if cur.RequiredCraftsmanship > 0 {
-				reqCraftLabel = "要求作业"
+				reqCraftLabel = a.t("detail.recipe_req_craft")
 				reqCraftVal = cur.RequiredCraftsmanship
 			}
 			reqCtrlStr := "–"
@@ -1056,12 +1058,12 @@ func (a *App) renderRecipesSection(c *ui.Context, item *gamedata.ItemDetail) {
 				val   string
 				col   ui.Color
 			}{
-				{"作业难度", fmt.Sprintf("%d", cur.Difficulty), t.foreground},
-				{"最高品质", fmt.Sprintf("%d", cur.Quality), t.infoText},
-				{"耐久度", fmt.Sprintf("%d", cur.Durability), t.successText},
+				{a.t("detail.recipe_difficulty"), fmt.Sprintf("%d", cur.Difficulty), t.foreground},
+				{a.t("detail.recipe_quality"), fmt.Sprintf("%d", cur.Quality), t.infoText},
+				{a.t("detail.recipe_durability"), fmt.Sprintf("%d", cur.Durability), t.successText},
 				{reqCraftLabel, fmt.Sprintf("%d", reqCraftVal), t.foreground},
-				{"要求加工", reqCtrlStr, t.foreground},
-				{"初期品质", fmt.Sprintf("%d%%", cur.MaterialQualityFactor), t.foreground},
+				{a.t("detail.recipe_req_ctrl"), reqCtrlStr, t.foreground},
+				{a.t("detail.recipe_init_qual"), fmt.Sprintf("%d%%", cur.MaterialQualityFactor), t.foreground},
 			}
 			kitBlock(c, ui.Row(c).FillWidth().Wrap(), toneCard).Children(func() {
 				for i, m := range metrics {
@@ -1079,7 +1081,7 @@ func (a *App) renderRecipesSection(c *ui.Context, item *gamedata.ItemDetail) {
 			// 制作材料与子配方分解树
 			if curTree != nil {
 				ui.Column(c).FillWidth().Gap(4).Children(func() {
-					ui.Text(c, "制作材料").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Padding(2, 0)
+					ui.Text(c, a.t("detail.recipe_materials")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Padding(2, 0)
 					for idx, ch := range curTree.Children {
 						a.renderRecipeTreeNode(c, ch, 1, 0, fmt.Sprintf("rt-%d-%d", cur.ID, idx))
 					}
@@ -1111,16 +1113,16 @@ func (a *App) renderRecipeTreeNode(c *ui.Context, node gamedata.RecipeTreeNode, 
 				a.drawGameIcon(c, node.IconID, false, 22, t.radius.sm)
 				ui.Text(c, node.NameCn).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
 				if node.CraftJobName != "" {
-					numTextf(c, "%s Lv.%d%s", node.CraftJobName, node.RecipeLevel, formatStars(node.Stars)).
+					numTextf(c, "%s Lv.%d%s", node.CraftJobName, node.RecipeLevel, formatStarsForLang(a.Language(), node.Stars)).
 						FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 				} else if node.IsGatherable {
-					ui.Text(c, "可采集").FontSize(t.text.micro).TextColor(t.successText).SingleLine()
+					ui.Text(c, a.t("detail.gatherable")).FontSize(t.text.micro).TextColor(t.successText).SingleLine()
 				}
 			})
 			numTextf(c, "×%d", totalNeeded).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
 		})
 		if row.Clicked() {
-			a.selectItem(node.ItemID)
+			a.jumpToItem(node.ItemID)
 		}
 
 		if len(node.Children) > 0 || len(node.Crystals) > 0 {
@@ -1153,7 +1155,7 @@ func (a *App) renderCrystalRow(c *ui.Context, cry gamedata.RecipeCrystalNode, cr
 		numTextf(c, "×%d", cry.Amount*crafts).FontSize(t.text.xs).FontWeight(600).TextColor(t.muted).SingleLine()
 	})
 	if row.Clicked() {
-		a.selectItem(cry.ItemID)
+		a.jumpToItem(cry.ItemID)
 	}
 }
 
@@ -1163,7 +1165,7 @@ func (a *App) renderGatheringSections(c *ui.Context, itemName string, g gamedata
 
 	// 1. 采矿 / 园艺采集点
 	if len(g.Nodes) > 0 {
-		drawDetailSection(c, "采集点", fmt.Sprintf("%d 处", len(g.Nodes)), nil, func() {
+		drawDetailSection(c, a.t("detail.gather_nodes"), a.tf("detail.gather_places_count", "count", len(g.Nodes)), nil, func() {
 			ui.Column(c).FillWidth().Children(func() {
 				for idx, node := range g.Nodes {
 					if idx > 0 {
@@ -1176,7 +1178,7 @@ func (a *App) renderGatheringSections(c *ui.Context, itemName string, g gamedata
 								ui.Column(c).Gap(2).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 									ui.Row(c).Gap(8).AlignItems(ui.Baseline).Wrap().Children(func() {
 										ui.Textf(c, "%s · %s", node.DisciplineName, node.GatheringTypeName).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
-										numTextf(c, "Lv.%d%s", node.NodeLevel, formatStars(node.Stars)).FontSize(t.text.xs).FontWeight(500).TextColor(t.successText)
+										numTextf(c, "Lv.%d%s", node.NodeLevel, formatStarsForLang(a.Language(), node.Stars)).FontSize(t.text.xs).FontWeight(500).TextColor(t.successText)
 									})
 									ui.Textf(c, "%s › %s › %s", node.RegionName, node.ZoneName, node.PlaceName).FontSize(t.text.xs).TextColor(t.muted)
 								})
@@ -1202,7 +1204,7 @@ func (a *App) renderGatheringSections(c *ui.Context, itemName string, g gamedata
 						if node.FolkloreBookName != "" || node.IsHidden || node.IsEphemeral || node.IsTimed {
 							ui.Row(c).FillWidth().Padding(0, 0, 0, 37).Gap(8).AlignItems(ui.Center).Wrap().Children(func() {
 								if node.IsTimed {
-									ts := gamedata.EvaluateGatheringWindows(node.TimeWindows, now)
+									ts := gamedata.EvaluateGatheringWindowsForLang(node.TimeWindows, now, a.Language())
 									var winStrs []string
 									for _, w := range node.TimeWindows {
 										winStrs = append(winStrs, fmt.Sprintf("%s–%s", w.StartET, w.EndET))
@@ -1220,13 +1222,13 @@ func (a *App) renderGatheringSections(c *ui.Context, itemName string, g gamedata
 									})
 								}
 								if node.FolkloreBookName != "" {
-									drawPill(c, "传承录："+node.FolkloreBookName, pillWarning)
+									drawPill(c, a.tf("detail.folklore", "name", node.FolkloreBookName), pillWarning)
 								}
 								if node.IsHidden {
-									drawPill(c, "隐藏", pillNeutral)
+									drawPill(c, a.t("detail.hidden"), pillNeutral)
 								}
 								if node.IsEphemeral {
-									drawPill(c, "精选限时", pillAccent)
+									drawPill(c, a.t("detail.ephemeral"), pillAccent)
 								}
 							})
 						}
@@ -1238,7 +1240,7 @@ func (a *App) renderGatheringSections(c *ui.Context, itemName string, g gamedata
 
 	// 2. 捕鱼人垂钓钓场
 	if len(g.FishingSpots) > 0 {
-		drawDetailSection(c, "钓场", fmt.Sprintf("%d 处", len(g.FishingSpots)), nil, func() {
+		drawDetailSection(c, a.t("detail.fishing_spots"), a.tf("detail.gather_places_count", "count", len(g.FishingSpots)), nil, func() {
 			ui.Column(c).FillWidth().Gap(8).Children(func() {
 				if g.FishingSpots[0].FishGuideText != "" {
 					kitBlock(c, ui.Box(c).FillWidth().Padding(9, 12), toneCard).Children(func() {
@@ -1260,7 +1262,7 @@ func (a *App) renderGatheringSections(c *ui.Context, itemName string, g gamedata
 									})
 									sub := fmt.Sprintf("%s › %s", sp.RegionName, sp.ZoneName)
 									if sp.FolkloreBookName != "" {
-										sub += " · 需传承录：" + sp.FolkloreBookName
+										sub += a.tf("detail.need_folklore", "name", sp.FolkloreBookName)
 									}
 									ui.Text(c, sub).FontSize(t.text.xs).TextColor(t.muted)
 								})
@@ -1268,7 +1270,7 @@ func (a *App) renderGatheringSections(c *ui.Context, itemName string, g gamedata
 							if sp.MapPath != "" {
 								if kitButton(c, fmt.Sprintf("fspot-map-%d", sp.SpotID), fmt.Sprintf("%.1f, %.1f", sp.CoordX, sp.CoordY), btnOpts{variant: btnOutline, size: btnSizeXs, icon: icoMapPin}) {
 									a.openMap(MapMarkerData{
-										Title:      fmt.Sprintf("%s（钓场：%s）", itemName, sp.PlaceName),
+										Title:      a.tf("detail.map_fishing_title", "item", itemName, "place", sp.PlaceName),
 										Subtitle:   fmt.Sprintf("Lv.%d %s", sp.Level, sp.CategoryName),
 										RegionName: sp.RegionName,
 										ZoneName:   sp.ZoneName,
@@ -1290,7 +1292,7 @@ func (a *App) renderGatheringSections(c *ui.Context, itemName string, g gamedata
 
 	// 3. 刺鱼渔场
 	if len(g.Spearfishing) > 0 {
-		drawDetailSection(c, "刺鱼", fmt.Sprintf("%d 处", len(g.Spearfishing)), nil, func() {
+		drawDetailSection(c, a.t("detail.spearfishing"), a.tf("detail.gather_places_count", "count", len(g.Spearfishing)), nil, func() {
 			ui.Column(c).FillWidth().Gap(8).Children(func() {
 				if g.Spearfishing[0].Description != "" {
 					kitBlock(c, ui.Box(c).FillWidth().Padding(9, 12), toneCard).Children(func() {
@@ -1313,8 +1315,8 @@ func (a *App) renderGatheringSections(c *ui.Context, itemName string, g gamedata
 							if sf.MapPath != "" {
 								if kitButton(c, fmt.Sprintf("sf-map-%d", sf.NotebookID), fmt.Sprintf("%.1f, %.1f", sf.CoordX, sf.CoordY), btnOpts{variant: btnOutline, size: btnSizeXs, icon: icoMapPin}) {
 									a.openMap(MapMarkerData{
-										Title:      fmt.Sprintf("%s（刺鱼：%s）", itemName, sf.PlaceName),
-										Subtitle:   fmt.Sprintf("Lv.%d 刺鱼渔场", sf.Level),
+										Title:      a.tf("detail.map_spearfishing_title", "item", itemName, "place", sf.PlaceName),
+										Subtitle:   a.tf("detail.map_spearfishing_sub", "lv", sf.Level),
 										RegionName: sf.RegionName,
 										ZoneName:   sf.ZoneName,
 										PlaceName:  sf.PlaceName,
@@ -1347,27 +1349,27 @@ func venturePillKind(t string) pillKind {
 	}
 }
 
-func tierStatName(statType string) string {
+func (a *App) tierStatName(statType string) string {
 	switch statType {
 	case "ilvl":
-		return "装等"
+		return a.t("detail.stat_ilvl")
 	case "gathering":
-		return "获得力"
+		return a.t("detail.stat_gathering")
 	default:
-		return "鉴别力"
+		return a.t("detail.stat_perception")
 	}
 }
 
-func formatCompactTierReq(tier gamedata.RetainerVentureTier) string {
+func (a *App) formatCompactTierReq(tier gamedata.RetainerVentureTier) string {
 	if tier.RequiredStat <= 0 {
-		return "基础"
+		return a.t("detail.tier_base")
 	}
 	return fmt.Sprintf("≥ %d", tier.RequiredStat)
 }
 
 func (a *App) renderRetainerSection(c *ui.Context, ventures []gamedata.RetainerVentureSource) {
 	t := themeOf(c)
-	drawDetailSection(c, "雇员探险", fmt.Sprintf("%d 项", len(ventures)), nil, func() {
+	drawDetailSection(c, a.t("detail.retainer_title"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(ventures))), nil, func() {
 		ui.Column(c).FillWidth().Gap(12).Children(func() {
 			for i, v := range ventures {
 				if i > 0 {
@@ -1380,15 +1382,19 @@ func (a *App) renderRetainerSection(c *ui.Context, ventures []gamedata.RetainerV
 							ui.Text(c, v.TaskName).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
 							ui.Text(c, v.ClassJobCategoryName).FontSize(t.text.xs).TextColor(t.muted)
 							if v.RequiresLogUnlock {
-								drawPill(c, "需解锁图鉴", pillNeutral)
+								drawPill(c, a.t("detail.retainer_unlock"), pillNeutral)
 							}
 						})
 						statLabel := ""
 						if len(v.Tiers) > 0 {
-							statLabel = tierStatName(v.Tiers[0].StatType) + "分档 · "
+							statLabel = a.tf("detail.retainer_tier_prefix", "stat", a.tierStatName(v.Tiers[0].StatType))
 						}
-						numTextf(c, "%sLv.%d · %d 分钟 · 探险币 ×%d · 经验 %s",
-							statLabel, v.RetainerLevel, v.DurationMinutes, v.VentureCost, formatInt(v.Experience)).
+						numText(c, a.tf("detail.retainer_meta",
+							"stat", statLabel,
+							"lv", v.RetainerLevel,
+							"min", v.DurationMinutes,
+							"cost", v.VentureCost,
+							"exp", formatInt(v.Experience))).
 							FontSize(t.text.xs).TextColor(t.muted)
 					})
 
@@ -1401,7 +1407,7 @@ func (a *App) renderRetainerSection(c *ui.Context, ventures []gamedata.RetainerV
 									cell.BorderWidth(0, 0, 0, hairline).BorderColor(t.border)
 								}
 								cell.Children(func() {
-									numText(c, formatCompactTierReq(tier)).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+									numText(c, a.formatCompactTierReq(tier)).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 									numTextf(c, "×%d", tier.Quantity).FontSize(t.text.sm).FontWeight(600).TextColor(t.infoText).SingleLine()
 								})
 							}
@@ -1415,7 +1421,7 @@ func (a *App) renderRetainerSection(c *ui.Context, ventures []gamedata.RetainerV
 
 func (a *App) renderUsedInRecipesSection(c *ui.Context, used []gamedata.UsedInRecipeItem) {
 	t := themeOf(c)
-	drawDetailSection(c, "用于制作", fmt.Sprintf("%d 项", len(used)), nil, func() {
+	drawDetailSection(c, a.t("detail.used_in"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(used))), nil, func() {
 		ui.Row(c).FillWidth().Gap(6).Wrap().Children(func() {
 			for _, u := range used {
 				btn := ui.ButtonBase(c.Key(fmt.Sprintf("used-%d", u.RecipeID))).Label(u.ResultNameCn).
@@ -1430,13 +1436,13 @@ func (a *App) renderUsedInRecipesSection(c *ui.Context, used []gamedata.UsedInRe
 						a.drawGameIcon(c, u.ResultIconID, false, 26, t.radius.md)
 						ui.Column(c).Gap(2).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 							ui.Text(c, u.ResultNameCn).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
-							numTextf(c, "%s Lv.%d%s", u.CraftJobName, u.RecipeLevel, formatStars(u.Stars)).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+							numTextf(c, "%s Lv.%d%s", u.CraftJobName, u.RecipeLevel, formatStarsForLang(a.Language(), u.Stars)).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 						})
 					})
 					numTextf(c, "×%d", u.AmountRequired).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
 				})
 				if btn.Clicked() {
-					a.selectItem(u.ResultItemID)
+					a.jumpToItem(u.ResultItemID)
 				}
 			}
 		})

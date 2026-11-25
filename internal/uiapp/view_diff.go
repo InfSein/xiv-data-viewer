@@ -2,6 +2,7 @@ package uiapp
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/InfSein/xiv-data-viewer/internal/backup"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
@@ -9,16 +10,33 @@ import (
 )
 
 var diffFilterModes = []string{"all", "added", "modified", "removed"}
-var diffFilterLabels = []string{"全部", "新增", "变更", "移除"}
+
+func (a *App) diffFilterLabels() []string {
+	return []string{
+		a.t("diff.filter_all"),
+		a.t("diff.filter_added"),
+		a.t("diff.filter_modified"),
+		a.t("diff.filter_removed"),
+	}
+}
 
 var diffEntityModes = []string{"all", "item", "quest", "leve", "achievement"}
-var diffEntityLabels = []string{"全部", "物品", "任务", "理符", "成就"}
+
+func (a *App) diffEntityLabels() []string {
+	return []string{
+		a.t("diff.entity_all"),
+		a.t("diff.entity_item"),
+		a.t("diff.entity_quest"),
+		a.t("diff.entity_leve"),
+		a.t("diff.entity_achievement"),
+	}
+}
 
 const (
 	diffColGap    float32 = 10
 	diffColIDW    float32 = 68
 	diffColNameW  float32 = 240
-	diffColTypeW  float32 = 72
+	diffColTypeW  float32 = 84
 	diffColChgMin float32 = 140
 )
 
@@ -50,6 +68,20 @@ func (a *App) inspectDiffEntry(entry backup.DiffItemEntry) {
 	}
 }
 
+func (a *App) hasDiffFilter() bool {
+	return strings.TrimSpace(a.diffSearch) != "" ||
+		a.diffFilter != "all" ||
+		a.diffEntity != "all"
+}
+
+func (a *App) resetDiffFilters() {
+	a.diffSearch = ""
+	a.diffFilter = "all"
+	a.diffEntity = "all"
+	a.diffPage = 1
+	a.refreshDiff()
+}
+
 func (a *App) renderDiffView(c *ui.Context) {
 	t := themeOf(c)
 	kitPanel(c, a.panelRadius(c)).Fill().Children(func() {
@@ -58,9 +90,9 @@ func (a *App) renderDiffView(c *ui.Context) {
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).
 			Justify(ui.SpaceBetween).AlignItems(ui.Center).Wrap().Children(func() {
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, "版本变更对比").FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
+				ui.Text(c, a.t("diff.title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
 				if a.versionStatus != nil && a.versionStatus.HasVersionUpdate {
-					drawPill(c, "有新版本", pillPositive)
+					drawPill(c, a.t("diff.has_new_version"), pillPositive)
 				}
 			})
 
@@ -69,15 +101,15 @@ func (a *App) renderDiffView(c *ui.Context) {
 				if a.versionStatus != nil {
 					backups = a.versionStatus.Backups
 				}
-				ui.Text(c, "旧版本").FontSize(t.text.xs).TextColor(t.muted)
+				ui.Text(c, a.t("diff.old_version")).FontSize(t.text.xs).TextColor(t.muted)
 				a.renderVersionSelect(c, "diff-from", &a.diffFromVer, backups)
 				ui.Icon(c, icoArrowRight).Size(iconSm, iconSm).TextColor(t.muted)
-				ui.Text(c, "新版本").FontSize(t.text.xs).TextColor(t.muted)
+				ui.Text(c, a.t("diff.new_version")).FontSize(t.text.xs).TextColor(t.muted)
 				a.renderVersionSelect(c, "diff-to", &a.diffToVer, backups)
 
-				btnLbl := "刷新快照"
+				btnLbl := a.t("diff.refresh_snapshot")
 				if a.diffBusy {
-					btnLbl = "刷新中..."
+					btnLbl = a.t("diff.refreshing")
 				}
 				if kitButton(c, "diff-refresh-backup", btnLbl, btnOpts{variant: btnOutline, size: btnSizeSm, icon: icoRefresh, disabled: a.diffBusy}) {
 					a.refreshVersionBackup()
@@ -97,17 +129,37 @@ func (a *App) renderDiffView(c *ui.Context) {
 			if a.diffRes != nil {
 				sum := a.diffRes.Summary
 				kitBlock(c, ui.Row(c).FillWidth().Padding(8, 12).Gap(16).AlignItems(ui.Center).Wrap(), toneCard).Children(func() {
-					drawCompactDiffStat(c, "新增物品", "+"+formatInt(sum.AddedItems), t.successText)
-					drawCompactDiffStat(c, "物品变更", formatInt(sum.ModifiedItems), t.warningText)
+					drawCompactDiffStat(c, a.t("diff.stat_added_items"), "+"+formatInt(sum.AddedItems), t.successText)
+					drawCompactDiffStat(c, a.t("diff.stat_modified_items"), formatInt(sum.ModifiedItems), t.warningText)
 					colTotal := sum.NewCollectableTurnInItems + sum.ModifiedCollectableItems
-					drawCompactDiffStat(c, "收藏品变动", formatInt(colTotal), t.infoText)
-					drawCompactDiffStat(c, "新增任务", "+"+formatInt(sum.AddedQuests), t.successText)
-					drawCompactDiffStat(c, "新增理符", "+"+formatInt(sum.AddedLeves), t.successText)
-					drawCompactDiffStat(c, "新增配方", "+"+formatInt(sum.AddedRecipes), t.foreground)
-					drawCompactDiffStat(c, "新增成就", "+"+formatInt(sum.AddedAchievements), t.infoText)
-					drawCompactDiffStat(c, "新增称号", "+"+formatInt(sum.AddedTitles), t.foreground)
+					drawCompactDiffStat(c, a.t("diff.stat_collectables"), formatInt(colTotal), t.infoText)
+					drawCompactDiffStat(c, a.t("diff.stat_added_quests"), "+"+formatInt(sum.AddedQuests), t.successText)
+					drawCompactDiffStat(c, a.t("diff.stat_added_leves"), "+"+formatInt(sum.AddedLeves), t.successText)
+					drawCompactDiffStat(c, a.t("diff.stat_added_recipes"), "+"+formatInt(sum.AddedRecipes), t.foreground)
+					drawCompactDiffStat(c, a.t("diff.stat_added_achievements"), "+"+formatInt(sum.AddedAchievements), t.infoText)
+					drawCompactDiffStat(c, a.t("diff.stat_added_titles"), "+"+formatInt(sum.AddedTitles), t.foreground)
 				})
 			}
+
+			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Wrap().Gap(8).Children(func() {
+				ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).Children(func() {
+					ui.Box(c).Grow(1).MinWidth(220).MaxWidth(380).Children(func() {
+						a.renderPageSearchInput(c, "diff-page-search", &a.diffSearch, a.t("search.diff_placeholder"), a.t("search.diff_label"), func() {
+							a.diffPage = 1
+							a.refreshDiff()
+						})
+					})
+					if a.hasDiffFilter() {
+						if kitButton(c, "diff-reset", a.t("common.reset"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
+							a.resetDiffFilters()
+						}
+					}
+				})
+
+				if a.diffRes != nil {
+					numText(c, a.tf("diff.total_filtered", "count", formatInt(a.diffRes.TotalFiltered))).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+				}
+			})
 
 			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Wrap().Gap(8).Children(func() {
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Wrap().Children(func() {
@@ -118,7 +170,7 @@ func (a *App) renderDiffView(c *ui.Context) {
 							break
 						}
 					}
-					if nextIdx, chg := kitSegmentedTabs(c, "df-flt", fltIdx, diffFilterLabels); chg {
+					if nextIdx, chg := kitSegmentedTabs(c, "df-flt", fltIdx, a.diffFilterLabels()); chg {
 						a.diffFilter = diffFilterModes[nextIdx]
 						a.diffPage = 1
 						a.refreshDiff()
@@ -126,33 +178,30 @@ func (a *App) renderDiffView(c *ui.Context) {
 
 					kitSeparator(c, true)
 
+					entityLabels := a.diffEntityLabels()
 					for i, m := range diffEntityModes {
-						if kitToggleChip(c, "df-ent-"+m, diffEntityLabels[i], "", a.diffEntity == m, nil) {
+						if kitToggleChip(c, "df-ent-"+m, entityLabels[i], "", a.diffEntity == m, nil) {
 							a.diffEntity = m
 							a.diffPage = 1
 							a.refreshDiff()
 						}
 					}
 				})
-
-				if a.diffRes != nil {
-					numTextf(c, "共 %s 条变更", formatInt(a.diffRes.TotalFiltered)).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
-				}
 			})
 		})
 
 		// 3. 变更表头
 		ui.Row(c).FillWidth().Padding(8, 16).Background(t.card).
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Gap(diffColGap).Children(func() {
-			ui.Text(c, "ID").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColIDW).Shrink(0)
-			ui.Text(c, "名称").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColNameW).Shrink(0)
-			ui.Text(c, "类型").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColTypeW).Shrink(0).TextAlign(ui.Center)
-			ui.Text(c, "变更内容").FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(diffColChgMin)
+			ui.Text(c, a.t("diff.col_id")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColIDW).Shrink(0)
+			ui.Text(c, a.t("diff.col_name")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColNameW).Shrink(0)
+			ui.Text(c, a.t("diff.col_type")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColTypeW).Shrink(0).TextAlign(ui.Center)
+			ui.Text(c, a.t("diff.col_changes")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(diffColChgMin)
 		})
 
 		// 4. 变更明细行
 		if a.diffRes == nil || len(a.diffRes.Items) == 0 {
-			kitEmpty(c, icoCompare, "当前条件下没有版本变更", "可在上方切换对比版本，或清空搜索关键词与筛选条件。", nil)
+			kitEmpty(c, icoCompare, a.t("diff.empty_title"), a.t("diff.empty_desc"), nil)
 		} else {
 			ui.Scroll(c.Key("diff-table-scroll")).TrackScroll(&a.diffScroll).Grow(1).Shrink(1).Children(func() {
 				ui.Column(c).FillWidth().Children(func() {
@@ -178,14 +227,14 @@ func (a *App) renderDiffView(c *ui.Context) {
 									numTextf(c, "#%d", entry.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 									switch entry.EntityType {
 									case "achievement":
-										drawPill(c, "成就", pillAccent)
+										drawPill(c, a.t("diff.tag_achievement"), pillAccent)
 									case "quest":
-										drawPill(c, "任务", pillWarning)
+										drawPill(c, a.t("diff.tag_quest"), pillWarning)
 									case "leve":
-										drawPill(c, "理符", pillPositive)
+										drawPill(c, a.t("diff.tag_leve"), pillPositive)
 									default:
 										if entry.HasCollectableChange {
-											drawPill(c, "收藏品", pillAccent)
+											drawPill(c, a.t("diff.tag_collectable"), pillAccent)
 										}
 									}
 								})
@@ -206,7 +255,7 @@ func (a *App) renderDiffView(c *ui.Context) {
 							jumpW := diffColIDW + diffColGap + diffColNameW
 							if canJump {
 								jumpBtn := ui.ButtonBase(c.Key(fmt.Sprintf("df-jump-%s-%d", entry.EntityType, entry.ID))).
-									Label("查看 " + dispName).Width(jumpW).Shrink(0).Gap(diffColGap).Padding(0).
+									Label(a.tf("common.view_item", "name", dispName)).Width(jumpW).Shrink(0).Gap(diffColGap).Padding(0).
 									Justify(ui.Start).AlignItems(ui.Center).
 									Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 								jumpBtn.Children(func() {
@@ -225,11 +274,11 @@ func (a *App) renderDiffView(c *ui.Context) {
 							ui.Row(c).Width(diffColTypeW).Shrink(0).Center().Children(func() {
 								switch entry.ChangeType {
 								case "added":
-									drawPill(c, "新增", pillPositive)
+									drawPill(c, a.t("diff.change_added"), pillPositive)
 								case "modified":
-									drawPill(c, "变更", pillWarning)
+									drawPill(c, a.t("diff.change_modified"), pillWarning)
 								default:
-									drawPill(c, "已移除", pillNegative)
+									drawPill(c, a.t("diff.change_removed"), pillNegative)
 								}
 							})
 
@@ -287,7 +336,7 @@ func (a *App) renderVersionSelect(c *ui.Context, key string, val *string, backup
 	sel := ui.SelectBase(c.Key(key), val)
 	curLabel := *val
 	if curLabel == "" {
-		curLabel = "选择快照"
+		curLabel = a.t("diff.select_snapshot")
 	}
 
 	trig := sel.Trigger.Height(28).Width(178).Padding(0, 8, 0, 10).Radius(t.radius.md).
@@ -303,13 +352,13 @@ func (a *App) renderVersionSelect(c *ui.Context, key string, val *string, backup
 	})
 
 	sel.Popup(func(panel ui.Element) {
-		applyOverlaySurface(c, panel.Margin(4, 0, 0, 0).Padding(4).Radius(t.radius.lg).MaxHeight(280).Width(244), shadowOverlay)
+		applyOverlaySurface(c, panel.Margin(4, 0, 0, 0).Padding(4).Radius(t.radius.lg).MaxHeight(280).Width(264), shadowOverlay)
 		ui.Scroll(c.Key("vsel-scr-" + key)).Shrink(1).Children(func() {
 			for _, b := range backups {
 				isCur := b.Version == *val
-				tag := "本地快照"
+				tag := a.t("diff.snapshot_local")
 				if b.IsBaseline {
-					tag = "历史基准"
+					tag = a.t("diff.snapshot_baseline")
 				}
 				row := sel.Item(b.Version).Height(28).Padding(0, 8).Radius(t.radius.md).
 					Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6)

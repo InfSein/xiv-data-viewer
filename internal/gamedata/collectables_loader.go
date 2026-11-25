@@ -6,10 +6,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
 type collectablesLoaderInput struct {
+	appLang                i18n.Lang
 	shops                  *sqpack.SchemaSheet
 	shopItems              *sqpack.SchemaSubrowSheet
 	shopItemGroups         *sqpack.SchemaSheet
@@ -40,7 +42,7 @@ type collectablesIndices struct {
 	totalEntries  int
 }
 
-func resolveCollectableCurrency(rawID int, tomestoneByIndex map[int]int, itemMeta func(int) (string, int)) (int, string, int) {
+func resolveCollectableCurrency(appLang i18n.Lang, rawID int, tomestoneByIndex map[int]int, itemMeta func(int) (string, int)) (int, string, int) {
 	if rawID <= 0 {
 		return 0, "", 0
 	}
@@ -49,23 +51,24 @@ func resolveCollectableCurrency(rawID int, tomestoneByIndex map[int]int, itemMet
 	if name == "" {
 		switch itemID {
 		case 33913:
-			name = "巧手紫票"
+			name = i18n.T(appLang, "gamedata.col.scrip_purple_crafter")
 		case 33914:
-			name = "大地紫票"
+			name = i18n.T(appLang, "gamedata.col.scrip_purple_gatherer")
 		case 41784:
-			name = "巧手橙票"
+			name = i18n.T(appLang, "gamedata.col.scrip_orange_crafter")
 		case 41785:
-			name = "大地橙票"
+			name = i18n.T(appLang, "gamedata.col.scrip_orange_gatherer")
 		case 28063:
-			name = "苍天街振兴票"
+			name = i18n.T(appLang, "gamedata.col.scrip_skybuilders")
 		default:
-			name = fmt.Sprintf("票据 #%d", itemID)
+			name = i18n.Tf(appLang, "gamedata.scrip_fallback", "id", fmt.Sprintf("%d", itemID))
 		}
 	}
 	return itemID, name, iconID
 }
 
 func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
+	in.appLang = resolveAppLang(in.appLang)
 	out := collectablesIndices{
 		turnInsByItem: make(map[int][]CollectableTurnInSource),
 		rewardsByItem: make(map[int][]CollectableRewardSource),
@@ -110,7 +113,7 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 		}
 		tName, tIcon := resolveItem(turnInItemID)
 		if tName == "" {
-			tName = fmt.Sprintf("物品 #%d", turnInItemID)
+			tName = i18n.Tf(in.appLang, "gamedata.item_fallback", "id", fmt.Sprintf("%d", turnInItemID))
 		}
 
 		// 每个目标奖励道具收集高/中/低三档回报量
@@ -190,7 +193,7 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 			}
 			shopName := strings.TrimSpace(in.shops.Str(sRow, "Name"))
 			if shopName == "" {
-				shopName = "收藏品交易"
+				shopName = i18n.T(in.appLang, "gamedata.col.shop_default")
 			}
 			shopQuestID := in.shops.Int(sRow, "Quest")
 			rewardType := in.shops.Int(sRow, "RewardType")
@@ -236,6 +239,9 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 						continue
 					}
 
+					tierLow := i18n.T(in.appLang, "gamedata.col.tier_low")
+					tierMid := i18n.T(in.appLang, "gamedata.col.tier_mid")
+					tierHigh := i18n.T(in.appLang, "gamedata.col.tier_high")
 					var tiers []CollectableTier
 					rewardMode := "scrip"
 					if rewardType == 2 && in.shopRewardItems != nil {
@@ -245,19 +251,19 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 							rName, rIcon := resolveItem(rItemID)
 							if rItemID > 0 {
 								tiers = []CollectableTier{
-									{Label: "低档", MinCollectability: lowCol, RewardItemID: rItemID, RewardItemName: rName, RewardItemIconID: rIcon, RewardAmount: in.shopRewardItems.Int(riRow, "RewardLow")},
-									{Label: "中档", MinCollectability: midCol, RewardItemID: rItemID, RewardItemName: rName, RewardItemIconID: rIcon, RewardAmount: in.shopRewardItems.Int(riRow, "RewardMid")},
-									{Label: "高档", MinCollectability: highCol, RewardItemID: rItemID, RewardItemName: rName, RewardItemIconID: rIcon, RewardAmount: in.shopRewardItems.Int(riRow, "RewardHigh")},
+									{Label: tierLow, MinCollectability: lowCol, RewardItemID: rItemID, RewardItemName: rName, RewardItemIconID: rIcon, RewardAmount: in.shopRewardItems.Int(riRow, "RewardLow")},
+									{Label: tierMid, MinCollectability: midCol, RewardItemID: rItemID, RewardItemName: rName, RewardItemIconID: rIcon, RewardAmount: in.shopRewardItems.Int(riRow, "RewardMid")},
+									{Label: tierHigh, MinCollectability: highCol, RewardItemID: rItemID, RewardItemName: rName, RewardItemIconID: rIcon, RewardAmount: in.shopRewardItems.Int(riRow, "RewardHigh")},
 								}
 							}
 						}
 					} else if in.shopRewardScrips != nil {
 						if rsRow, ok := in.shopRewardScrips.Rows[rewID]; ok {
-							cItemID, cName, cIcon := resolveCollectableCurrency(in.shopRewardScrips.Int(rsRow, "Currency"), in.tomestoneByIndex, resolveItem)
+							cItemID, cName, cIcon := resolveCollectableCurrency(in.appLang, in.shopRewardScrips.Int(rsRow, "Currency"), in.tomestoneByIndex, resolveItem)
 							tiers = []CollectableTier{
-								{Label: "低档", MinCollectability: lowCol, RewardItemID: cItemID, RewardItemName: cName, RewardItemIconID: cIcon, RewardAmount: in.shopRewardScrips.Int(rsRow, "LowReward"), ExpRatio: in.shopRewardScrips.Int(rsRow, "ExpRatioLow")},
-								{Label: "中档", MinCollectability: midCol, RewardItemID: cItemID, RewardItemName: cName, RewardItemIconID: cIcon, RewardAmount: in.shopRewardScrips.Int(rsRow, "MidReward"), ExpRatio: in.shopRewardScrips.Int(rsRow, "ExpRatioMid")},
-								{Label: "高档", MinCollectability: highCol, RewardItemID: cItemID, RewardItemName: cName, RewardItemIconID: cIcon, RewardAmount: in.shopRewardScrips.Int(rsRow, "HighReward"), ExpRatio: in.shopRewardScrips.Int(rsRow, "ExpRatioHigh")},
+								{Label: tierLow, MinCollectability: lowCol, RewardItemID: cItemID, RewardItemName: cName, RewardItemIconID: cIcon, RewardAmount: in.shopRewardScrips.Int(rsRow, "LowReward"), ExpRatio: in.shopRewardScrips.Int(rsRow, "ExpRatioLow")},
+								{Label: tierMid, MinCollectability: midCol, RewardItemID: cItemID, RewardItemName: cName, RewardItemIconID: cIcon, RewardAmount: in.shopRewardScrips.Int(rsRow, "MidReward"), ExpRatio: in.shopRewardScrips.Int(rsRow, "ExpRatioMid")},
+								{Label: tierHigh, MinCollectability: highCol, RewardItemID: cItemID, RewardItemName: cName, RewardItemIconID: cIcon, RewardAmount: in.shopRewardScrips.Int(rsRow, "HighReward"), ExpRatio: in.shopRewardScrips.Int(rsRow, "ExpRatioHigh")},
 							}
 						}
 					}
@@ -272,7 +278,7 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 							itemID: itemID,
 							src: CollectableTurnInSource{
 								SourceKind:        "shop",
-								SourceLabel:       "收藏品交易",
+								SourceLabel:       i18n.T(in.appLang, "gamedata.col.shop_default"),
 								ShopID:            shopID,
 								ShopName:          shopName,
 								GroupName:         groupName,
@@ -318,7 +324,7 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 			}
 			npcName := in.npcNames[enpcID].Name
 			if npcName == "" {
-				npcName = fmt.Sprintf("老主顾 #%d", enpcID)
+				npcName = i18n.Tf(in.appLang, "gamedata.satisfaction_npc_fallback", "id", fmt.Sprintf("%d", enpcID))
 			}
 			reqQuest := in.satisfactionNpcs.Int(nRow, "QuestRequired")
 			lvlUnlock := in.satisfactionNpcs.Int(nRow, "LevelUnlock")
@@ -351,7 +357,7 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 				if supplyIdx <= 0 {
 					continue
 				}
-				rankGroupLabel := fmt.Sprintf("信赖度阶段 %d", rankIdx+1)
+				rankGroupLabel := i18n.Tf(in.appLang, "gamedata.col.satisfaction_rank", "rank", fmt.Sprintf("%d", rankIdx+1))
 				for _, sub := range in.satisfactionSupplies.Rows[supplyIdx] {
 					itemID := in.satisfactionSupplies.Int(sub.Data, "Item")
 					if itemID <= 0 {
@@ -362,12 +368,12 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 					if !ok {
 						continue
 					}
-					c1ID, c1Name, c1Icon := resolveCollectableCurrency(in.satisfactionRewards.Int(rRow, "SatisfactionSupplyRewardData[0].RewardCurrency"), in.tomestoneByIndex, resolveItem)
-					c2ID, c2Name, c2Icon := resolveCollectableCurrency(in.satisfactionRewards.Int(rRow, "SatisfactionSupplyRewardData[1].RewardCurrency"), in.tomestoneByIndex, resolveItem)
+					c1ID, c1Name, c1Icon := resolveCollectableCurrency(in.appLang, in.satisfactionRewards.Int(rRow, "SatisfactionSupplyRewardData[0].RewardCurrency"), in.tomestoneByIndex, resolveItem)
+					c2ID, c2Name, c2Icon := resolveCollectableCurrency(in.appLang, in.satisfactionRewards.Int(rRow, "SatisfactionSupplyRewardData[1].RewardCurrency"), in.tomestoneByIndex, resolveItem)
 
 					tiers := []CollectableTier{
 						{
-							Label:             "低档",
+							Label:             i18n.T(in.appLang, "gamedata.col.tier_low"),
 							MinCollectability: in.satisfactionSupplies.Int(sub.Data, "CollectabilityLow"),
 							RewardItemID:      c1ID,
 							RewardItemName:    c1Name,
@@ -381,7 +387,7 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 							Satisfaction:      in.satisfactionRewards.Int(rRow, "SatisfactionLow"),
 						},
 						{
-							Label:             "中档",
+							Label:             i18n.T(in.appLang, "gamedata.col.tier_mid"),
 							MinCollectability: in.satisfactionSupplies.Int(sub.Data, "CollectabilityMid"),
 							RewardItemID:      c1ID,
 							RewardItemName:    c1Name,
@@ -395,7 +401,7 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 							Satisfaction:      in.satisfactionRewards.Int(rRow, "SatisfactionMid"),
 						},
 						{
-							Label:             "高档",
+							Label:             i18n.T(in.appLang, "gamedata.col.tier_high"),
 							MinCollectability: in.satisfactionSupplies.Int(sub.Data, "CollectabilityHigh"),
 							RewardItemID:      c1ID,
 							RewardItemName:    c1Name,
@@ -412,9 +418,9 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 
 					src := CollectableTurnInSource{
 						SourceKind:        "satisfaction",
-						SourceLabel:       "老主顾交易",
+						SourceLabel:       i18n.T(in.appLang, "gamedata.col.satisfaction_label"),
 						ShopID:            npcRowID,
-						ShopName:          "老主顾：" + npcName,
+						ShopName:          i18n.Tf(in.appLang, "gamedata.col.satisfaction_prefix", "name", npcName),
 						GroupName:         rankGroupLabel,
 						LevelMin:          lvlUnlock,
 						LevelMax:          lvlUnlock,
@@ -438,7 +444,7 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 		scripID := 28063
 		scripName, scripIcon := resolveItem(scripID)
 		if scripName == "" {
-			scripName = "苍天街振兴票"
+			scripName = i18n.T(in.appLang, "gamedata.col.scrip_skybuilders")
 		}
 
 		for supplyID, row := range in.hwdSupplies.Rows {
@@ -450,7 +456,7 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 				if itemID <= 0 {
 					continue
 				}
-				termName := "伊修加德复兴供货"
+				termName := i18n.T(in.appLang, "gamedata.col.hwd_term_default")
 				if termID := in.hwdSupplies.Int(row, fmt.Sprintf("HWDCrafterSupplyParams[%d].TermName", slot)); termID > 0 && in.hwdTerms != nil {
 					if tRow, ok := in.hwdTerms.Rows[termID]; ok {
 						if n := strings.TrimSpace(in.hwdTerms.Str(tRow, "Name")); n != "" {
@@ -483,9 +489,9 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 
 				var tiers []CollectableTier
 				for _, spec := range [3]struct{ lbl, colF, rewF string }{
-					{"低档", "BaseCollectableRating", "BaseCollectableReward"},
-					{"中档", "MidCollectableRating", "MidCollectableReward"},
-					{"高档", "HighCollectableRating", "HighCollectableReward"},
+					{i18n.T(in.appLang, "gamedata.col.tier_low"), "BaseCollectableRating", "BaseCollectableReward"},
+					{i18n.T(in.appLang, "gamedata.col.tier_mid"), "MidCollectableRating", "MidCollectableReward"},
+					{i18n.T(in.appLang, "gamedata.col.tier_high"), "HighCollectableRating", "HighCollectableReward"},
 				} {
 					if t := buildHWDTier(spec.lbl, spec.colF, spec.rewF); t != nil {
 						tiers = append(tiers, *t)
@@ -499,9 +505,9 @@ func buildCollectablesData(in collectablesLoaderInput) collectablesIndices {
 				lvlMax := in.hwdSupplies.Int(row, fmt.Sprintf("HWDCrafterSupplyParams[%d].LevelMax", slot))
 				src := CollectableTurnInSource{
 					SourceKind:  "hwd",
-					SourceLabel: "苍天街供货",
+					SourceLabel: i18n.T(in.appLang, "gamedata.col.hwd_label"),
 					ShopID:      supplyID,
-					ShopName:    "伊修加德复兴 · " + termName,
+					ShopName:    i18n.Tf(in.appLang, "gamedata.col.hwd_prefix", "term", termName),
 					GroupName:   termName,
 					LevelMin:    lvlMin,
 					LevelMax:    lvlMax,

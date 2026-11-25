@@ -1,6 +1,8 @@
 package main
 
 import (
+	"embed"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -8,11 +10,22 @@ import (
 
 	"github.com/InfSein/xiv-data-viewer/internal/uiapp"
 	"github.com/egoist/mygo"
+	_ "github.com/egoist/mygo/locales/ja"
+	_ "github.com/egoist/mygo/locales/zh-Hans"
 	"github.com/egoist/mygo/ui"
 )
 
+// 将中/英/日三语更新日志内嵌进客户端二进制，供应用内「更新日志」页面离线展示。
+//
+//go:embed CHANGELOG.md docs/CHANGELOG.en.md docs/CHANGELOG.ja.md
+var embeddedChangelogFS embed.FS
+
+func getChangelogFS() fs.FS {
+	return embeddedChangelogFS
+}
+
 // appVersion 默认版本号，正式构建时也可通过 -ldflags "-X main.appVersion=x.y.z" 覆盖。
-var appVersion = "2.1.0"
+var appVersion = "2.2.0"
 
 // userDataDirName 是应用持久化用户数据（配置、版本快照、窗口状态等）的目录名。
 const userDataDirName = "xiv-data-viewer"
@@ -71,9 +84,12 @@ func main() {
 	}
 
 	app := uiapp.NewApp(ver, dataDir, getSchemasFS())
+	app.SetChangelogFS(getChangelogFS())
 
 	mygo.App.WhenReady(func() {
-		// 在窗口创建前应用已持久化的外观主题，使窗口材质与原生控件同步跟随
+		// 注册受支持语言并在窗口创建前同步原生控件语言与外观主题
+		mygo.App.SetLanguages("zh-Hans", "ja", "en")
+		mygo.App.SetLocale(app.BCP47Locale())
 		mygo.Theme.SetSource(app.ThemeSource())
 		opts := windowOptions(runtime.GOOS)
 		opts.Content = ui.View(app.View)

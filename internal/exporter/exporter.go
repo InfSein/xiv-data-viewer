@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
@@ -21,6 +22,14 @@ type ExportLangInfo struct {
 	Label  string
 	Server string // "国服" | "国际服"
 	Lang   sqpack.Language
+}
+
+// ServerLabel 返回按当前界面语言本地化的区服归属名称。
+func (e ExportLangInfo) ServerLabel(lang i18n.Lang) string {
+	if e.Lang == sqpack.LangChineseSimplified {
+		return i18n.T(lang, "export.server_cn")
+	}
+	return i18n.T(lang, "export.server_global")
 }
 
 // AllSupportedLangs 列出全部 5 种标准导出语言。

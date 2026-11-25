@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/InfSein/xiv-data-viewer/internal/changelog"
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/egoist/mygo"
 )
 
@@ -69,5 +71,39 @@ func TestResolveUserDataDirFallbackWhenAppDataUnwritable(t *testing.T) {
 	gotMyGoDir, err := mygo.App.Path(mygo.PathUserData)
 	if err != nil || gotMyGoDir != wantDir {
 		t.Fatalf("回退时 mygo.PathUserData = %q (err=%v), want %q", gotMyGoDir, err, wantDir)
+	}
+}
+
+func TestEmbeddedChangelogAllLanguagesSynced(t *testing.T) {
+	fsys := getChangelogFS()
+	zhDoc, err := changelog.LoadForLang(fsys, i18n.LangZH)
+	if err != nil {
+		t.Fatalf("加载内嵌中文更新日志失败: %v", err)
+	}
+	enDoc, err := changelog.LoadForLang(fsys, i18n.LangEN)
+	if err != nil {
+		t.Fatalf("加载内嵌英文更新日志失败: %v", err)
+	}
+	jaDoc, err := changelog.LoadForLang(fsys, i18n.LangJA)
+	if err != nil {
+		t.Fatalf("加载内嵌日文更新日志失败: %v", err)
+	}
+
+	if len(zhDoc.Releases) == 0 {
+		t.Fatalf("中文更新日志不应为空")
+	}
+	if zhDoc.Intro != "" || enDoc.Intro != "" || jaDoc.Intro != "" {
+		t.Fatalf("三语更新日志不应再包含规范导语段落: zh=%q en=%q ja=%q", zhDoc.Intro, enDoc.Intro, jaDoc.Intro)
+	}
+	if len(enDoc.Releases) != len(zhDoc.Releases) || len(jaDoc.Releases) != len(zhDoc.Releases) {
+		t.Fatalf("三语更新日志版本数量不一致: zh=%d en=%d ja=%d", len(zhDoc.Releases), len(enDoc.Releases), len(jaDoc.Releases))
+	}
+	for i := range zhDoc.Releases {
+		if zhDoc.Releases[i].Version != enDoc.Releases[i].Version || zhDoc.Releases[i].Version != jaDoc.Releases[i].Version {
+			t.Fatalf("版本 #%d 标识不一致: zh=%q en=%q ja=%q", i, zhDoc.Releases[i].Version, enDoc.Releases[i].Version, jaDoc.Releases[i].Version)
+		}
+		if zhDoc.Releases[i].TotalItems != enDoc.Releases[i].TotalItems || zhDoc.Releases[i].TotalItems != jaDoc.Releases[i].TotalItems {
+			t.Fatalf("版本 %s 条目数不一致: zh=%d en=%d ja=%d", zhDoc.Releases[i].Version, zhDoc.Releases[i].TotalItems, enDoc.Releases[i].TotalItems, jaDoc.Releases[i].TotalItems)
+		}
 	}
 }

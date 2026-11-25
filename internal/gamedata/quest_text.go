@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
@@ -43,9 +44,12 @@ func (s *Service) GetQuestText(questID int) *QuestTextData {
 		return nil
 	}
 
-	lang := sqpack.LangChineseSimplified
-	if !s.store.HasCN && s.store.HasGlobal {
-		lang = sqpack.LangEnglish
+	lang := s.store.PrimaryLang
+	if lang == sqpack.LangNone {
+		lang = sqpack.LangChineseSimplified
+		if !s.store.HasCN && s.store.HasGlobal {
+			lang = sqpack.LangEnglish
+		}
 	}
 	rows, err := sqpack.LoadSheetRows(s.store.PrimaryReader, sheetPath, lang, nil)
 	if err != nil || len(rows) == 0 {
@@ -53,7 +57,7 @@ func (s *Service) GetQuestText(questID int) *QuestTextData {
 	}
 
 	actorMap := s.buildQuestSpeakerMap(q)
-	parsed := ParseQuestTextRows(q.ID, q.InternalID, rows, actorMap, s.resolveSeSheetText)
+	parsed := ParseQuestTextRowsForLang(q.ID, q.InternalID, rows, actorMap, s.appLang(), lang, s.resolveSeSheetText)
 
 	s.questTextMu.Lock()
 	if s.questTextCache == nil {
@@ -207,7 +211,7 @@ func isDigitsOnly(s string) bool {
 	return true
 }
 
-func formatFallbackSpeaker(token, internalID string) string {
+func formatFallbackSpeaker(token, internalID string, appLang i18n.Lang) string {
 	// 去除末尾与任务序号相同的 5 位数字后缀（如 CITIZENA05377 -> CITIZENA）
 	if idx := strings.LastIndexByte(internalID, '_'); idx >= 0 && idx+1 < len(internalID) {
 		questNum := internalID[idx+1:]
@@ -225,20 +229,20 @@ func formatFallbackSpeaker(token, internalID string) string {
 	if len(token) >= 7 && strings.HasPrefix(token, "CITIZEN") {
 		suffix := token[len("CITIZEN"):]
 		if len(suffix) <= 2 {
-			return "市民 " + suffix
+			return i18n.Tf(appLang, "gamedata.quest_text.citizen", "suffix", suffix)
 		}
 	}
 	if len(token) >= 10 && strings.HasPrefix(token, "ADVENTURER") {
 		suffix := token[len("ADVENTURER"):]
 		if len(suffix) <= 2 {
-			return "冒险者 " + suffix
+			return i18n.Tf(appLang, "gamedata.quest_text.adventurer", "suffix", suffix)
 		}
 	}
 	lower := strings.ToLower(token)
 	return strings.ToUpper(lower[:1]) + lower[1:]
 }
 
-func classifyQuestTextKey(rawKey, internalID string) (cat, token string) {
+func classifyQuestTextKey(rawKey, internalID string, appLang i18n.Lang) (cat, token string) {
 	upperKey := strings.ToUpper(strings.TrimSpace(rawKey))
 	upperID := strings.ToUpper(strings.TrimSpace(internalID))
 	rest := upperKey
@@ -254,27 +258,42 @@ func classifyQuestTextKey(rawKey, internalID string) (cat, token string) {
 	case "TODO":
 		return "todo", seg
 	case "SYSTEM":
-		return "system", "系统提示"
+		return "system", i18n.T(appLang, "gamedata.quest_text.system")
 	case "ACCESS":
-		return "system", "条件提示"
+		return "system", i18n.T(appLang, "gamedata.quest_text.access")
 	case "ANNOUNCE":
-		return "system", "公告"
+		return "system", i18n.T(appLang, "gamedata.quest_text.announce")
 	case "QIB":
-		return "battle", "战斗对话"
+		return "battle", i18n.T(appLang, "gamedata.quest_text.battle")
 	}
 	if len(seg) >= 1 && seg[0] == 'Q' && (len(seg) == 1 || isDigitsOnly(seg[1:])) {
-		return "question", "对话选项"
+		return "question", i18n.T(appLang, "gamedata.quest_text.question")
 	}
 	if len(seg) >= 1 && seg[0] == 'A' && (len(seg) == 1 || isDigitsOnly(seg[1:])) {
-		return "answer", "选项分支"
+		return "answer", i18n.T(appLang, "gamedata.quest_text.answer")
 	}
 	return "dialogue", seg
 }
 
 // ParseQuestTextRows 将任务文本 EXD 行数据解析为结构化的概要、目的与对话列表。
 func ParseQuestTextRows(questID int, internalID string, rows map[int]sqpack.Row, actorMap map[string]string, resolve sqpack.SeSheetResolver) *QuestTextData {
+	return ParseQuestTextRowsForLang(questID, internalID, rows, actorMap, i18n.LangZH, sqpack.LangChineseSimplified, resolve)
+}
+
+// ParseQuestTextRowsForLang 按指定界面语言与数据语言解析任务文本 EXD 行数据。
+func ParseQuestTextRowsForLang(questID int, internalID string, rows map[int]sqpack.Row, actorMap map[string]string, appLang i18n.Lang, dataLang sqpack.Language, resolve sqpack.SeSheetResolver) *QuestTextData {
 	if len(rows) == 0 {
 		return nil
+	}
+	if dataLang == sqpack.LangNone {
+		switch i18n.NormalizeLang(string(appLang)) {
+		case i18n.LangJA:
+			dataLang = sqpack.LangJapanese
+		case i18n.LangEN:
+			dataLang = sqpack.LangEnglish
+		default:
+			dataLang = sqpack.LangChineseSimplified
+		}
 	}
 	ids := make([]int, 0, len(rows))
 	for id := range rows {
@@ -286,12 +305,12 @@ func ParseQuestTextRows(questID int, internalID string, rows map[int]sqpack.Row,
 	for _, rid := range ids {
 		row := rows[rid]
 		rawKey := row.StringAt(0)
-		text := row.StringDisplayAt(1, resolve)
+		text := row.StringDisplayAtLang(1, dataLang, resolve)
 		if text == "" {
 			continue
 		}
 
-		cat, token := classifyQuestTextKey(rawKey, internalID)
+		cat, token := classifyQuestTextKey(rawKey, internalID, appLang)
 		switch cat {
 		case "seq":
 			out.Journals = append(out.Journals, text)
@@ -307,7 +326,7 @@ func ParseQuestTextRows(questID int, internalID string, rows map[int]sqpack.Row,
 				} else if cn, ok := actorMap[token]; ok && cn != "" {
 					speaker = cn
 				} else {
-					speaker = formatFallbackSpeaker(token, internalID)
+					speaker = formatFallbackSpeaker(token, internalID, appLang)
 				}
 			}
 

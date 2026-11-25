@@ -68,6 +68,11 @@ func DecodeSeString(raw []byte) string {
 // DecodeSeStringDisplay 将 EXD 原始字符串字节解码为适合界面阅读的纯文本，
 // 会通过 resolve 展开表引用，并将条件/玩家名标签转换为自然可读文本并清理私用区字形。
 func DecodeSeStringDisplay(raw []byte, resolve SeSheetResolver) string {
+	return DecodeSeStringDisplayForLang(raw, LangChineseSimplified, resolve)
+}
+
+// DecodeSeStringDisplayForLang 按指定界面/数据语言将 EXD 原始字符串解码为适合界面阅读的纯文本。
+func DecodeSeStringDisplayForLang(raw []byte, lang Language, resolve SeSheetResolver) string {
 	if len(raw) == 0 {
 		return ""
 	}
@@ -78,7 +83,7 @@ func DecodeSeStringDisplay(raw []byte, resolve SeSheetResolver) string {
 	if err != nil {
 		return CleanPUARunes(string(raw))
 	}
-	return CleanPUARunes(formatSeStringDisplay(parts, "\n", resolve))
+	return CleanPUARunes(formatSeStringDisplay(parts, "\n", lang, resolve))
 }
 
 // CleanPUARunes 去除 FF14 私有字体符号（U+E000..U+F8FF），并收拢因剥离残留的多余半角空格。
@@ -440,16 +445,49 @@ func formatSeStringText(parts []sePart, lineBreak string) string {
 	return b.String()
 }
 
-func formatSeExpressionDisplay(exp seExpression, lineBreak string, resolve SeSheetResolver) string {
+func seAdventurerLabel(lang Language) string {
+	switch lang {
+	case LangJapanese:
+		return "冒険者"
+	case LangEnglish:
+		return "Adventurer"
+	default:
+		return "冒险者"
+	}
+}
+
+func seButtonLabel(lang Language) string {
+	switch lang {
+	case LangJapanese:
+		return "[ボタン]"
+	case LangEnglish:
+		return "[Button]"
+	default:
+		return "[按键]"
+	}
+}
+
+func seValueLabel(lang Language) string {
+	switch lang {
+	case LangJapanese:
+		return "[数値]"
+	case LangEnglish:
+		return "[Value]"
+	default:
+		return "[数值]"
+	}
+}
+
+func formatSeExpressionDisplay(exp seExpression, lineBreak string, lang Language, resolve SeSheetResolver) string {
 	switch exp.exprType {
 	case exprInteger:
 		return fmt.Sprintf("%d", exp.intVal)
 	case exprString:
-		return formatSeStringDisplay(exp.subParts, lineBreak, resolve)
+		return formatSeStringDisplay(exp.subParts, lineBreak, lang, resolve)
 	case exprParameter:
 		// ObjectParameter(1) 在任务文本中恒指代玩家角色
 		if exp.paramKind == 235 && exp.intVal == 1 {
-			return "冒险者"
+			return seAdventurerLabel(lang)
 		}
 		return ""
 	case exprPlaceholder, exprBinary:
@@ -459,20 +497,62 @@ func formatSeExpressionDisplay(exp seExpression, lineBreak string, resolve SeShe
 	}
 }
 
-func fallbackSheetLabel(sheetName string) string {
+func fallbackSheetLabel(sheetName string, lang Language) string {
 	switch strings.ToLower(strings.TrimSpace(sheetName)) {
 	case "item", "itemhq", "itemmp":
-		return "[指定道具]"
+		switch lang {
+		case LangJapanese:
+			return "[指定アイテム]"
+		case LangEnglish:
+			return "[Target Item]"
+		default:
+			return "[指定道具]"
+		}
 	case "eventitem":
-		return "[任务道具]"
+		switch lang {
+		case LangJapanese:
+			return "[クエストアイテム]"
+		case LangEnglish:
+			return "[Quest Item]"
+		default:
+			return "[任务道具]"
+		}
 	case "bnpcname":
-		return "[目标敌人]"
+		switch lang {
+		case LangJapanese:
+			return "[対象エネミー]"
+		case LangEnglish:
+			return "[Target Enemy]"
+		default:
+			return "[目标敌人]"
+		}
 	case "eobj", "eobjname":
-		return "[目标物件]"
+		switch lang {
+		case LangJapanese:
+			return "[対象オブジェクト]"
+		case LangEnglish:
+			return "[Target Object]"
+		default:
+			return "[目标物件]"
+		}
 	case "classjob":
-		return "[当前职业]"
+		switch lang {
+		case LangJapanese:
+			return "[現在のクラス/ジョブ]"
+		case LangEnglish:
+			return "[Current Class/Job]"
+		default:
+			return "[当前职业]"
+		}
 	case "race":
-		return "[种族]"
+		switch lang {
+		case LangJapanese:
+			return "[種族]"
+		case LangEnglish:
+			return "[Race]"
+		default:
+			return "[种族]"
+		}
 	default:
 		if sheetName == "" {
 			return ""
@@ -481,7 +561,7 @@ func fallbackSheetLabel(sheetName string) string {
 	}
 }
 
-func formatSeStringDisplay(parts []sePart, lineBreak string, resolve SeSheetResolver) string {
+func formatSeStringDisplay(parts []sePart, lineBreak string, lang Language, resolve SeSheetResolver) string {
 	var b strings.Builder
 	for _, p := range parts {
 		if !p.isPayload {
@@ -506,8 +586,8 @@ func formatSeStringDisplay(parts []sePart, lineBreak string, resolve SeSheetReso
 		switch pl.tagType {
 		case 8: // If(cond, trueVal, falseVal)
 			if len(pl.data) == 3 {
-				tStr := strings.TrimSpace(formatSeExpressionDisplay(pl.data[1], lineBreak, resolve))
-				fStr := strings.TrimSpace(formatSeExpressionDisplay(pl.data[2], lineBreak, resolve))
+				tStr := strings.TrimSpace(formatSeExpressionDisplay(pl.data[1], lineBreak, lang, resolve))
+				fStr := strings.TrimSpace(formatSeExpressionDisplay(pl.data[2], lineBreak, lang, resolve))
 				switch {
 				case tStr != "" && fStr != "":
 					if tStr == fStr {
@@ -530,7 +610,7 @@ func formatSeStringDisplay(parts []sePart, lineBreak string, resolve SeSheetReso
 				var unique []string
 				seen := make(map[string]bool)
 				for i := 1; i < len(pl.data); i++ {
-					s := strings.TrimSpace(formatSeExpressionDisplay(pl.data[i], lineBreak, resolve))
+					s := strings.TrimSpace(formatSeExpressionDisplay(pl.data[i], lineBreak, lang, resolve))
 					if s != "" && !seen[s] {
 						seen[s] = true
 						unique = append(unique, s)
@@ -547,7 +627,7 @@ func formatSeStringDisplay(parts []sePart, lineBreak string, resolve SeSheetReso
 				}
 			}
 		case 40, 48, 49, 50, 51: // Sheet, SheetJa, SheetEn, SheetDe, SheetFr
-			sheetName := strings.TrimSpace(formatSeExpressionDisplay(pl.data[0], "", resolve))
+			sheetName := strings.TrimSpace(formatSeExpressionDisplay(pl.data[0], "", lang, resolve))
 			resolved := ""
 			if len(pl.data) >= 2 && pl.data[1].exprType == exprInteger && resolve != nil {
 				colIdx := 0
@@ -557,23 +637,23 @@ func formatSeStringDisplay(parts []sePart, lineBreak string, resolve SeSheetReso
 				resolved = strings.TrimSpace(resolve(sheetName, int(pl.data[1].intVal), colIdx))
 			}
 			if resolved == "" {
-				resolved = fallbackSheetLabel(sheetName)
+				resolved = fallbackSheetLabel(sheetName, lang)
 			}
 			b.WriteString(resolved)
 		case 18: // Gui 按键图标
-			b.WriteString("[按键]")
+			b.WriteString(seButtonLabel(lang))
 		case 32, 36: // Value, TwoDigitValue
-			val := strings.TrimSpace(formatSeExpressionDisplay(pl.data[0], lineBreak, resolve))
+			val := strings.TrimSpace(formatSeExpressionDisplay(pl.data[0], lineBreak, lang, resolve))
 			if val == "" {
-				val = "[数值]"
+				val = seValueLabel(lang)
 			}
 			b.WriteString(val)
 		case 80: // ZeroPaddedValue
-			val := strings.TrimSpace(formatSeExpressionDisplay(pl.data[0], lineBreak, resolve))
+			val := strings.TrimSpace(formatSeExpressionDisplay(pl.data[0], lineBreak, lang, resolve))
 			b.WriteString(val)
 		case 41: // Highlight: 展开内部文本（如玩家名），不包裹尖括号标签
 			for _, e := range pl.data {
-				b.WriteString(formatSeExpressionDisplay(e, lineBreak, resolve))
+				b.WriteString(formatSeExpressionDisplay(e, lineBreak, lang, resolve))
 			}
 		default:
 			// 颜色、发光、斜体等样式控制标签在纯文本展示时静默跳过

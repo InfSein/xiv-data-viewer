@@ -7,6 +7,7 @@ import (
 
 	"github.com/InfSein/xiv-data-viewer/internal/config"
 	"github.com/InfSein/xiv-data-viewer/internal/exporter"
+	"github.com/InfSein/xiv-data-viewer/internal/updater"
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 )
@@ -32,10 +33,14 @@ func (a *App) renderMapModal(c *ui.Context) {
 					area += fmt.Sprintf("（%s）", m.PlaceName)
 				}
 				ui.Text(c, area).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
-				numTextf(c, "%s · 坐标 (%.1f, %.1f) · %s", m.Title, m.CoordX, m.CoordY, m.Subtitle).
-					FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+				numText(c, a.tf("map.subtitle_coords",
+					"title", m.Title,
+					"x", fmt.Sprintf("%.1f", m.CoordX),
+					"y", fmt.Sprintf("%.1f", m.CoordY),
+					"sub", m.Subtitle,
+				)).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
 			})
-			if kitIconButton(c, "map-close-btn", icoClose, "关闭", btnOpts{variant: btnGhost, size: btnSizeSm}) {
+			if kitIconButton(c, "map-close-btn", icoClose, a.t("common.close"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
 				a.mapOpen = false
 			}
 		})
@@ -50,10 +55,10 @@ func (a *App) renderMapModal(c *ui.Context) {
 				} else {
 					ui.Column(c).Fill().Center().Gap(8).Children(func() {
 						if loading {
-							ui.Spinner(c).FontSize(20).TextColor(t.primary).Label("加载地图")
-							ui.Text(c, "正在读取游戏地图...").FontSize(t.text.xs).TextColor(t.muted)
+							ui.Spinner(c).FontSize(20).TextColor(t.primary).Label(a.t("map.loading"))
+							ui.Text(c, a.t("map.loading_desc")).FontSize(t.text.xs).TextColor(t.muted)
 						} else {
-							ui.Text(c, "该区域暂无可用地图").FontSize(t.text.sm).TextColor(t.muted)
+							ui.Text(c, a.t("map.unavailable")).FontSize(t.text.sm).TextColor(t.muted)
 						}
 					})
 				}
@@ -103,11 +108,11 @@ func (a *App) renderExportModal(c *ui.Context) {
 		ui.Row(c).FillWidth().Padding(16, 20, 12, 20).
 			Justify(ui.SpaceBetween).AlignItems(ui.Start).Gap(12).Children(func() {
 			ui.Column(c).Gap(2).Grow(1).Shrink(1).Children(func() {
-				ui.Text(c, "游戏全量 CSV 解包与本地导出").FontSize(t.text.base).FontWeight(600).TextColor(t.foreground)
-				numTextf(c, "共 %s 张数据表 · 将导出 %s 个 CSV 文件", formatInt(totalSheets), formatInt(totalTasks)).
+				ui.Text(c, a.t("export.title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground)
+				numText(c, a.tf("export.subtitle", "sheets", formatInt(totalSheets), "tasks", formatInt(totalTasks))).
 					FontSize(t.text.xs).TextColor(t.muted)
 			})
-			if kitIconButton(c, "exp-close-top", icoClose, "关闭", btnOpts{variant: btnGhost, size: btnSizeSm, disabled: isRunning}) {
+			if kitIconButton(c, "exp-close-top", icoClose, a.t("common.close"), btnOpts{variant: btnGhost, size: btnSizeSm, disabled: isRunning}) {
 				a.exportOpen = false
 			}
 		})
@@ -117,7 +122,7 @@ func (a *App) renderExportModal(c *ui.Context) {
 			ui.Column(c).FillWidth().Padding(4, 20, 16, 20).Gap(16).Children(func() {
 				// 语言选择网格
 				ui.Column(c).FillWidth().Gap(8).Children(func() {
-					ui.Text(c, "导出语言").FontSize(t.text.xs).FontWeight(500).TextColor(t.subdued)
+					ui.Text(c, a.t("export.langs_label")).FontSize(t.text.xs).FontWeight(500).TextColor(t.subdued)
 					ui.Grid(c).FillWidth().Columns(5).Gap(8).Children(func() {
 						for _, lang := range exporter.AllSupportedLangs {
 							avail := a.exporterSvc != nil && a.exporterSvc.IsLangAvailable(lang.Code)
@@ -143,9 +148,9 @@ func (a *App) renderExportModal(c *ui.Context) {
 									}
 									ui.Text(c, lang.Code+"/").FontSize(t.text.xs).FontWeight(600).TextColor(fg)
 									ui.Text(c, lang.Label).FontSize(t.text.xs).TextColor(t.foreground)
-									srv := lang.Server
+									srv := lang.ServerLabel(a.Language())
 									if !avail {
-										srv = "未配置"
+										srv = a.t("export.server_unset")
 									}
 									ui.Text(c, srv).FontSize(t.text.micro).TextColor(t.muted)
 								})
@@ -161,26 +166,26 @@ func (a *App) renderExportModal(c *ui.Context) {
 
 				// 本地解包输出目录
 				kitBlock(c, ui.Column(c).FillWidth().Padding(14).Gap(8), toneCard).Children(func() {
-					ui.Text(c, "本地输出目录").FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground)
+					ui.Text(c, a.t("export.output_dir")).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground)
 					ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
 						ui.Box(c).Grow(1).Shrink(1).Children(func() {
 							kitInput(c, "exp-dir-input", &a.exportDirDraft, kitInputOpts{
-								placeholder: "选择或输入本地目录，如 D:\\FFXIV-CSV-Export",
-								label:       "本地输出目录",
+								placeholder: a.t("export.output_placeholder"),
+								label:       a.t("export.output_dir"),
 								size:        btnSizeMd,
 								disabled:    isRunning,
 								clearable:   true,
 							})
 						})
-						if kitButton(c, "exp-dir-browse", "浏览...", btnOpts{variant: btnOutline, size: btnSizeMd, icon: icoFolder, disabled: isRunning}) {
+						if kitButton(c, "exp-dir-browse", a.t("common.browse_short"), btnOpts{variant: btnOutline, size: btnSizeMd, icon: icoFolder, disabled: isRunning}) {
 							cur := a.exportDirDraft
-							a.pickDirectoryAsync("选择 CSV 输出目录", cur, func(picked string) {
+							a.pickDirectoryAsync(a.t("export.dialog_dir_title"), cur, func(picked string) {
 								a.exportDirDraft = picked
 								a.persistExportDir(picked)
 							})
 						}
 					})
-					ui.Text(c, "解包到本地目录时，会先清空目标目录下对应的旧语言子目录（如 chs、ja）再重新生成。").
+					ui.Text(c, a.t("export.dir_hint")).
 						FontSize(t.text.micro).TextColor(t.muted)
 				})
 
@@ -189,20 +194,20 @@ func (a *App) renderExportModal(c *ui.Context) {
 					p := a.exportProgress
 					kitBlock(c, ui.Column(c).FillWidth().Padding(14).Gap(8), toneCard).Children(func() {
 						ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-							statusTxt := "等待开始"
+							statusTxt := a.t("export.status_idle")
 							statusCol := t.muted
 							switch {
 							case p.IsRunning:
-								statusTxt = fmt.Sprintf("正在导出 %s/%s...", p.CurrentLang, p.CurrentSheet)
+								statusTxt = a.tf("export.status_running", "lang", p.CurrentLang, "sheet", p.CurrentSheet)
 								statusCol = t.foreground
 							case p.IsCompleted:
-								statusTxt = fmt.Sprintf("导出完成：%s", p.OutputPath)
+								statusTxt = a.tf("export.status_done", "path", p.OutputPath)
 								statusCol = t.successText
 							case p.IsCancelled:
-								statusTxt = "已取消导出"
+								statusTxt = a.t("export.status_cancelled")
 								statusCol = t.warningText
 							case p.ErrorMessage != "":
-								statusTxt = "导出失败：" + p.ErrorMessage
+								statusTxt = a.tf("export.status_failed", "err", p.ErrorMessage)
 								statusCol = t.dangerText
 							}
 							ui.Text(c, statusTxt).FontSize(t.text.xs).FontWeight(500).TextColor(statusCol).SingleLine().Grow(1).Shrink(1)
@@ -214,9 +219,9 @@ func (a *App) renderExportModal(c *ui.Context) {
 							ui.Box(c).Grow(max(0, 100-done))
 						})
 						ui.Row(c).FillWidth().Justify(ui.SpaceBetween).Children(func() {
-							numTextf(c, "已处理 %s / %s 个文件", formatInt(p.ProcessedTasks), formatInt(p.TotalTasks)).FontSize(t.text.micro).TextColor(t.muted)
+							numText(c, a.tf("export.processed", "done", formatInt(p.ProcessedTasks), "total", formatInt(p.TotalTasks))).FontSize(t.text.micro).TextColor(t.muted)
 							if p.ErrorCount > 0 {
-								numTextf(c, "跳过 %d 张表", p.ErrorCount).FontSize(t.text.micro).TextColor(t.dangerText)
+								numText(c, a.tf("export.skipped", "count", fmt.Sprintf("%d", p.ErrorCount))).FontSize(t.text.micro).TextColor(t.dangerText)
 							}
 						})
 					})
@@ -233,23 +238,23 @@ func (a *App) renderExportModal(c *ui.Context) {
 			BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).
 			Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
 			if isRunning {
-				if kitButton(c, "exp-cancel-btn", "取消任务", btnOpts{variant: btnOutline, size: btnSizeSm}) {
+				if kitButton(c, "exp-cancel-btn", a.t("export.cancel_task"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
 					if a.exporterSvc != nil {
 						a.exporterSvc.Cancel()
 					}
 				}
 			} else {
-				if kitButton(c, "exp-close-bottom", "关闭", btnOpts{variant: btnGhost, size: btnSizeSm}) {
+				if kitButton(c, "exp-close-bottom", a.t("common.close"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
 					a.exportOpen = false
 				}
 			}
 
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				if kitButton(c, "exp-zip-btn", "导出为 Zip...", btnOpts{variant: btnOutline, size: btnSizeSm, disabled: isRunning || len(selectedCodes) == 0}) {
+				if kitButton(c, "exp-zip-btn", a.t("export.zip_btn"), btnOpts{variant: btnOutline, size: btnSizeSm, disabled: isRunning || len(selectedCodes) == 0}) {
 					a.startSaveZipFlow(selectedCodes)
 				}
 				canLocal := !isRunning && len(selectedCodes) > 0 && strings.TrimSpace(a.exportDirDraft) != ""
-				if kitButton(c, "exp-local-btn", "解包到本地目录", btnOpts{variant: btnDefault, size: btnSizeSm, disabled: !canLocal}) {
+				if kitButton(c, "exp-local-btn", a.t("export.local_btn"), btnOpts{variant: btnDefault, size: btnSizeSm, disabled: !canLocal}) {
 					a.startLocalUnpackFlow(selectedCodes)
 				}
 			})
@@ -282,7 +287,7 @@ func (a *App) startLocalUnpackFlow(langs []string) {
 	}
 	dir := strings.TrimSpace(a.exportDirDraft)
 	if dir == "" {
-		a.exportError = "请先选择或输入有效的本地输出目录"
+		a.exportError = a.t("export.err_no_dir")
 		return
 	}
 	a.exportError = ""
@@ -314,9 +319,9 @@ func (a *App) startSaveZipFlow(langs []string) {
 	go func() {
 		savePath, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
 			Parent:      a.win,
-			Title:       "保存全量 CSV Zip 压缩包",
+			Title:       a.t("export.zip_dialog_title"),
 			DefaultPath: defaultName,
-			Filters:     []mygo.FileFilter{{Name: "Zip 压缩包", Extensions: []string{"zip"}}},
+			Filters:     []mygo.FileFilter{{Name: a.t("export.zip_filter_name"), Extensions: []string{"zip"}}},
 		})
 		if err != nil || strings.TrimSpace(savePath) == "" {
 			return
@@ -333,4 +338,271 @@ func (a *App) startSaveZipFlow(langs []string) {
 			}
 		})
 	}()
+}
+
+// renderUpdateModal 渲染用户主动检查更新、下载进度与重启提醒弹窗。
+func (a *App) renderUpdateModal(c *ui.Context) {
+	if !a.updateModalOpen {
+		return
+	}
+	t := themeOf(c)
+	isDownloading := a.updateState == updateDownloading
+	curVer := strings.TrimPrefix(strings.TrimSpace(a.appVersion), "v")
+	if curVer == "" {
+		curVer = "0.0.0"
+	}
+
+	canSelfUpdate := false
+	var disableReason updater.SelfUpdateDisableReason
+	if a.updaterClient != nil {
+		canSelfUpdate, disableReason = a.updaterClient.CanSelfUpdate()
+	}
+
+	openDialog := true
+	ui.DialogBase(c.Key("update-modal"), &openDialog, func(backdrop, panel ui.Element) {
+		backdrop.Background(t.scrim)
+		applyOverlaySurface(c, panel.Width(500).Radius(t.radius.x2l).Clip(), shadowDialog)
+
+		// 标题栏
+		ui.Row(c).FillWidth().Padding(16, 20, 12, 20).
+			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).
+			Justify(ui.SpaceBetween).AlignItems(ui.Start).Gap(12).Children(func() {
+			ui.Column(c).Gap(3).Grow(1).Shrink(1).Children(func() {
+				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, a.t("update.modal_title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground)
+					switch a.updateState {
+					case updateAvailable:
+						drawPill(c, a.t("update.available_badge"), pillAccent)
+					case updateReady:
+						drawPill(c, a.t("update.ready_badge"), pillPositive)
+					}
+				})
+				numText(c, a.tf("update.current_version", "version", curVer)).FontSize(t.text.xs).TextColor(t.muted)
+			})
+			if kitIconButton(c, "upd-close-top", icoClose, a.t("common.close"), btnOpts{variant: btnGhost, size: btnSizeSm, disabled: isDownloading}) {
+				a.closeUpdateModal()
+			}
+		})
+
+		// 主体内容
+		ui.Scroll(c.Key("upd-body-scroll")).FillWidth().MaxHeight(360).Children(func() {
+			ui.Column(c).FillWidth().Padding(16, 20).Gap(12).Children(func() {
+				switch a.updateState {
+				case updateChecking:
+					kitBlock(c, ui.Row(c).FillWidth().Padding(16).Gap(12).AlignItems(ui.Center), toneCard).Children(func() {
+						ui.Spinner(c).FontSize(18).TextColor(t.primary).Label(a.t("update.checking"))
+						ui.Column(c).Gap(3).Grow(1).Shrink(1).Children(func() {
+							ui.Text(c, a.t("update.checking")).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
+							ui.Text(c, a.t("update.checking_hint")).FontSize(t.text.xs).TextColor(t.muted)
+						})
+					})
+
+				case updateUpToDate:
+					kitBlock(c, ui.Row(c).FillWidth().Padding(14).Gap(10).AlignItems(ui.Start), toneSuccess).Children(func() {
+						ui.Icon(c, icoCheck).Size(iconMd, iconMd).Margin(2, 0, 0, 0).Shrink(0)
+						ui.Column(c).Gap(3).Grow(1).Shrink(1).Children(func() {
+							ui.Text(c, a.t("update.up_to_date_title")).FontSize(t.text.sm).FontWeight(600)
+							numText(c, a.tf("update.up_to_date_desc", "version", curVer)).FontSize(t.text.xs)
+						})
+					})
+					if a.updateRelease != nil && a.updateRelease.Version != "" {
+						kitBlock(c, ui.Row(c).FillWidth().Padding(10, 12).Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8), toneCard).Children(func() {
+							numText(c, a.tf("update.latest_tag_meta", "version", a.updateRelease.Version)).FontSize(t.text.xs).TextColor(t.subdued)
+							if !a.updateRelease.PublishedAt.IsZero() {
+								numText(c, a.tf("update.published_at", "date", a.updateRelease.PublishedAt.Local().Format("2006-01-02"))).FontSize(t.text.xs).TextColor(t.muted)
+							}
+						})
+					}
+
+				case updateAvailable:
+					if rel := a.updateRelease; rel != nil {
+						kitBlock(c, ui.Column(c).FillWidth().Padding(14).Gap(6), toneCard).Children(func() {
+							ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
+								ui.Text(c, a.tf("update.available_title", "version", rel.Version)).FontSize(t.text.sm).FontWeight(600).TextColor(t.foreground).Grow(1).Shrink(1)
+								numText(c, a.tf("update.version_arrow", "from", curVer, "to", rel.Version)).FontSize(t.text.xs).FontWeight(500).TextColor(t.infoText).Shrink(0)
+							})
+							var metaParts []string
+							if rel.AssetSize > 0 {
+								metaParts = append(metaParts, a.tf("update.package_size", "size", formatByteSize(rel.AssetSize)))
+							}
+							if !rel.PublishedAt.IsZero() {
+								metaParts = append(metaParts, a.tf("update.published_at", "date", rel.PublishedAt.Local().Format("2006-01-02")))
+							}
+							if len(metaParts) > 0 {
+								numText(c, strings.Join(metaParts, " · ")).FontSize(t.text.xs).TextColor(t.muted)
+							}
+						})
+
+						notes := updater.FormatReleaseNotes(rel.Notes)
+						if notes == "" {
+							notes = a.t("update.notes_empty")
+						}
+						kitBlock(c, ui.Column(c).FillWidth().Padding(12, 14).Gap(6), toneOutline).Children(func() {
+							ui.Text(c, a.t("update.release_notes")).FontSize(t.text.xs).FontWeight(600).TextColor(t.subdued)
+							ui.Scroll(c.Key("upd-notes-scroll")).FillWidth().MaxHeight(168).Children(func() {
+								ui.Text(c, notes).FontSize(t.text.xs).LineHeight(lineProse).TextColor(t.foreground).Selectable()
+							})
+						})
+
+						if !canSelfUpdate {
+							var msg string
+							switch disableReason {
+							case updater.DisableReasonDev:
+								msg = a.t("update.disabled_dev")
+							case updater.DisableReasonPlatform:
+								msg = a.t("update.disabled_platform")
+							default:
+								msg = a.t("update.disabled_permission")
+							}
+							kitAlert(c, toneWarning, msg)
+						}
+					}
+
+				case updateDownloading:
+					targetVer := ""
+					if a.updateRelease != nil {
+						targetVer = a.updateRelease.Version
+					}
+					phaseText := a.updatePhaseLabel()
+					pct := 0
+					if a.updateDownTotal > 0 {
+						pct = int(min(100, (a.updateDownBytes*100)/a.updateDownTotal))
+					} else if a.updatePhase == updater.PhaseExtracting {
+						pct = 88
+					} else if a.updatePhase == updater.PhaseReplacing {
+						pct = 96
+					}
+
+					kitBlock(c, ui.Column(c).FillWidth().Padding(14).Gap(10), toneCard).Children(func() {
+						ui.Text(c, a.tf("update.downloading_title", "version", targetVer)).FontSize(t.text.sm).FontWeight(600).TextColor(t.foreground)
+						ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
+							ui.Text(c, phaseText).FontSize(t.text.xs).FontWeight(500).TextColor(t.subdued).SingleLine().Grow(1).Shrink(1)
+							numTextf(c, "%d%%", pct).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground).Shrink(0)
+						})
+						done := float32(max(4, pct))
+						ui.Row(c).FillWidth().Height(4).Radius(t.radius.full).Background(t.border).Clip().Children(func() {
+							ui.Box(c).Grow(done).Background(t.primary)
+							ui.Box(c).Grow(max(0, 100-done))
+						})
+						if a.updateDownTotal > 0 {
+							numText(c, a.tf("update.download_progress_bytes",
+								"done", formatByteSize(a.updateDownBytes),
+								"total", formatByteSize(a.updateDownTotal),
+							)).FontSize(t.text.micro).TextColor(t.muted)
+						}
+					})
+
+				case updateReady:
+					kitBlock(c, ui.Row(c).FillWidth().Padding(14).Gap(10).AlignItems(ui.Start), toneSuccess).Children(func() {
+						ui.Icon(c, icoCheck).Size(iconMd, iconMd).Margin(2, 0, 0, 0).Shrink(0)
+						ui.Column(c).Gap(3).Grow(1).Shrink(1).Children(func() {
+							ui.Text(c, a.tf("update.ready_title", "version", a.updateReadyVer)).FontSize(t.text.sm).FontWeight(600)
+							ui.Text(c, a.t("update.ready_desc")).FontSize(t.text.xs).LineHeight(lineProse)
+						})
+					})
+					if a.updateRelease != nil && strings.TrimSpace(a.updateRelease.Notes) != "" {
+						kitBlock(c, ui.Column(c).FillWidth().Padding(12, 14).Gap(6), toneOutline).Children(func() {
+							ui.Text(c, a.t("update.release_notes")).FontSize(t.text.xs).FontWeight(600).TextColor(t.subdued)
+							ui.Scroll(c.Key("upd-ready-notes-scroll")).FillWidth().MaxHeight(148).Children(func() {
+								ui.Text(c, updater.FormatReleaseNotes(a.updateRelease.Notes)).FontSize(t.text.xs).LineHeight(lineProse).TextColor(t.foreground).Selectable()
+							})
+						})
+					}
+
+				case updateError:
+					kitAlert(c, toneDanger, a.t("update.error_title")+" — "+a.t("update.error_desc"))
+					if strings.TrimSpace(a.updateErrorMsg) != "" {
+						kitBlock(c, ui.Column(c).FillWidth().Padding(12).Gap(4), toneCard).Children(func() {
+							ui.Text(c, a.tf("update.error_detail", "err", a.updateErrorMsg)).FontSize(t.text.xs).LineHeight(lineProse).TextColor(t.muted).Selectable()
+						})
+					}
+				}
+			})
+		})
+
+		// 底部操作条
+		ui.Row(c).FillWidth().Padding(12, 20).Background(t.sidebar).
+			BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).
+			Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
+			if a.updateState == updateAvailable || a.updateState == updateUpToDate || a.updateState == updateError {
+				if kitButton(c, "upd-open-rel", a.t("update.btn_open_release"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
+					c.OpenURL(a.releasePageURL())
+				}
+			} else {
+				ui.Box(c)
+			}
+
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+				switch a.updateState {
+				case updateChecking:
+					if kitButton(c, "upd-cancel-chk", a.t("common.close"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
+						a.closeUpdateModal()
+					}
+				case updateUpToDate:
+					if kitButton(c, "upd-recheck", a.t("update.btn_check_again"), btnOpts{variant: btnOutline, size: btnSizeSm, icon: icoRefresh}) {
+						a.startManualUpdateCheck()
+					}
+					if kitButton(c, "upd-ok-latest", a.t("common.close"), btnOpts{variant: btnDefault, size: btnSizeSm}) {
+						a.closeUpdateModal()
+					}
+				case updateAvailable:
+					if canSelfUpdate {
+						if kitButton(c, "upd-later", a.t("update.btn_later"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
+							a.closeUpdateModal()
+						}
+						if kitButton(c, "upd-install", a.t("update.btn_download_install"), btnOpts{variant: btnDefault, size: btnSizeSm, icon: icoDownload}) {
+							a.startManualUpdateInstall()
+						}
+					} else {
+						if kitButton(c, "upd-close-disabled", a.t("common.close"), btnOpts{variant: btnDefault, size: btnSizeSm}) {
+							a.closeUpdateModal()
+						}
+					}
+				case updateDownloading:
+					// 下载与文件替换中禁止误关弹窗
+				case updateReady:
+					if kitButton(c, "upd-restart-later", a.t("update.btn_restart_later"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
+						a.closeUpdateModal()
+					}
+					if kitButton(c, "upd-restart-now", a.t("update.btn_restart_now"), btnOpts{variant: btnDefault, size: btnSizeSm, icon: icoRefresh}) {
+						a.restartForUpdate()
+					}
+				case updateError:
+					if kitButton(c, "upd-err-close", a.t("common.close"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
+						a.closeUpdateModal()
+					}
+					if kitButton(c, "upd-retry", a.t("update.btn_retry"), btnOpts{variant: btnDefault, size: btnSizeSm, icon: icoRefresh}) {
+						a.startManualUpdateCheck()
+					}
+				}
+			})
+		})
+	})
+
+	if !openDialog && !isDownloading {
+		a.closeUpdateModal()
+	}
+}
+
+func (a *App) updatePhaseLabel() string {
+	switch a.updatePhase {
+	case updater.PhaseVerifying:
+		return a.t("update.phase_verifying")
+	case updater.PhaseExtracting:
+		return a.t("update.phase_extracting")
+	case updater.PhaseReplacing:
+		return a.t("update.phase_replacing")
+	default:
+		return a.t("update.phase_downloading")
+	}
+}
+
+func formatByteSize(n int64) string {
+	if n < 1024 {
+		return fmt.Sprintf("%d B", n)
+	}
+	if n < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
 }

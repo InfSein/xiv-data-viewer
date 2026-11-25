@@ -3,10 +3,12 @@ package backup
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/InfSein/xiv-data-viewer/internal/config"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
+	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 )
 
 func TestVersionDiffQuestsLevesAndCollectables(t *testing.T) {
@@ -167,6 +169,83 @@ func TestVersionDiffIgnoresPriceMidChanges(t *testing.T) {
 	entry := diff.Items[0]
 	if entry.ID != 50002 || len(entry.Changes) != 1 || entry.Changes[0].Field != "itemLevel" {
 		t.Fatalf("物品变更明细不应包含商店售价: %+v", entry)
+	}
+}
+
+func TestVersionDiffLocalizedFieldLabels(t *testing.T) {
+	backupDir := t.TempDir()
+
+	storeV1 := &gamedata.Store{
+		PrimaryVersion: "2026.10.01.0000.0000",
+		ItemSummaries: []gamedata.ItemSummary{
+			{ID: 44099, NameCn: "菠萝蛋糕", NameJa: "パイナップルケーキ", NameEn: "Pineapple Cake", ItemLevel: 680, CategoryName: "食品"},
+		},
+		Quests: []gamedata.QuestEntry{
+			{ID: 65536, NameCn: "主线任务", NameJa: "メインクエスト", NameEn: "Main Quest", Level: 90, GenreName: "MSQ", GilReward: 500, ExpReward: 1000},
+		},
+	}
+	if _, err := NewService(storeV1, backupDir).InitializeOnStartup(); err != nil {
+		t.Fatalf("v1 初始化快照失败: %v", err)
+	}
+
+	storeV2 := &gamedata.Store{
+		PrimaryVersion: "2026.11.01.0000.0000",
+		ItemSummaries: []gamedata.ItemSummary{
+			{ID: 44099, NameCn: "菠萝蛋糕", NameJa: "パイナップルケーキ", NameEn: "Pineapple Cake", ItemLevel: 690, CategoryName: "食品"},
+		},
+		Quests: []gamedata.QuestEntry{
+			{ID: 65536, NameCn: "主线任务", NameJa: "メインクエスト", NameEn: "Main Quest", Level: 90, GenreName: "MSQ", GilReward: 800, ExpReward: 1000},
+		},
+	}
+	svcV2 := NewService(storeV2, backupDir)
+	if _, err := svcV2.InitializeOnStartup(); err != nil {
+		t.Fatalf("v2 初始化快照失败: %v", err)
+	}
+
+	// 验证英语 Diff 标签与日文名保留
+	svcV2.SetLang(i18n.LangEN)
+	diffEN, err := svcV2.CompareVersions(VersionDiffQuery{Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("英语 Diff 对比失败: %v", err)
+	}
+	if len(diffEN.Items) != 2 {
+		t.Fatalf("期望物品与任务各一条变更，实际 %d", len(diffEN.Items))
+	}
+	wantItemLabelEN := i18n.T(i18n.LangEN, "backup.field_ilvl")
+	wantQuestGilEN := i18n.T(i18n.LangEN, "backup.quest_field_gil")
+	var foundItemEN, foundQuestEN bool
+	for _, it := range diffEN.Items {
+		if it.EntityType == "item" && it.ID == 44099 {
+			if it.NameJa != "パイナップルケーキ" {
+				t.Fatalf("Diff 条目未保留日文名称: %+v", it)
+			}
+			for _, ch := range it.Changes {
+				if ch.Label == wantItemLabelEN {
+					foundItemEN = true
+				}
+			}
+		}
+		if it.EntityType == "quest" && it.ID == 65536 {
+			for _, ch := range it.Changes {
+				if ch.Label == wantQuestGilEN {
+					foundQuestEN = true
+				}
+			}
+		}
+	}
+	if !foundItemEN || !foundQuestEN {
+		t.Fatalf("英语 Diff 字段标签不符合预期: itemEN=%v questEN=%v items=%+v", foundItemEN, foundQuestEN, diffEN.Items)
+	}
+
+	// 验证日语 Diff 标签
+	svcV2.SetLang(i18n.LangJA)
+	diffJA, err := svcV2.CompareVersions(VersionDiffQuery{EntityType: "item", Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("日语 Diff 对比失败: %v", err)
+	}
+	wantItemLabelJA := i18n.T(i18n.LangJA, "backup.field_ilvl")
+	if len(diffJA.Items) != 1 || len(diffJA.Items[0].Changes) == 0 || !strings.EqualFold(diffJA.Items[0].Changes[0].Label, wantItemLabelJA) {
+		t.Fatalf("日语 Diff 字段标签不符合预期: %+v", diffJA.Items)
 	}
 }
 

@@ -8,16 +8,18 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-var leveScopeFilters = []itemScopeDef{
-	{mode: "all", label: "全部"},
-	{mode: "craft", label: "制作"},
-	{mode: "gathering", label: "采集"},
-	{mode: "battle", label: "佣兵"},
-	{mode: "company", label: "军队"},
+func (a *App) leveScopeFilters() []itemScopeDef {
+	return []itemScopeDef{
+		{mode: "all", label: a.t("leves.scope_all")},
+		{mode: "craft", label: a.t("leves.scope_craft")},
+		{mode: "gathering", label: a.t("leves.scope_gathering")},
+		{mode: "battle", label: a.t("leves.scope_battle")},
+		{mode: "company", label: a.t("leves.scope_company")},
+	}
 }
 
 func (a *App) renderLevesView(c *ui.Context) {
-	kitResizer(c, "leve-split", &a.listW, itemListMinWidth, itemListMaxWidth, 8, "调整理符列表宽度",
+	kitResizer(c, "leve-split", &a.listW, itemListMinWidth, itemListMaxWidth, 8, a.t("shell.resize_leve_list"),
 		func() { a.renderLeveListPane(c) },
 		func() { a.renderLeveDetailPane(c) },
 	)
@@ -45,16 +47,16 @@ func (a *App) renderLeveListPane(c *ui.Context) {
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Children(func() {
 			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
 				ui.Row(c).Gap(6).AlignItems(ui.Baseline).Grow(1).Shrink(1).Children(func() {
-					ui.Text(c, "理符").FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
-					numTextf(c, "%s 项", formatInt(a.leveRes.Total)).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+					ui.Text(c, a.t("leves.title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
+					numText(c, a.tf("common.items_count", "count", formatInt(a.leveRes.Total))).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
 				})
 				ui.Row(c).Gap(4).AlignItems(ui.Center).Shrink(0).Children(func() {
 					if a.hasLeveFilter() {
-						if kitButton(c, "leve-reset", "重置", btnOpts{variant: btnGhost, size: btnSizeSm}) {
+						if kitButton(c, "leve-reset", a.t("common.reset"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
 							a.resetLeveFilters()
 						}
 					}
-					typeOpts := []selectOption[int]{{value: 0, label: "全部职能"}}
+					typeOpts := []selectOption[int]{{value: 0, label: a.t("leves.all_roles")}}
 					if a.status != nil {
 						for _, at := range a.status.LeveAssignmentTypes {
 							typeOpts = append(typeOpts, selectOption[int]{
@@ -70,8 +72,14 @@ func (a *App) renderLeveListPane(c *ui.Context) {
 				})
 			})
 
+			// 页面内置搜索栏
+			a.renderPageSearchInput(c, "leve-page-search", &a.leveQuery.Q, a.t("search.leve_placeholder"), a.t("search.leve_label"), func() {
+				a.leveQuery.Page = 1
+				a.refreshLeves()
+			})
+
 			ui.Row(c).FillWidth().Gap(4).Wrap().AlignItems(ui.Center).Children(func() {
-				for _, f := range leveScopeFilters {
+				for _, f := range a.leveScopeFilters() {
 					active := a.leveQuery.Kind == f.mode
 					if kitToggleChip(c, "l-scope-"+f.mode, f.label, "", active, nil) {
 						a.leveQuery.Kind = f.mode
@@ -83,8 +91,8 @@ func (a *App) renderLeveListPane(c *ui.Context) {
 		})
 
 		if len(a.leveRes.Items) == 0 {
-			kitEmpty(c, icoClipboard, "没有匹配的理符任务", "尝试在顶部搜索框调整关键词，或切换理符类型。", func() {
-				if kitButton(c, "leve-empty-reset", "重置筛选", btnOpts{variant: btnOutline, size: btnSizeSm}) {
+			kitEmpty(c, icoClipboard, a.t("leves.empty_title"), a.t("leves.empty_desc"), func() {
+				if kitButton(c, "leve-empty-reset", a.t("common.reset_filters"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
 					a.resetLeveFilters()
 				}
 			})
@@ -133,6 +141,10 @@ func (a *App) renderLeveListPane(c *ui.Context) {
 						if row.Clicked() {
 							a.selectLeve(lv.ID)
 						}
+						if lv.ID == a.scrollLeveListToID {
+							row.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollCenter})
+							a.scrollLeveListToID = 0
+						}
 					}
 				})
 			})
@@ -170,14 +182,14 @@ func (a *App) renderLeveDetailPane(c *ui.Context) {
 	kitPanel(c, a.panelRadius(c)).Grow(1).Shrink(1).FillHeight().Children(func() {
 		lv := a.selectedLeve
 		if lv == nil {
-			kitEmpty(c, icoClipboard, "选择理符查看详情", "点击左侧任意理符，可查看委托交纳物品、坐标与奖励道具池。", nil)
+			kitEmpty(c, icoClipboard, a.t("leves.detail_empty_title"), a.t("leves.detail_empty_desc"), nil)
 			return
 		}
 
 		ui.Row(c).FillWidth().Height(42).Padding(0, 16).Gap(10).
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).
 			Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
-			numTextf(c, "理符 #%d", lv.ID).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+			numText(c, a.tf("leves.id_header", "id", fmt.Sprintf("%d", lv.ID))).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
 			drawPill(c, lv.LeveKindLabel, leveKindPillKind(lv.LeveKind))
 		})
 
@@ -195,13 +207,10 @@ func (a *App) renderLeveDetailPane(c *ui.Context) {
 								ui.Text(c, lv.NameCn).FontSize(t.text.xl).FontWeight(600).LetterSpacing(-0.3).TextColor(t.foreground).Selectable()
 								numTextf(c, "#%d", lv.ID).FontSize(t.text.xs).TextColor(t.muted).Selectable()
 							})
-							if lv.NameEn != "" || lv.NameJa != "" {
+							if secLines := a.secondaryDataLines(lv.NameCn, lv.NameJa, lv.NameEn); len(secLines) > 0 {
 								ui.Row(c).Gap(12).Wrap().Children(func() {
-									if lv.NameEn != "" {
-										ui.Textf(c, "EN  %s", lv.NameEn).FontSize(t.text.xs).TextColor(t.muted).Selectable()
-									}
-									if lv.NameJa != "" {
-										ui.Textf(c, "JA  %s", lv.NameJa).FontSize(t.text.xs).TextColor(t.muted).Selectable()
+									for _, sec := range secLines {
+										ui.Textf(c, "%s  %s", sec.badge, sec.text).FontSize(t.text.xs).TextColor(t.muted).Selectable()
 									}
 								})
 							}
@@ -214,10 +223,10 @@ func (a *App) renderLeveDetailPane(c *ui.Context) {
 								meta = append(meta, lv.ClassJobCategoryName)
 							}
 							if lv.TownName != "" {
-								meta = append(meta, "所属城市："+lv.TownName)
+								meta = append(meta, a.tf("leves.town", "name", lv.TownName))
 							}
 							if lv.ClientName != "" {
-								meta = append(meta, "委托人："+lv.ClientName)
+								meta = append(meta, a.tf("leves.client", "name", lv.ClientName))
 							}
 							numText(c, strings.Join(meta, " · ")).FontSize(t.text.xs).TextColor(t.subdued)
 						})
@@ -229,33 +238,33 @@ func (a *App) renderLeveDetailPane(c *ui.Context) {
 						})
 					}
 
-					expStr := fmt.Sprintf("%s EXP", formatInt(lv.ExpReward))
+					expStr := a.tf("common.exp_amount", "amount", formatInt(lv.ExpReward))
 					if lv.ExpReward <= 0 {
-						expStr = "无"
+						expStr = a.t("common.none")
 					}
-					gilStr := fmt.Sprintf("%s 金币", formatInt(lv.GilReward))
+					gilStr := a.tf("common.gil_amount", "amount", formatInt(lv.GilReward))
 					if lv.GilReward <= 0 {
-						gilStr = "无"
+						gilStr = a.t("common.none")
 					}
-					limitStr := fmt.Sprintf("限额 %d 张", max(1, lv.AllowanceCost))
+					limitStr := a.tf("leves.allowance", "count", fmt.Sprintf("%d", max(1, lv.AllowanceCost)))
 					if lv.TimeLimit > 0 {
-						limitStr += fmt.Sprintf(" · 限时 %d 分钟", lv.TimeLimit)
+						limitStr += a.tf("leves.time_limit", "min", fmt.Sprintf("%d", lv.TimeLimit))
 					}
 					kitBlock(c, ui.Row(c).FillWidth().Clip(), toneCard).Children(func() {
-						drawMetricSplitCell(c, "基础经验", expStr, false)
-						drawMetricSplitCell(c, "金币报酬", gilStr, true)
-						drawMetricSplitCell(c, "消耗与时限", limitStr, true)
+						drawMetricSplitCell(c, a.t("leves.base_exp"), expStr, false)
+						drawMetricSplitCell(c, a.t("leves.gil_reward"), gilStr, true)
+						drawMetricSplitCell(c, a.t("leves.cost_limit"), limitStr, true)
 					})
 
 					// 接取与执行地点
 					if lv.PlaceNameIssued != "" || lv.PlaceNameStart != "" || lv.LevemeteLocation != nil || lv.StartLocation != nil || lv.GatheringTargetLocation != nil {
-						drawDetailSection(c, "接取与执行地点", "", nil, func() {
+						drawDetailSection(c, a.t("leves.locations_title"), "", nil, func() {
 							ui.Column(c).FillWidth().Gap(8).Children(func() {
 								if lv.PlaceNameIssued != "" || lv.LevemeteLocation != nil {
 									ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Wrap().Children(func() {
-										ui.Textf(c, "理符发布点：%s", nonEmptyStr(lv.PlaceNameIssued, "发行官位置")).FontSize(t.text.xs).TextColor(t.foreground)
+										ui.Text(c, a.tf("leves.issued_at", "name", nonEmptyStr(lv.PlaceNameIssued, a.t("leves.issued_fallback")))).FontSize(t.text.xs).TextColor(t.foreground)
 										if lv.LevemeteLocation != nil {
-											a.renderMapLocationBtn(c, fmt.Sprintf("lv-issued-map-%d", lv.ID), lv.NameCn, "理符发布位置", lv.LevemeteLocation)
+											a.renderMapLocationBtn(c, fmt.Sprintf("lv-issued-map-%d", lv.ID), lv.NameCn, a.t("leves.map_issued_sub"), lv.LevemeteLocation)
 										}
 									})
 								}
@@ -265,16 +274,16 @@ func (a *App) renderLeveDetailPane(c *ui.Context) {
 										if lv.PlaceNameStartZone != "" && lv.PlaceNameStartZone != zone {
 											zone += " · " + lv.PlaceNameStartZone
 										}
-										ui.Textf(c, "任务区域：%s", nonEmptyStr(zone, "起始坐标")).FontSize(t.text.xs).TextColor(t.foreground)
+										ui.Text(c, a.tf("leves.target_zone", "name", nonEmptyStr(zone, a.t("leves.start_fallback")))).FontSize(t.text.xs).TextColor(t.foreground)
 										if lv.StartLocation != nil {
-											a.renderMapLocationBtn(c, fmt.Sprintf("lv-start-map-%d", lv.ID), lv.NameCn, "理符执行坐标", lv.StartLocation)
+											a.renderMapLocationBtn(c, fmt.Sprintf("lv-start-map-%d", lv.ID), lv.NameCn, a.t("leves.map_start_sub"), lv.StartLocation)
 										}
 									})
 								}
 								if lv.GatheringTargetLocation != nil {
 									ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Wrap().Children(func() {
-										ui.Text(c, "采集点分布区域").FontSize(t.text.xs).TextColor(t.foreground)
-										a.renderMapLocationBtn(c, fmt.Sprintf("lv-gath-map-%d", lv.ID), lv.NameCn, "采集目标分布", lv.GatheringTargetLocation)
+										ui.Text(c, a.t("leves.gather_area")).FontSize(t.text.xs).TextColor(t.foreground)
+										a.renderMapLocationBtn(c, fmt.Sprintf("lv-gath-map-%d", lv.ID), lv.NameCn, a.t("leves.map_gather_sub"), lv.GatheringTargetLocation)
 									})
 								}
 							})
@@ -285,12 +294,12 @@ func (a *App) renderLeveDetailPane(c *ui.Context) {
 					if len(lv.TurnInItems) > 0 {
 						meta := ""
 						if lv.CraftRepeats > 0 {
-							meta = fmt.Sprintf("可重复追加 %d 次（最多交纳 %d 轮）", lv.CraftRepeats, 1+lv.CraftRepeats)
+							meta = a.tf("leves.turnin_repeats", "repeats", fmt.Sprintf("%d", lv.CraftRepeats), "total", fmt.Sprintf("%d", 1+lv.CraftRepeats))
 						}
-						drawDetailSection(c, "需要交纳道具", meta, nil, func() {
+						drawDetailSection(c, a.t("leves.turnin_title"), meta, nil, func() {
 							ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 								for idx, ti := range lv.TurnInItems {
-									btn := ui.ButtonBase(c.Key(fmt.Sprintf("lv-turn-%d-%d", lv.ID, idx))).Label("查看 "+ti.ItemName).
+									btn := ui.ButtonBase(c.Key(fmt.Sprintf("lv-turn-%d-%d", lv.ID, idx))).Label(a.tf("common.view_item", "name", ti.ItemName)).
 										MinWidth(240).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
 										Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
 										Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
@@ -303,7 +312,7 @@ func (a *App) renderLeveDetailPane(c *ui.Context) {
 											ui.Column(c).Gap(2).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 												ui.Text(c, ti.ItemName).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
 												if lv.CraftRepeats > 0 {
-													numTextf(c, "单轮 ×%d · 满交共 ×%d", ti.Count, ti.Count*(1+lv.CraftRepeats)).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+													numText(c, a.tf("leves.turnin_round_total", "per", fmt.Sprintf("%d", ti.Count), "total", fmt.Sprintf("%d", ti.Count*(1+lv.CraftRepeats)))).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 												}
 											})
 										})
@@ -321,13 +330,13 @@ func (a *App) renderLeveDetailPane(c *ui.Context) {
 					hasDetails := lv.RuleName != "" || lv.FishingSpotName != "" || lv.SpearfishingPlaceName != "" ||
 						len(lv.Objectives) > 0 || len(lv.CombatTargets) > 0 || len(lv.RequiredObjectiveItems) > 0
 					if hasDetails {
-						drawDetailSection(c, "委托规则与目标", lv.RuleName, nil, func() {
+						drawDetailSection(c, a.t("leves.rules_title"), lv.RuleName, nil, func() {
 							ui.Column(c).FillWidth().Gap(8).Children(func() {
 								if lv.FishingSpotName != "" {
-									ui.Textf(c, "关联钓场：%s", lv.FishingSpotName).FontSize(t.text.xs).TextColor(t.subdued)
+									ui.Text(c, a.tf("leves.fishing_spot", "name", lv.FishingSpotName)).FontSize(t.text.xs).TextColor(t.subdued)
 								}
 								if lv.SpearfishingPlaceName != "" {
-									ui.Textf(c, "刺鱼渔场：%s", lv.SpearfishingPlaceName).FontSize(t.text.xs).TextColor(t.subdued)
+									ui.Text(c, a.tf("leves.spearfishing_spot", "name", lv.SpearfishingPlaceName)).FontSize(t.text.xs).TextColor(t.subdued)
 								}
 								for _, obj := range lv.Objectives {
 									ui.Text(c, "• "+obj).FontSize(t.text.xs).TextColor(t.subdued)
@@ -368,17 +377,17 @@ func (a *App) renderLeveDetailPane(c *ui.Context) {
 
 					// 概率奖励道具池
 					if len(lv.RewardGroups) > 0 {
-						drawDetailSection(c, "随机奖励道具池", fmt.Sprintf("%d 组", len(lv.RewardGroups)), nil, func() {
+						drawDetailSection(c, a.t("leves.reward_pool_title"), a.tf("leves.reward_pool_meta", "count", fmt.Sprintf("%d", len(lv.RewardGroups))), nil, func() {
 							ui.Column(c).FillWidth().Gap(10).Children(func() {
 								for gIdx, grp := range lv.RewardGroups {
 									if gIdx > 0 {
 										kitSeparator(c, false)
 									}
 									ui.Column(c.Key(fmt.Sprintf("lv-rgrp-%d-%d", lv.ID, gIdx))).FillWidth().Gap(6).Children(func() {
-										numTextf(c, "掉落概率 %d%%", grp.ProbabilityPercent).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground)
+										numText(c, a.tf("leves.drop_prob", "pct", fmt.Sprintf("%d", grp.ProbabilityPercent))).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground)
 										ui.Row(c).FillWidth().Gap(6).Wrap().Children(func() {
 											for iIdx, ri := range grp.Items {
-												btn := ui.ButtonBase(c.Key(fmt.Sprintf("lv-ritem-%d-%d-%d", lv.ID, gIdx, iIdx))).Label("查看 "+ri.ItemName).
+												btn := ui.ButtonBase(c.Key(fmt.Sprintf("lv-ritem-%d-%d-%d", lv.ID, gIdx, iIdx))).Label(a.tf("common.view_item", "name", ri.ItemName)).
 													Padding(4, 8).Radius(t.radius.md).Background(t.card).Border(hairline, t.border).
 													Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 												if btn.Hovered() {
