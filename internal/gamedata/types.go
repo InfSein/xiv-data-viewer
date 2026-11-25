@@ -131,6 +131,7 @@ type QuestEntry struct {
 	IsJobFixed            bool // 任务名含固定职业标识（\ue0bf）
 	SectionID             int
 	SectionName           string
+	CategoryID            int
 	CategoryName          string
 	GenreID               int
 	GenreName             string

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/InfSein/xiv-data-viewer/internal/config"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/egoist/mygo/ui"
 )
@@ -104,44 +105,9 @@ func (a *App) renderQuestListPane(c *ui.Context) {
 				ui.Column(c).FillWidth().Padding(6, 8).Gap(2).Children(func() {
 					for _, q := range a.questRes.Items {
 						isSel := q.ID == a.selectedQuestID
-						row := ui.ButtonBase(c.Key(fmt.Sprintf("quest-row-%d", q.ID))).
-							FillWidth().Padding(8, 10).Gap(10).Radius(t.radius.lg).
-							AlignItems(ui.Center).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-						switch {
-						case isSel && row.Hovered():
-							row.Background(t.tint(2.25))
-						case isSel:
-							row.Background(t.tint(1.75))
-						case row.Hovered():
-							row.Background(t.tint(1))
-						}
-						title := gamedata.CleanQuestTitle(q.NameCn)
-						if title == "" {
-							title = q.NameCn
-						}
-						row.Children(func() {
-							a.drawGameIcon(c, q.IconID, false, 32, t.radius.md)
-							ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
-								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
-									fw := 500
-									if isSel {
-										fw = 600
-									}
-									ui.Text(c, title).FontSize(t.text.sm).FontWeight(fw).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
-									numTextf(c, "#%d", q.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
-								})
-								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-									ui.Text(c, a.formatQuestRowType(q)).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
-									numText(c, formatQuestRowMeta(q)).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
-								})
-							})
-						})
-						if row.Clicked() {
+						fav := a.isFavorite(config.RecordKindQuest, q.ID)
+						if a.renderQuestListRow(c, fmt.Sprintf("quest-row-%d", q.ID), q, isSel, fav, &a.scrollQuestListToID) {
 							a.selectQuest(q.ID)
-						}
-						if q.ID == a.scrollQuestListToID {
-							row.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollCenter})
-							a.scrollQuestListToID = 0
 						}
 					}
 				})
@@ -196,25 +162,135 @@ func formatQuestRowMeta(q gamedata.QuestEntry) string {
 	return ""
 }
 
+// renderQuestListRow 绘制单条任务列表行（供「任务」页面与「收藏」任务标签页复用）。
+func (a *App) renderQuestListRow(c *ui.Context, key string, q gamedata.QuestEntry, isSel, favorited bool, scrollToID *int) bool {
+	t := themeOf(c)
+	row := ui.ButtonBase(c.Key(key)).
+		FillWidth().Padding(8, 10).Gap(10).Radius(t.radius.lg).
+		AlignItems(ui.Center).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+	switch {
+	case isSel && row.Hovered():
+		row.Background(t.tint(2.25))
+	case isSel:
+		row.Background(t.tint(1.75))
+	case row.Hovered():
+		row.Background(t.tint(1))
+	}
+	title := gamedata.CleanQuestTitle(q.NameCn)
+	if title == "" {
+		title = q.NameCn
+	}
+	row.Children(func() {
+		a.drawGameIcon(c, q.IconID, false, 32, t.radius.md)
+		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
+			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
+				fw := 500
+				if isSel {
+					fw = 600
+				}
+				ui.Text(c, title).FontSize(t.text.sm).FontWeight(fw).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
+				ui.Row(c).Gap(4).AlignItems(ui.Center).Shrink(0).Children(func() {
+					if favorited {
+						ui.Icon(c, icoStarFill).Size(11, 11).TextColor(t.attention)
+					}
+					numTextf(c, "#%d", q.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+				})
+			})
+			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
+				ui.Text(c, a.formatQuestRowType(q)).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
+				numText(c, formatQuestRowMeta(q)).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
+			})
+		})
+	})
+	if scrollToID != nil && q.ID == *scrollToID {
+		row.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollCenter})
+		*scrollToID = 0
+	}
+	return row.Clicked()
+}
+
+type questDetailPaneOpts struct {
+	keyPrefix      string
+	showOpenInMain bool
+	quest          *gamedata.QuestEntry
+	questText      *gamedata.QuestTextData
+	textLoading    bool
+	summaryOpen    *bool
+	dialogueOpen   *bool
+	scroll         *ui.ScrollState
+	onJumpItem     func(int)
+	onJumpQuest    func(int)
+}
+
 func (a *App) renderQuestDetailPane(c *ui.Context) {
+	a.renderQuestDetailWithOpts(c, questDetailPaneOpts{
+		keyPrefix:    "wb-quest",
+		quest:        a.selectedQuest,
+		questText:    a.selectedQuestText,
+		textLoading:  a.questTextLoading,
+		summaryOpen:  &a.questSummaryOpen,
+		dialogueOpen: &a.questDialogueOpen,
+		scroll:       &a.questDetailScroll,
+		onJumpItem:   a.inspectItemFromOtherTab,
+		onJumpQuest:  a.jumpToQuest,
+	})
+}
+
+func (a *App) renderQuestDetailWithOpts(c *ui.Context, opts questDetailPaneOpts) {
 	t := themeOf(c)
 	kitPanel(c, a.panelRadius(c)).Grow(1).Shrink(1).FillHeight().Children(func() {
-		q := a.selectedQuest
+		q := opts.quest
 		if q == nil {
 			kitEmpty(c, icoScroll, a.t("quests.detail_empty_title"), a.t("quests.detail_empty_desc"), nil)
 			return
 		}
 
+		onJumpItem := opts.onJumpItem
+		if onJumpItem == nil {
+			onJumpItem = a.inspectItemFromOtherTab
+		}
+		onJumpQuest := opts.onJumpQuest
+		if onJumpQuest == nil {
+			onJumpQuest = a.jumpToQuest
+		}
+		scroll := opts.scroll
+		if scroll == nil {
+			scroll = &a.questDetailScroll
+		}
+		summaryOpen := opts.summaryOpen
+		if summaryOpen == nil {
+			summaryOpen = &a.questSummaryOpen
+		}
+		dialogueOpen := opts.dialogueOpen
+		if dialogueOpen == nil {
+			dialogueOpen = &a.questDialogueOpen
+		}
+
 		ui.Row(c).FillWidth().Height(42).Padding(0, 16).Gap(10).
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).
 			Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
-			numText(c, a.tf("quests.id_header", "id", fmt.Sprintf("%d", q.ID), "internal", q.InternalID)).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
-			if q.ExpansionName != "" {
-				drawPill(c, q.ExpansionName, pillNeutral)
-			}
+			ui.Row(c).Gap(6).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+				numText(c, a.tf("quests.id_header", "id", fmt.Sprintf("%d", q.ID), "internal", q.InternalID)).
+					FontSize(t.text.xs).TextColor(t.muted).SingleLine().Shrink(1)
+				if opts.showOpenInMain {
+					if kitIconButton(c, opts.keyPrefix+"-open-main", icoExternalLink, a.t("recent.open_in_quests"), btnOpts{variant: btnGhost, size: btnSizeXs}) {
+						a.inspectQuestFromOtherTab(q.ID)
+					}
+				}
+			})
+
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Shrink(0).Children(func() {
+				fav := a.isFavorite(config.RecordKindQuest, q.ID)
+				if kitFavoriteToggleButton(c, opts.keyPrefix+"-fav-btn", a.t("favorites.add_btn"), a.t("favorites.added_btn"), fav) {
+					a.toggleFavorite(config.RecordKindQuest, q.ID)
+				}
+				if q.ExpansionName != "" {
+					drawPill(c, q.ExpansionName, pillNeutral)
+				}
+			})
 		})
 
-		ui.Scroll(c.Key("quest-detail-scroll")).TrackScroll(&a.questDetailScroll).Grow(1).Shrink(1).FillWidth().Children(func() {
+		ui.Scroll(c.Key(opts.keyPrefix + "-scroll")).TrackScroll(scroll).Grow(1).Shrink(1).FillWidth().Children(func() {
 			ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(20, 24, 32, 24).Children(func() {
 				ui.Column(c).FillWidth().MaxWidth(880).Gap(18).Children(func() {
 					// 1. 头部摘要（类型图标 + 中/日/英标题 + 元数据 + 任务专属徽章）
@@ -224,19 +300,19 @@ func (a *App) renderQuestDetailPane(c *ui.Context) {
 					a.renderQuestBannerImage(c, q)
 
 					// 3. 报酬与解锁（数值概览 + 道具奖励 + 解锁奖励）
-					a.renderQuestRewardsSection(c, q)
+					a.renderQuestRewardsSection(c, q, onJumpItem)
 
 					// 4. 任务概要与目的（成功解析时显示，默认折叠防剧透）
-					a.renderQuestSummarySection(c, q)
+					a.renderQuestSummarySection(c, opts.keyPrefix, q, opts.questText, opts.textLoading, summaryOpen)
 
 					// 5. 接取与交付 NPC 及地点坐标
 					a.renderQuestNPCsSection(c, q)
 
 					// 6. 接取条件与前置要求
-					a.renderQuestRequirementsSection(c, q)
+					a.renderQuestRequirementsSection(c, q, onJumpQuest)
 
 					// 7. 任务对话文本（成功解析时显示，默认折叠防剧透）
-					a.renderQuestDialogueSection(c, q)
+					a.renderQuestDialogueSection(c, opts.keyPrefix, q, opts.questText, dialogueOpen)
 				})
 			})
 		})
@@ -340,7 +416,7 @@ func (a *App) renderQuestBannerImage(c *ui.Context, q *gamedata.QuestEntry) {
 	})
 }
 
-func (a *App) renderQuestRewardsSection(c *ui.Context, q *gamedata.QuestEntry) {
+func (a *App) renderQuestRewardsSection(c *ui.Context, q *gamedata.QuestEntry, onJumpItem func(int)) {
 	t := themeOf(c)
 
 	gilStr := a.t("common.none")
@@ -406,7 +482,7 @@ func (a *App) renderQuestRewardsSection(c *ui.Context, q *gamedata.QuestEntry) {
 						numTextf(c, "×%d", ri.Count).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
 					})
 					if btn.Clicked() {
-						a.inspectItemFromOtherTab(ri.ItemID)
+						onJumpItem(ri.ItemID)
 					}
 				}
 			})
@@ -471,7 +547,7 @@ func (a *App) renderQuestNPCsSection(c *ui.Context, q *gamedata.QuestEntry) {
 	})
 }
 
-func (a *App) renderQuestRequirementsSection(c *ui.Context, q *gamedata.QuestEntry) {
+func (a *App) renderQuestRequirementsSection(c *ui.Context, q *gamedata.QuestEntry, onJumpQuest func(int)) {
 	hasReqs := len(q.PreviousQuestIDs) > 0 || len(q.QuestLockIDs) > 0 || len(q.InstanceContentNames) > 0 ||
 		q.ClassJobRequiredName != "" || q.GrandCompanyName != "" || q.BeastTribeName != "" || q.MountRequiredName != "" || q.IsHouseRequired
 	if !hasReqs {
@@ -499,7 +575,7 @@ func (a *App) renderQuestRequirementsSection(c *ui.Context, q *gamedata.QuestEnt
 							ui.Text(c, pqName).FontSize(t.text.xs).FontWeight(500).TextColor(t.infoText)
 						})
 						if btn.Clicked() {
-							a.jumpToQuest(pqID)
+							onJumpQuest(pqID)
 						}
 					}
 				})
@@ -510,7 +586,7 @@ func (a *App) renderQuestRequirementsSection(c *ui.Context, q *gamedata.QuestEnt
 					for idx, lID := range q.QuestLockIDs {
 						lName := gamedata.CleanQuestTitle(q.QuestLockNames[idx])
 						if kitButton(c, fmt.Sprintf("qlock-%d-%d", q.ID, lID), lName, btnOpts{variant: btnOutline, size: btnSizeXs}) {
-							a.jumpToQuest(lID)
+							onJumpQuest(lID)
 						}
 					}
 				})
@@ -589,10 +665,9 @@ func (a *App) renderQuestCollapsibleSection(c *ui.Context, key, title, countMeta
 	})
 }
 
-func (a *App) renderQuestSummarySection(c *ui.Context, q *gamedata.QuestEntry) {
-	qt := a.selectedQuestText
+func (a *App) renderQuestSummarySection(c *ui.Context, keyPrefix string, q *gamedata.QuestEntry, qt *gamedata.QuestTextData, textLoading bool, summaryOpen *bool) {
 	if qt == nil {
-		if a.questTextLoading {
+		if textLoading {
 			t := themeOf(c)
 			ui.Row(c).FillWidth().Padding(14, 0, 0, 0).Gap(8).AlignItems(ui.Center).
 				BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).Children(func() {
@@ -615,7 +690,7 @@ func (a *App) renderQuestSummarySection(c *ui.Context, q *gamedata.QuestEntry) {
 		metaParts = append(metaParts, a.tf("quests.summary_objectives_meta", "count", fmt.Sprintf("%d", len(qt.Objectives))))
 	}
 
-	a.renderQuestCollapsibleSection(c, fmt.Sprintf("q-summary-fold-%d", q.ID), a.t("quests.summary_title"), strings.Join(metaParts, " · "), &a.questSummaryOpen, func() {
+	a.renderQuestCollapsibleSection(c, fmt.Sprintf("%s-summary-fold-%d", keyPrefix, q.ID), a.t("quests.summary_title"), strings.Join(metaParts, " · "), summaryOpen, func() {
 		ui.Column(c).FillWidth().Gap(12).Children(func() {
 			if len(qt.Journals) > 0 {
 				ui.Column(c).FillWidth().Gap(8).Children(func() {
@@ -652,15 +727,14 @@ func (a *App) renderQuestSummarySection(c *ui.Context, q *gamedata.QuestEntry) {
 	})
 }
 
-func (a *App) renderQuestDialogueSection(c *ui.Context, q *gamedata.QuestEntry) {
-	qt := a.selectedQuestText
+func (a *App) renderQuestDialogueSection(c *ui.Context, keyPrefix string, q *gamedata.QuestEntry, qt *gamedata.QuestTextData, dialogueOpen *bool) {
 	if qt == nil || len(qt.Dialogues) == 0 {
 		return
 	}
 	t := themeOf(c)
 	meta := a.tf("quests.dialogue_meta", "count", fmt.Sprintf("%d", len(qt.Dialogues)))
 
-	a.renderQuestCollapsibleSection(c, fmt.Sprintf("q-dialogue-fold-%d", q.ID), a.t("quests.dialogue_title"), meta, &a.questDialogueOpen, func() {
+	a.renderQuestCollapsibleSection(c, fmt.Sprintf("%s-dialogue-fold-%d", keyPrefix, q.ID), a.t("quests.dialogue_title"), meta, dialogueOpen, func() {
 		ui.Column(c).FillWidth().Gap(8).Children(func() {
 			for _, line := range qt.Dialogues {
 				padL := float32(14)

@@ -5,9 +5,28 @@ import (
 	"sync"
 
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
+	"github.com/InfSein/xiv-data-viewer/resources"
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 )
+
+var (
+	appLogoOnce sync.Once
+	appLogoBmp  *ui.Bitmap
+)
+
+// appLogoBitmap 返回内嵌的应用品牌图标 GPU 位图（缩放到 128×128 以兼顾高分屏清晰度与内存占用）。
+func appLogoBitmap() *ui.Bitmap {
+	appLogoOnce.Do(func() {
+		if len(resources.IconPNG) == 0 {
+			return
+		}
+		if bmp, err := ui.DecodeBitmapScaled(resources.IconPNG, 128); err == nil {
+			appLogoBmp = bmp
+		}
+	})
+	return appLogoBmp
+}
 
 // BitmapCache 管理游戏图标与地图贴图的异步解码与 GPU 位图缓存，防止在 UI 主线程阻塞。
 type BitmapCache struct {

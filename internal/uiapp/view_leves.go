@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/InfSein/xiv-data-viewer/internal/config"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/egoist/mygo/ui"
 )
@@ -101,49 +102,9 @@ func (a *App) renderLeveListPane(c *ui.Context) {
 				ui.Column(c).FillWidth().Padding(6, 8).Gap(2).Children(func() {
 					for _, lv := range a.leveRes.Items {
 						isSel := lv.ID == a.selectedLeveID
-						row := ui.ButtonBase(c.Key(fmt.Sprintf("leve-row-%d", lv.ID))).
-							FillWidth().Padding(8, 10).Gap(10).Radius(t.radius.lg).
-							AlignItems(ui.Center).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-						switch {
-						case isSel && row.Hovered():
-							row.Background(t.tint(2.25))
-						case isSel:
-							row.Background(t.tint(1.75))
-						case row.Hovered():
-							row.Background(t.tint(1))
-						}
-						iconID := lv.AssignmentTypeIconID
-						if iconID <= 0 {
-							iconID = lv.IconCityState
-						}
-						row.Children(func() {
-							a.drawGameIcon(c, iconID, false, 32, t.radius.md)
-							ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
-								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
-									fw := 500
-									if isSel {
-										fw = 600
-									}
-									ui.Text(c, lv.NameCn).FontSize(t.text.sm).FontWeight(fw).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
-									numTextf(c, "#%d", lv.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
-								})
-								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-									sub := nonEmptyStr(lv.AssignmentTypeName, nonEmptyStr(lv.ClassJobCategoryName, lv.LeveKindLabel))
-									ui.Text(c, sub).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
-									meta := ""
-									if lv.ClassJobLevel > 0 {
-										meta = fmt.Sprintf("Lv.%d", lv.ClassJobLevel)
-									}
-									numText(c, meta).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
-								})
-							})
-						})
-						if row.Clicked() {
+						fav := a.isFavorite(config.RecordKindLeve, lv.ID)
+						if a.renderLeveListRow(c, fmt.Sprintf("leve-row-%d", lv.ID), lv, isSel, fav, &a.scrollLeveListToID) {
 							a.selectLeve(lv.ID)
-						}
-						if lv.ID == a.scrollLeveListToID {
-							row.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollCenter})
-							a.scrollLeveListToID = 0
 						}
 					}
 				})
@@ -177,23 +138,115 @@ func leveKindPillKind(kind string) pillKind {
 	}
 }
 
+// renderLeveListRow 绘制单条理符列表行（供「理符」页面与「收藏」理符标签页复用）。
+func (a *App) renderLeveListRow(c *ui.Context, key string, lv gamedata.LeveEntry, isSel, favorited bool, scrollToID *int) bool {
+	t := themeOf(c)
+	row := ui.ButtonBase(c.Key(key)).
+		FillWidth().Padding(8, 10).Gap(10).Radius(t.radius.lg).
+		AlignItems(ui.Center).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+	switch {
+	case isSel && row.Hovered():
+		row.Background(t.tint(2.25))
+	case isSel:
+		row.Background(t.tint(1.75))
+	case row.Hovered():
+		row.Background(t.tint(1))
+	}
+	iconID := lv.AssignmentTypeIconID
+	if iconID <= 0 {
+		iconID = lv.IconCityState
+	}
+	row.Children(func() {
+		a.drawGameIcon(c, iconID, false, 32, t.radius.md)
+		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
+			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
+				fw := 500
+				if isSel {
+					fw = 600
+				}
+				ui.Text(c, lv.NameCn).FontSize(t.text.sm).FontWeight(fw).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
+				ui.Row(c).Gap(4).AlignItems(ui.Center).Shrink(0).Children(func() {
+					if favorited {
+						ui.Icon(c, icoStarFill).Size(11, 11).TextColor(t.attention)
+					}
+					numTextf(c, "#%d", lv.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+				})
+			})
+			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
+				sub := nonEmptyStr(lv.AssignmentTypeName, nonEmptyStr(lv.ClassJobCategoryName, lv.LeveKindLabel))
+				ui.Text(c, sub).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
+				meta := ""
+				if lv.ClassJobLevel > 0 {
+					meta = fmt.Sprintf("Lv.%d", lv.ClassJobLevel)
+				}
+				numText(c, meta).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
+			})
+		})
+	})
+	if scrollToID != nil && lv.ID == *scrollToID {
+		row.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollCenter})
+		*scrollToID = 0
+	}
+	return row.Clicked()
+}
+
+type leveDetailPaneOpts struct {
+	keyPrefix      string
+	showOpenInMain bool
+	leve           *gamedata.LeveEntry
+	scroll         *ui.ScrollState
+	onJumpItem     func(int)
+}
+
 func (a *App) renderLeveDetailPane(c *ui.Context) {
+	a.renderLeveDetailWithOpts(c, leveDetailPaneOpts{
+		keyPrefix:  "wb-leve",
+		leve:       a.selectedLeve,
+		scroll:     &a.leveDetailScroll,
+		onJumpItem: a.inspectItemFromOtherTab,
+	})
+}
+
+func (a *App) renderLeveDetailWithOpts(c *ui.Context, opts leveDetailPaneOpts) {
 	t := themeOf(c)
 	kitPanel(c, a.panelRadius(c)).Grow(1).Shrink(1).FillHeight().Children(func() {
-		lv := a.selectedLeve
+		lv := opts.leve
 		if lv == nil {
 			kitEmpty(c, icoClipboard, a.t("leves.detail_empty_title"), a.t("leves.detail_empty_desc"), nil)
 			return
 		}
 
+		onJumpItem := opts.onJumpItem
+		if onJumpItem == nil {
+			onJumpItem = a.inspectItemFromOtherTab
+		}
+		scroll := opts.scroll
+		if scroll == nil {
+			scroll = &a.leveDetailScroll
+		}
+
 		ui.Row(c).FillWidth().Height(42).Padding(0, 16).Gap(10).
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).
 			Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
-			numText(c, a.tf("leves.id_header", "id", fmt.Sprintf("%d", lv.ID))).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
-			drawPill(c, lv.LeveKindLabel, leveKindPillKind(lv.LeveKind))
+			ui.Row(c).Gap(6).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+				numText(c, a.tf("leves.id_header", "id", fmt.Sprintf("%d", lv.ID))).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+				if opts.showOpenInMain {
+					if kitIconButton(c, opts.keyPrefix+"-open-main", icoExternalLink, a.t("recent.open_in_leves"), btnOpts{variant: btnGhost, size: btnSizeXs}) {
+						a.inspectLeveFromOtherTab(lv.ID)
+					}
+				}
+			})
+
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Shrink(0).Children(func() {
+				fav := a.isFavorite(config.RecordKindLeve, lv.ID)
+				if kitFavoriteToggleButton(c, opts.keyPrefix+"-fav-btn", a.t("favorites.add_btn"), a.t("favorites.added_btn"), fav) {
+					a.toggleFavorite(config.RecordKindLeve, lv.ID)
+				}
+				drawPill(c, lv.LeveKindLabel, leveKindPillKind(lv.LeveKind))
+			})
 		})
 
-		ui.Scroll(c.Key("leve-detail-scroll")).TrackScroll(&a.leveDetailScroll).Grow(1).Shrink(1).FillWidth().Children(func() {
+		ui.Scroll(c.Key(opts.keyPrefix + "-scroll")).TrackScroll(scroll).Grow(1).Shrink(1).FillWidth().Children(func() {
 			ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(20, 24, 32, 24).Children(func() {
 				ui.Column(c).FillWidth().MaxWidth(880).Gap(20).Children(func() {
 					iconID := lv.AssignmentTypeIconID
@@ -319,7 +372,7 @@ func (a *App) renderLeveDetailPane(c *ui.Context) {
 										numTextf(c, "×%d", ti.Count).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
 									})
 									if btn.Clicked() {
-										a.inspectItemFromOtherTab(ti.ItemID)
+										onJumpItem(ti.ItemID)
 									}
 								}
 							})
@@ -404,7 +457,7 @@ func (a *App) renderLeveDetailPane(c *ui.Context) {
 													})
 												})
 												if btn.Clicked() {
-													a.inspectItemFromOtherTab(ri.ItemID)
+													onJumpItem(ri.ItemID)
 												}
 											}
 										})

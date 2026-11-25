@@ -5,60 +5,97 @@ import (
 	"strings"
 	"time"
 
+	"github.com/InfSein/xiv-data-viewer/internal/config"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 )
 
+type itemDetailPaneOpts struct {
+	keyPrefix       string
+	showOpenInMain  bool
+	detail          *gamedata.ItemDetail
+	activeRecipeIdx *int
+	scroll          *ui.ScrollState
+	onJumpItem      func(int)
+	onJumpQuest     func(int)
+	onJumpLeve      func(int)
+}
+
 // renderItemDetailPane 渲染右侧详情阅读面板（扁平百科式排版：顶部分隔节标题 + 零嵌套卡片 + 克制语义标注）。
 func (a *App) renderItemDetailPane(c *ui.Context) {
+	a.renderItemDetailWithOpts(c, itemDetailPaneOpts{
+		keyPrefix:       "wb-item",
+		detail:          a.selectedDetail,
+		activeRecipeIdx: &a.activeRecipeIdx,
+		scroll:          &a.detailScroll,
+		onJumpItem:      a.jumpToItem,
+		onJumpQuest:     a.inspectQuestFromOtherTab,
+		onJumpLeve:      a.inspectLeveFromOtherTab,
+	})
+}
+
+func (a *App) renderItemDetailWithOpts(c *ui.Context, opts itemDetailPaneOpts) {
 	t := themeOf(c)
 	kitPanel(c, a.panelRadius(c)).Grow(1).Shrink(1).FillHeight().Children(func() {
-		item := a.selectedDetail
+		item := opts.detail
 		if item == nil {
 			kitEmpty(c, icoPackage, a.t("detail.empty_title"), a.t("detail.empty_desc"), nil)
 			return
 		}
 
+		onJumpItem := opts.onJumpItem
+		if onJumpItem == nil {
+			onJumpItem = a.jumpToItem
+		}
+		onJumpQuest := opts.onJumpQuest
+		if onJumpQuest == nil {
+			onJumpQuest = a.inspectQuestFromOtherTab
+		}
+		onJumpLeve := opts.onJumpLeve
+		if onJumpLeve == nil {
+			onJumpLeve = a.inspectLeveFromOtherTab
+		}
+		activeRecipeIdx := opts.activeRecipeIdx
+		if activeRecipeIdx == nil {
+			activeRecipeIdx = &a.activeRecipeIdx
+		}
+		scroll := opts.scroll
+		if scroll == nil {
+			scroll = &a.detailScroll
+		}
+
 		isHQ := item.CanBeHQ && a.showHQ
 
-		// 顶部工具条：最近浏览 + 复制名称 + NQ/HQ 切换
+		// 顶部工具条：常驻物品 ID 与基本信息 / 跳转主页面 + 收藏按钮 + 复制名称 + NQ/HQ 切换
 		ui.Row(c).FillWidth().Height(42).Padding(0, 16).Gap(10).
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).
 			Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
-			ui.Row(c).Gap(4).AlignItems(ui.Center).Grow(1).Shrink(1).ClipX().Children(func() {
-				if len(a.history) > 1 {
-					ui.Text(c, a.t("detail.recent")).FontSize(t.text.micro).TextColor(t.muted).Shrink(0).SingleLine()
-					maxHist := min(6, len(a.history))
-					for _, h := range a.history[:maxHist] {
-						isSel := h.id == a.selectedItemID
-						chip := ui.ButtonBase(c.Key(fmt.Sprintf("hist-%d", h.id))).Label(h.nameCn).
-							Height(22).Padding(0, 7).Radius(t.radius.md).Shrink(0).
-							Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-						if isSel {
-							chip.Background(t.tint(1.75))
-						} else if chip.Hovered() {
-							chip.Background(t.tint(1))
-						}
-						chip.Children(func() {
-							fg := t.muted
-							fw := 400
-							if isSel {
-								fg = t.foreground
-								fw = 500
-							}
-							ui.Text(c, h.nameCn).FontSize(t.text.xs).FontWeight(fw).TextColor(fg).SingleLine()
-						})
-						if chip.Clicked() && !isSel {
-							a.jumpToItem(h.id)
-						}
+			ui.Row(c).Gap(6).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).ClipX().Children(func() {
+				numText(c, a.tf("detail.item_id", "id", fmt.Sprintf("%d", item.ID))).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Shrink(0)
+				if opts.showOpenInMain {
+					if kitIconButton(c, opts.keyPrefix+"-open-main", icoExternalLink, a.t("recent.open_in_items"), btnOpts{variant: btnGhost, size: btnSizeXs}) {
+						a.inspectItemFromOtherTab(item.ID)
 					}
-				} else {
-					numText(c, a.tf("detail.item_id", "id", fmt.Sprintf("%d", item.ID))).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+				}
+				var barMeta []string
+				if item.CategoryName != "" {
+					barMeta = append(barMeta, item.CategoryName)
+				}
+				if item.ItemLevel > 0 {
+					barMeta = append(barMeta, a.tf("detail.ilvl", "ilvl", fmt.Sprintf("%d", item.ItemLevel)))
+				}
+				if len(barMeta) > 0 {
+					numText(c, "· "+strings.Join(barMeta, " · ")).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Shrink(1).MinWidth(0)
 				}
 			})
 
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Shrink(0).Children(func() {
+			ui.Row(c).Gap(6).AlignItems(ui.Center).Shrink(0).Children(func() {
+				fav := a.isFavorite(config.RecordKindItem, item.ID)
+				if kitFavoriteToggleButton(c, opts.keyPrefix+"-fav-btn", a.t("favorites.add_btn"), a.t("favorites.added_btn"), fav) {
+					a.toggleFavorite(config.RecordKindItem, item.ID)
+				}
+
 				copied := a.copiedItemID == item.ID && time.Now().Before(a.copiedUntil)
 				copyLabel := a.t("detail.copy_name")
 				copyIco := icoCopy
@@ -66,7 +103,7 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 					copyLabel = a.t("detail.copied")
 					copyIco = icoCheck
 				}
-				if kitButton(c, "copy-item-name", copyLabel, btnOpts{variant: btnOutline, size: btnSizeSm, icon: copyIco}) {
+				if kitButton(c, opts.keyPrefix+"-copy-name", copyLabel, btnOpts{variant: btnOutline, size: btnSizeSm, icon: copyIco}) {
 					if a.win != nil {
 						mygo.Clipboard.WriteText(item.NameCn)
 					}
@@ -79,7 +116,7 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 					if a.showHQ {
 						selIdx = 1
 					}
-					if nextIdx, chg := kitSegmentedTabs(c, "hq-toggle", selIdx, []string{a.t("common.nq"), a.t("common.hq")}); chg {
+					if nextIdx, chg := kitSegmentedTabs(c, opts.keyPrefix+"-hq-toggle", selIdx, []string{a.t("common.nq"), a.t("common.hq")}); chg {
 						a.showHQ = nextIdx == 1
 					}
 				}
@@ -87,7 +124,7 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 		})
 
 		// 主详情滚动阅读区
-		ui.Scroll(c.Key("item-detail-scroll")).TrackScroll(&a.detailScroll).Grow(1).Shrink(1).FillWidth().Children(func() {
+		ui.Scroll(c.Key(opts.keyPrefix + "-scroll")).TrackScroll(scroll).Grow(1).Shrink(1).FillWidth().Children(func() {
 			ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(20, 24, 32, 24).Children(func() {
 				ui.Column(c).FillWidth().MaxWidth(880).Gap(20).Children(func() {
 					hasRecipes := len(item.Recipes) > 0
@@ -117,11 +154,11 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 					}
 
 					if hasColTurnIn {
-						a.renderCollectableTurnInsSection(c, item.NameCn, item.CollectableTurnIns)
+						a.renderCollectableTurnInsSection(c, item.NameCn, item.CollectableTurnIns, onJumpItem)
 					}
 
 					if hasColReward {
-						a.renderCollectableRewardsSection(c, item.NameCn, item.CollectableRewards)
+						a.renderCollectableRewardsSection(c, item.NameCn, item.CollectableRewards, onJumpItem)
 					}
 
 					if hasAch {
@@ -129,23 +166,23 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 					}
 
 					if hasQuestSrc {
-						a.renderQuestSourcesSection(c, item.RewardedFromQuests)
+						a.renderQuestSourcesSection(c, item.RewardedFromQuests, onJumpQuest)
 					}
 
 					if hasLeveTurnIn {
-						a.renderLeveSourcesSection(c, a.t("detail.leve_turnins"), item.TurnInForLeves, true)
+						a.renderLeveSourcesSection(c, a.t("detail.leve_turnins"), item.TurnInForLeves, true, onJumpLeve)
 					}
 
 					if hasLeveReward {
-						a.renderLeveSourcesSection(c, a.t("detail.leve_rewards"), item.RewardedFromLeves, false)
+						a.renderLeveSourcesSection(c, a.t("detail.leve_rewards"), item.RewardedFromLeves, false, onJumpLeve)
 					}
 
 					if hasShops {
-						a.renderShopsSection(c, item.NameCn, item.Shops)
+						a.renderShopsSection(c, item.NameCn, item.Shops, onJumpItem)
 					}
 
 					if hasRecipes {
-						a.renderRecipesSection(c, item)
+						a.renderRecipesSection(c, opts.keyPrefix, item, activeRecipeIdx, onJumpItem)
 					}
 
 					if hasGather {
@@ -157,7 +194,7 @@ func (a *App) renderItemDetailPane(c *ui.Context) {
 					}
 
 					if hasUsedIn {
-						a.renderUsedInRecipesSection(c, item.UsedInRecipes)
+						a.renderUsedInRecipesSection(c, item.UsedInRecipes, onJumpItem)
 					}
 
 					if !hasShops && !hasRecipes && !hasUsedIn && !hasGather && !hasRetainer && !hasAch &&
@@ -595,7 +632,7 @@ func shopTypePillKind(shopType string) pillKind {
 	}
 }
 
-func (a *App) renderShopsSection(c *ui.Context, itemName string, shops []gamedata.ShopPurchaseSource) {
+func (a *App) renderShopsSection(c *ui.Context, itemName string, shops []gamedata.ShopPurchaseSource, onJumpItem func(int)) {
 	t := themeOf(c)
 	drawDetailSection(c, a.t("detail.shops"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(shops))), nil, func() {
 		ui.Column(c).FillWidth().Children(func() {
@@ -648,7 +685,7 @@ func (a *App) renderShopsSection(c *ui.Context, itemName string, shops []gamedat
 									})
 								})
 								if btn.Clicked() {
-									a.jumpToItem(cost.ItemID)
+									onJumpItem(cost.ItemID)
 								}
 							}
 						})
@@ -773,7 +810,7 @@ func collectableKindPill(kind string) pillKind {
 	}
 }
 
-func (a *App) renderCollectableTurnInsSection(c *ui.Context, itemName string, list []gamedata.CollectableTurnInSource) {
+func (a *App) renderCollectableTurnInsSection(c *ui.Context, itemName string, list []gamedata.CollectableTurnInSource, onJumpItem func(int)) {
 	t := themeOf(c)
 	drawDetailSection(c, a.t("detail.col_turnin_title"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(list))), nil, func() {
 		ui.Column(c).FillWidth().Children(func() {
@@ -838,7 +875,7 @@ func (a *App) renderCollectableTurnInsSection(c *ui.Context, itemName string, li
 											})
 										})
 										if btn.Clicked() {
-											a.jumpToItem(tier.RewardItemID)
+											onJumpItem(tier.RewardItemID)
 										}
 									}
 
@@ -875,7 +912,7 @@ func (a *App) renderCollectableTurnInsSection(c *ui.Context, itemName string, li
 	})
 }
 
-func (a *App) renderCollectableRewardsSection(c *ui.Context, itemName string, list []gamedata.CollectableRewardSource) {
+func (a *App) renderCollectableRewardsSection(c *ui.Context, itemName string, list []gamedata.CollectableRewardSource, onJumpItem func(int)) {
 	t := themeOf(c)
 	drawDetailSection(c, a.t("detail.col_reward_title"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(list))), nil, func() {
 		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
@@ -906,14 +943,14 @@ func (a *App) renderCollectableRewardsSection(c *ui.Context, itemName string, li
 					numText(c, amtStr).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
 				})
 				if btn.Clicked() {
-					a.jumpToItem(rew.TurnInItemID)
+					onJumpItem(rew.TurnInItemID)
 				}
 			}
 		})
 	})
 }
 
-func (a *App) renderQuestSourcesSection(c *ui.Context, quests []gamedata.ItemQuestSource) {
+func (a *App) renderQuestSourcesSection(c *ui.Context, quests []gamedata.ItemQuestSource, onJumpQuest func(int)) {
 	t := themeOf(c)
 	drawDetailSection(c, a.t("detail.quest_rewards"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(quests))), nil, func() {
 		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
@@ -940,14 +977,14 @@ func (a *App) renderQuestSourcesSection(c *ui.Context, quests []gamedata.ItemQue
 					numTextf(c, "×%d", qs.Count).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
 				})
 				if btn.Clicked() {
-					a.inspectQuestFromOtherTab(qs.QuestID)
+					onJumpQuest(qs.QuestID)
 				}
 			}
 		})
 	})
 }
 
-func (a *App) renderLeveSourcesSection(c *ui.Context, title string, leves []gamedata.ItemLeveSource, isTurnIn bool) {
+func (a *App) renderLeveSourcesSection(c *ui.Context, title string, leves []gamedata.ItemLeveSource, isTurnIn bool, onJumpLeve func(int)) {
 	t := themeOf(c)
 	drawDetailSection(c, title, a.tf("common.items_count", "count", fmt.Sprintf("%d", len(leves))), nil, func() {
 		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
@@ -972,22 +1009,22 @@ func (a *App) renderLeveSourcesSection(c *ui.Context, title string, leves []game
 					numText(c, right).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
 				})
 				if btn.Clicked() {
-					a.inspectLeveFromOtherTab(ls.LeveID)
+					onJumpLeve(ls.LeveID)
 				}
 			}
 		})
 	})
 }
 
-func (a *App) renderRecipesSection(c *ui.Context, item *gamedata.ItemDetail) {
+func (a *App) renderRecipesSection(c *ui.Context, keyPrefix string, item *gamedata.ItemDetail, activeRecipeIdx *int, onJumpItem func(int)) {
 	t := themeOf(c)
-	if a.activeRecipeIdx >= len(item.Recipes) {
-		a.activeRecipeIdx = 0
+	if *activeRecipeIdx >= len(item.Recipes) {
+		*activeRecipeIdx = 0
 	}
-	cur := item.Recipes[a.activeRecipeIdx]
+	cur := item.Recipes[*activeRecipeIdx]
 	var curTree *gamedata.RecipeTreeNode
-	if a.activeRecipeIdx < len(item.RecipeTrees) {
-		curTree = &item.RecipeTrees[a.activeRecipeIdx]
+	if *activeRecipeIdx < len(item.RecipeTrees) {
+		curTree = &item.RecipeTrees[*activeRecipeIdx]
 	} else if len(item.RecipeTrees) > 0 {
 		curTree = &item.RecipeTrees[0]
 	}
@@ -999,8 +1036,8 @@ func (a *App) renderRecipesSection(c *ui.Context, item *gamedata.ItemDetail) {
 			labels[i] = r.CraftJobName
 		}
 		trailing = func() {
-			if nextIdx, chg := kitSegmentedTabs(c, fmt.Sprintf("rec-%d", item.ID), a.activeRecipeIdx, labels); chg {
-				a.activeRecipeIdx = nextIdx
+			if nextIdx, chg := kitSegmentedTabs(c, fmt.Sprintf("%s-rec-%d", keyPrefix, item.ID), *activeRecipeIdx, labels); chg {
+				*activeRecipeIdx = nextIdx
 			}
 		}
 	}
@@ -1083,10 +1120,10 @@ func (a *App) renderRecipesSection(c *ui.Context, item *gamedata.ItemDetail) {
 				ui.Column(c).FillWidth().Gap(4).Children(func() {
 					ui.Text(c, a.t("detail.recipe_materials")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Padding(2, 0)
 					for idx, ch := range curTree.Children {
-						a.renderRecipeTreeNode(c, ch, 1, 0, fmt.Sprintf("rt-%d-%d", cur.ID, idx))
+						a.renderRecipeTreeNode(c, ch, 1, 0, fmt.Sprintf("rt-%d-%d", cur.ID, idx), onJumpItem)
 					}
 					for idx, cry := range curTree.Crystals {
-						a.renderCrystalRow(c, cry, 1, fmt.Sprintf("rc-%d-%d", cur.ID, idx))
+						a.renderCrystalRow(c, cry, 1, fmt.Sprintf("rc-%d-%d", cur.ID, idx), onJumpItem)
 					}
 				})
 			}
@@ -1094,7 +1131,7 @@ func (a *App) renderRecipesSection(c *ui.Context, item *gamedata.ItemDetail) {
 	})
 }
 
-func (a *App) renderRecipeTreeNode(c *ui.Context, node gamedata.RecipeTreeNode, parentCrafts int, depth int, keyPath string) {
+func (a *App) renderRecipeTreeNode(c *ui.Context, node gamedata.RecipeTreeNode, parentCrafts int, depth int, keyPath string, onJumpItem func(int)) {
 	t := themeOf(c)
 	totalNeeded := node.AmountPerCraft * parentCrafts
 	yield := max(1, node.YieldPerCraft)
@@ -1122,24 +1159,24 @@ func (a *App) renderRecipeTreeNode(c *ui.Context, node gamedata.RecipeTreeNode, 
 			numTextf(c, "×%d", totalNeeded).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
 		})
 		if row.Clicked() {
-			a.jumpToItem(node.ItemID)
+			onJumpItem(node.ItemID)
 		}
 
 		if len(node.Children) > 0 || len(node.Crystals) > 0 {
 			ui.Column(c).FillWidth().Margin(0, 0, 0, 14).Padding(0, 0, 0, 10).Gap(3).
 				BorderWidth(0, 0, 0, hairline).BorderColor(t.border).Children(func() {
 				for idx, ch := range node.Children {
-					a.renderRecipeTreeNode(c, ch, craftsNeeded, depth+1, fmt.Sprintf("%s-c%d", keyPath, idx))
+					a.renderRecipeTreeNode(c, ch, craftsNeeded, depth+1, fmt.Sprintf("%s-c%d", keyPath, idx), onJumpItem)
 				}
 				for idx, cry := range node.Crystals {
-					a.renderCrystalRow(c, cry, craftsNeeded, fmt.Sprintf("%s-k%d", keyPath, idx))
+					a.renderCrystalRow(c, cry, craftsNeeded, fmt.Sprintf("%s-k%d", keyPath, idx), onJumpItem)
 				}
 			})
 		}
 	})
 }
 
-func (a *App) renderCrystalRow(c *ui.Context, cry gamedata.RecipeCrystalNode, crafts int, key string) {
+func (a *App) renderCrystalRow(c *ui.Context, cry gamedata.RecipeCrystalNode, crafts int, key string, onJumpItem func(int)) {
 	t := themeOf(c)
 	row := ui.ButtonBase(c.Key(key)).Label(cry.NameCn).FillWidth().Padding(5, 10).Radius(t.radius.md).
 		Justify(ui.SpaceBetween).AlignItems(ui.Center).
@@ -1155,7 +1192,7 @@ func (a *App) renderCrystalRow(c *ui.Context, cry gamedata.RecipeCrystalNode, cr
 		numTextf(c, "×%d", cry.Amount*crafts).FontSize(t.text.xs).FontWeight(600).TextColor(t.muted).SingleLine()
 	})
 	if row.Clicked() {
-		a.jumpToItem(cry.ItemID)
+		onJumpItem(cry.ItemID)
 	}
 }
 
@@ -1419,7 +1456,7 @@ func (a *App) renderRetainerSection(c *ui.Context, ventures []gamedata.RetainerV
 	})
 }
 
-func (a *App) renderUsedInRecipesSection(c *ui.Context, used []gamedata.UsedInRecipeItem) {
+func (a *App) renderUsedInRecipesSection(c *ui.Context, used []gamedata.UsedInRecipeItem, onJumpItem func(int)) {
 	t := themeOf(c)
 	drawDetailSection(c, a.t("detail.used_in"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(used))), nil, func() {
 		ui.Row(c).FillWidth().Gap(6).Wrap().Children(func() {
@@ -1442,7 +1479,7 @@ func (a *App) renderUsedInRecipesSection(c *ui.Context, used []gamedata.UsedInRe
 					numTextf(c, "×%d", u.AmountRequired).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText).SingleLine().Shrink(0)
 				})
 				if btn.Clicked() {
-					a.jumpToItem(u.ResultItemID)
+					onJumpItem(u.ResultItemID)
 				}
 			}
 		})

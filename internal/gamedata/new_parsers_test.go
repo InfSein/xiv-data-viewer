@@ -316,6 +316,97 @@ func TestQuestTextParserAndRealClient(t *testing.T) {
 			t.Fatalf("任务 #70913 概要与对话文本解析不完整: %+v", qt)
 		}
 	}
+
+	// 验证在「主线任务1」（SectionID=0）中，#69186 -> #69187..#69190（暗影之逆焰）-> #69209 按剧情顺序连续排列，不发生跨版本跳号
+	sec0 := svc.filterQuests(QuestSearchQuery{SectionID: 0, ExpansionID: -1, Filter: "all"})
+	pos := make(map[int]int)
+	for i, qe := range sec0 {
+		pos[qe.ID] = i
+	}
+	for _, id := range []int{69186, 69187, 69188, 69189, 69190, 69209} {
+		if _, ok := pos[id]; !ok {
+			t.Fatalf("Section 0 中缺少主线任务 #%d", id)
+		}
+	}
+	if !(pos[69186] < pos[69187] && pos[69187] < pos[69188] && pos[69188] < pos[69189] && pos[69189] < pos[69190] && pos[69190]+1 == pos[69209]) {
+		t.Fatalf("主线任务1 中 5.0 结局与 5.1 开头顺序异常: positions=%v", map[int]int{
+			69186: pos[69186], 69187: pos[69187], 69188: pos[69188], 69189: pos[69189], 69190: pos[69190], 69209: pos[69209],
+		})
+	}
+	if status := svc.SearchQuests(QuestSearchQuery{SectionID: 0, ExpansionID: -1, Filter: "all", Q: "暗影之逆焰"}); status.Total == 0 || status.Items[0].ID != 69190 {
+		t.Fatalf("主线任务1 内搜索「暗影之逆焰」应将同名任务 #69190 排在首位: %+v", status.Items)
+	}
+}
+
+func TestQuestJournalSortingAndSearchRelevance(t *testing.T) {
+	idx := buildQuestData(questLoaderInput{
+		quests: makeSchemaSheet(map[int]map[string]any{
+			// 跨版本同等级 SortKey 重置：5.0 结局 (80级, SortKey=1060) 应紧邻 5.1 开头 (80级, SortKey=10) 之前
+			69186: {"Name": "光辉不灭", "Id": "LucNia409_03650", "JournalGenre": 8, "EventIconType": 3, "ClassJobLevel[0]": 79, "SortKey": 1020},
+			69190: {"Name": "暗影之逆焰", "Id": "LucNia503_03654", "JournalGenre": 8, "EventIconType": 3, "ClassJobLevel[0]": 80, "SortKey": 1060},
+			69209: {"Name": "生命力的波动", "Id": "LucNia504_03673", "JournalGenre": 9, "EventIconType": 3, "ClassJobLevel[0]": 80, "SortKey": 10},
+			// 同章节内低等级前置与高等级解锁：暗黑骑士 Lv.50 转职应排在 Lv.30 后续之前
+			67590: {"Name": "暗黑涌动", "Id": "JobDrk301_02054", "JournalGenre": 186, "EventIconType": 8, "ClassJobLevel[0]": 30, "SortKey": 301},
+			67589: {"Name": "来自深渊", "Id": "JobDrk300_02053", "JournalGenre": 186, "EventIconType": 8, "ClassJobLevel[0]": 50, "SortKey": 300},
+			// 同章节内既有 SortKey>0 又有 SortKey=0 的条目，SortKey=0 放章末
+			70121: {"Name": "幻影对战水晶冲突", "Id": "SubSea900_04585", "JournalGenre": 112, "EventIconType": 1, "ClassJobLevel[0]": 30, "SortKey": 0},
+			65643: {"Name": "欢迎来到海洋之都", "Id": "SubSea001_00107", "JournalGenre": 112, "EventIconType": 1, "ClassJobLevel[0]": 1, "SortKey": 1},
+			// 全章 SortKey=0 时回退按 Level -> ID 排序
+			66755: {"Name": "孤独的复仇", "Id": "BanAma003_01219", "JournalGenre": 40, "EventIconType": 1, "ClassJobLevel[0]": 46, "SortKey": 0},
+			66753: {"Name": "荒野之乱", "Id": "BanAma001_01217", "JournalGenre": 40, "EventIconType": 1, "ClassJobLevel[0]": 43, "SortKey": 0},
+			// 未归入日志分类的任务（例如带有主线图标但 Genre=0 的历史任务）排在最后
+			65732: {"Name": "追随前人的背影", "Id": "SubFst039_00196", "JournalGenre": 0, "EventIconType": 3, "ClassJobLevel[0]": 4, "SortKey": 21},
+		}),
+		journalGenres: makeSchemaSheet(map[int]map[string]any{
+			8:   {"Name": "暗影之逆焰", "JournalCategory": 8},
+			9:   {"Name": "拂晓回归", "JournalCategory": 9},
+			40:  {"Name": "剧情任务", "JournalCategory": 36},
+			112: {"Name": "支线任务：拉诺西亚", "JournalCategory": 59},
+			186: {"Name": "暗黑骑士任务", "JournalCategory": 93},
+		}),
+		journalCategories: makeSchemaSheet(map[int]map[string]any{
+			8:  {"Name": "暗影之逆焰主线任务", "JournalSection": 0},
+			9:  {"Name": "拂晓回归主线任务", "JournalSection": 0},
+			36: {"Name": "蜥蜴人族任务", "JournalSection": 4},
+			59: {"Name": "拉诺西亚支线任务", "JournalSection": 3},
+			93: {"Name": "战斗精英特职任务", "JournalSection": 6},
+		}),
+		journalSections: makeSchemaSheet(map[int]map[string]any{
+			0: {"Name": "主线任务1"},
+			3: {"Name": "支线任务"},
+			4: {"Name": "友好部族任务1"},
+			6: {"Name": "职业任务"},
+		}),
+	})
+
+	wantOrder := []int{69186, 69190, 69209, 65643, 70121, 66753, 66755, 67589, 67590, 65732}
+	if len(idx.quests) != len(wantOrder) {
+		t.Fatalf("期望 %d 条任务，实际 %d", len(wantOrder), len(idx.quests))
+	}
+	for i, wantID := range wantOrder {
+		if idx.quests[i].ID != wantID {
+			gotIDs := make([]int, len(idx.quests))
+			for k, q := range idx.quests {
+				gotIDs[k] = q.ID
+			}
+			t.Fatalf("任务日志排序不符: got=%v want=%v", gotIDs, wantOrder)
+		}
+	}
+
+	svc := NewService(&Store{
+		Quests:           idx.quests,
+		QuestByID:        idx.questByID,
+		QuestSectionList: idx.sectionList,
+	})
+	sec0 := svc.SearchQuests(QuestSearchQuery{SectionID: 0, ExpansionID: -1, Filter: "all", PageSize: 30})
+	if sec0.Total != 3 || sec0.Items[0].ID != 69186 || sec0.Items[1].ID != 69190 || sec0.Items[2].ID != 69209 {
+		t.Fatalf("筛选 Section 0 时跨版本任务顺序异常: %+v", sec0.Items)
+	}
+	// 搜索「暗影之逆焰」时命中标题 #69190 与同 Genre 的 #69186，精确标题 #69190 应排在第一位
+	qMatch := svc.SearchQuests(QuestSearchQuery{SectionID: 0, ExpansionID: -1, Filter: "all", Q: "暗影之逆焰", PageSize: 30})
+	if qMatch.Total != 2 || qMatch.Items[0].ID != 69190 || qMatch.Items[1].ID != 69186 {
+		t.Fatalf("任务搜索精确标题未置顶: %+v", qMatch.Items)
+	}
 }
 
 func TestLeveParserAndSearch(t *testing.T) {

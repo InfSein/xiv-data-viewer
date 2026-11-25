@@ -1,6 +1,6 @@
 {
   "name": "xiv-data-viewer",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "private": true,
   "description": "基于 egoist/mygo 的本地最终幻想XIV游戏数据解析展示桌面客户端",
   "scripts": {
@@ -10,6 +10,6 @@
     "build:all": "node -e \"const r=require('child_process').spawnSync('go',['tool','mygo','build','-platform','windows/amd64,windows/arm64'],{stdio:'inherit',env:{...process.env,GOFLAGS:'-tags=mygo_nowebview'}});if(r.error){console.error(r.error.message);process.exit(1)}process.exit(r.status??0)\"",
     "test": "go test -v -count=1 ./...",
     "check": "go vet ./... && go tool mygo vet .",
-    "fmt": "gofmt -w main.go schemas_embed.go internal"
+    "fmt": "gofmt -w main.go schemas_embed.go resources internal"
   }
 }

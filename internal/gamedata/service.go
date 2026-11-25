@@ -1621,6 +1621,23 @@ func (s *Service) SearchAchievements(query AchievementSearchQuery) AchievementSe
 	}
 }
 
+// GetAchievementDetail 根据成就 ID 返回完整成就详情。
+func (s *Service) GetAchievementDetail(achID int) *AchievementEntry {
+	if s == nil || s.store == nil || achID <= 0 {
+		return nil
+	}
+	if ach, ok := s.store.AchievementByID[achID]; ok {
+		return &ach
+	}
+	for _, ach := range s.store.Achievements {
+		if ach.ID == achID {
+			cp := ach
+			return &cp
+		}
+	}
+	return nil
+}
+
 // paginateRange 计算标准 1-based 分页范围与总页数。
 func paginateRange(total, reqPage, pageSize int) (page, totalPages, start, end int) {
 	if pageSize <= 0 {
@@ -1643,19 +1660,19 @@ func paginateRange(total, reqPage, pageSize int) (page, totalPages, start, end i
 }
 
 func (s *Service) filterQuests(query QuestSearchQuery) []QuestEntry {
-	q := strings.ToLower(strings.TrimSpace(query.Q))
-	numericQuery := -1
-	if q != "" {
-		if parsed, err := strconv.Atoi(q); err == nil && parsed > 0 {
-			numericQuery = parsed
-		}
-	}
+	qRaw := strings.TrimSpace(query.Q)
+	qLower := toLowerFast(qRaw)
+	numericQuery := parseExactPositiveID(qRaw)
 	filter := query.Filter
 	if filter == "" {
 		filter = "all"
 	}
 
-	filtered := make([]QuestEntry, 0, 128)
+	type questMatch struct {
+		entry QuestEntry
+		rank  int
+	}
+	matches := make([]questMatch, 0, 128)
 	for _, qe := range s.store.Quests {
 		if query.SectionID >= 0 && qe.SectionID != query.SectionID {
 			continue
@@ -1687,23 +1704,40 @@ func (s *Service) filterQuests(query QuestSearchQuery) []QuestEntry {
 				continue
 			}
 		}
-		if q != "" {
-			if numericQuery > 0 && qe.ID == numericQuery {
-				filtered = append(filtered, qe)
-				continue
+		rank := 0
+		if qRaw != "" {
+			cleanTitle := CleanQuestTitle(qe.NameCn)
+			if cleanTitle == "" {
+				cleanTitle = qe.NameCn
 			}
-			if !strings.Contains(strings.ToLower(qe.NameCn), q) &&
-				!strings.Contains(strings.ToLower(qe.NameZh), q) &&
-				!strings.Contains(strings.ToLower(qe.NameEn), q) &&
-				!strings.Contains(strings.ToLower(qe.NameJa), q) &&
-				!strings.Contains(strings.ToLower(qe.InternalID), q) &&
-				!strings.Contains(strings.ToLower(qe.GenreName), q) &&
-				!strings.Contains(strings.ToLower(qe.PlaceName), q) &&
-				!strings.Contains(strings.ToLower(qe.IssuerName), q) {
-				continue
+			cleanZh := CleanQuestTitle(qe.NameZh)
+			matchedRank, _, ok := matchNameByContains(qRaw, qLower, cleanTitle, qe.NameCn, cleanZh, qe.NameJa, qe.NameEn)
+			if numericQuery > 0 && qe.ID == numericQuery && (!ok || matchedRank > 2) {
+				matchedRank = 2
+				ok = true
 			}
+			if !ok {
+				if !strings.Contains(toLowerFast(qe.InternalID), qLower) &&
+					!strings.Contains(toLowerFast(qe.GenreName), qLower) &&
+					!strings.Contains(toLowerFast(qe.PlaceName), qLower) &&
+					!strings.Contains(toLowerFast(qe.IssuerName), qLower) {
+					continue
+				}
+				matchedRank = 7
+			}
+			rank = matchedRank
 		}
-		filtered = append(filtered, qe)
+		matches = append(matches, questMatch{entry: qe, rank: rank})
+	}
+	if qRaw != "" && len(matches) > 1 {
+		// 按名称/ID 匹配精度置顶（精确 > 前缀 > 包含 > 章节/NPC 等附带字段），同级保持原日志剧情顺序
+		sort.SliceStable(matches, func(i, j int) bool {
+			return matches[i].rank < matches[j].rank
+		})
+	}
+	filtered := make([]QuestEntry, len(matches))
+	for i, m := range matches {
+		filtered[i] = m.entry
 	}
 	return filtered
 }

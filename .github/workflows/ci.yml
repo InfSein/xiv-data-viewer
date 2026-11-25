@@ -39,7 +39,7 @@ jobs:
 
       - name: Check Go formatting (gofmt)
         run: |
-          UNFORMATTED=$(gofmt -l main.go schemas_embed.go internal)
+          UNFORMATTED=$(gofmt -l main.go schemas_embed.go resources internal)
           if [ -n "$UNFORMATTED" ]; then
             echo "以下 Go 文件未通过 gofmt 格式化检查:"
             echo "$UNFORMATTED"

@@ -4,12 +4,13 @@
 
 | 文件 / 目录路径 | 职责说明 |
 | --- | --- |
-| `main.go` | MyGo 桌面客户端主入口，注册 `zh-Hans`/`ja` 原生控件语言包，使用 `//go:embed` 内嵌三语更新日志 (`CHANGELOG.md`、`docs/CHANGELOG.en.md`、`docs/CHANGELOG.ja.md`)，按配置或系统语言与主题初始化窗口并创建默认原生 GPU 渲染窗口。 |
+| `main.go` | MyGo 桌面客户端主入口，注册 `zh-Hans`/`ja` 原生控件语言包，使用 `//go:embed` 内嵌三语更新日志 (`CHANGELOG.md`、`docs/CHANGELOG.en.md`、`docs/CHANGELOG.ja.md`)，设置窗口/Dock 图标并按配置或系统语言与主题初始化原生 GPU 渲染窗口。 |
 | `schemas_embed.go` | 使用 Go `//go:embed` 将 Git Submodule `schemas/*.yml`（`xivdev/EXDSchema`）直接内嵌到单文件客户端二进制中。 |
 | `mygo.json` | MyGo 应用构建清单，定义软件名称、标识符、版本号、应用图标 (`resources/icon.png`) 及 Windows 安装包配置。 |
 | `package.json` | 零依赖 npm 快捷脚本入口，提供跨平台一键本地调试 (`npm run dev`)、Windows 构建 (`npm run build`)、静态检查与自动化测试 (`npm test`)。 |
-| `resources/icon.png` | 1024×1024 应用图标，构建时由 MyGo 自动生成 Windows `.exe` 内嵌图标及 NSIS 安装包图标。 |
+| `resources/icon.png` / `resources/embed.go` | 1024×1024 透明背景应用图标与 `//go:embed` 资源包；构建时由 MyGo 自动生成 Windows `.exe` 内嵌图标及 NSIS 安装包图标，同时供运行时窗口、任务栏与界面品牌徽标复用。 |
 | `internal/config/config.go` | 管理应用持久化配置（`config.json`），支持界面语言（`language`）、主题与国服/国际服路径只读校验及版本号读取。 |
+| `internal/config/records.go` | 管理持久化最近浏览记录（物品/任务/理符，上限 500 条）与收藏名单（物品/任务/理符/成就），序列化存储于应用数据目录 `history.json`。 |
 | `internal/i18n/` | 内嵌中文/日语/英语 JSON 词条表与 `{key}` 占位符格式化，提供跨平台非阻塞系统语言自动探测、MyGo BCP 47 映射及副语言展示规则。 |
 | `internal/changelog/` | Keep a Changelog 格式 Markdown 结构化解析器，提取版本号、发布日期、中/英/日语义分类、加粗标题/正文、二级子条目及行内代码与链接。 |
 | `internal/sqpack/hash.go` | 实现 FF14 SqPack 使用的 JamCRC32 哈希及 `.index` / `.index2` 路径哈希计算。 |
@@ -37,12 +38,14 @@
 | `internal/uiapp/icons.go` | 游戏图标与地图贴图的后台异步解码及 MyGo GPU `*ui.Bitmap` 有界缓存。 |
 | `internal/uiapp/app.go` | 客户端顶层状态机，协调首次启动系统语言探测、语言切换与数据源热重载、`modeSetup` 引导、异步加载 (`modeLoading`)、主题持久化、GitHub Release 启动静默/主动更新流程与主工作台 (`modeReady`)。 |
 | `internal/uiapp/view_setup.go` | 单画布聚焦式首次引导选目录页（含欢迎页三语实时切换、区服模式切换、拖拽路径识别与纠错）、三阶段实时加载进度页及居中「设置」中心（含语言切换、主题、路径配置与导出入口）。 |
-| `internal/uiapp/view_workbench.go` | 融合可拖拽顶栏（品牌菜单含导出/快照/主题/设置/检查更新 + 折叠侧栏 + 全局跨模块名称检索浮层与页面跳转 + 右上角全局语言切换）、左侧导航（【数据】物品/任务/理符/成就、【对比】版本对比、更新日志、【设置】及左下角更新就绪重启提醒）及带页内搜索栏的物品双浮起面板。 |
+| `internal/uiapp/view_workbench.go` | 融合可拖拽顶栏（品牌菜单含导出/快照/主题/设置/检查更新 + 折叠侧栏 + 全局跨模块名称检索浮层与页面跳转 + 右上角全局语言切换）、左侧导航（【数据】物品/任务/理符/成就、【历史】最近/收藏、【对比】版本对比、更新日志、【设置】及左下角更新就绪重启提醒）及带页内搜索栏的物品双浮起面板。 |
 | `internal/uiapp/view_changelog.go` | 结构化多语言更新日志页面，按版本卡、发布状态徽章、变更分类标签、标题/正文分层与行内代码高亮展示 `CHANGELOG.md` 及 `docs/CHANGELOG.{en,ja}.md`，支持版本筛选、分类过滤、页内搜索与版本折叠。 |
-| `internal/uiapp/view_detail.go` | 物品阅读器风格悬浮详情面板（按当前语言规则展示副语言名称、收藏品交易与老主顾交纳明细、任务/理符关联、成就奖励、商店、配方树、采集倒计时与雇员探险）。 |
-| `internal/uiapp/view_quests.go` | 任务检索与阅读工作台（含内置页内搜索栏、按规则展示副语言名称、横幅插图、前置跳转及默认折叠防剧透的概要与对话文本）。 |
-| `internal/uiapp/view_leves.go` | 理符检索与阅读工作台（含内置页内搜索栏、按规则展示副语言名称、四分栏筛选、发行点与目标地图坐标及奖励道具池）。 |
-| `internal/uiapp/view_achievements.go` | 悬浮面板成就与称号检索视图（含内置页内搜索栏、按规则展示成就与称号副语言名称、分类联动筛选与奖励道具跳转）。 |
+| `internal/uiapp/view_detail.go` | 物品阅读器风格悬浮详情面板（支持收藏切换、按当前语言规则展示副语言名称、收藏品交易与老主顾交纳明细、任务/理符关联、成就奖励、商店、配方树、采集倒计时与雇员探险）。 |
+| `internal/uiapp/view_quests.go` | 任务检索与阅读工作台（含内置页内搜索栏、收藏切换、按规则展示副语言名称、横幅插图、前置跳转及默认折叠防剧透的概要与对话文本）。 |
+| `internal/uiapp/view_leves.go` | 理符检索与阅读工作台（含内置页内搜索栏、收藏切换、按规则展示副语言名称、四分栏筛选、发行点与目标地图坐标及奖励道具池）。 |
+| `internal/uiapp/view_achievements.go` | 悬浮面板成就与称号检索视图（含内置页内搜索栏、表格行内星标收藏切换、按规则展示成就与称号副语言名称、分类联动筛选与奖励道具跳转）。 |
+| `internal/uiapp/view_recent.go` | 「最近」浏览记录工作台：汇总最近打开过的物品、任务与理符（上限 500 条），支持类型筛选、页内搜索、分页与右侧复用对应详情阅读面板。 |
+| `internal/uiapp/view_favorites.go` | 「收藏」工作台：顶部提供物品、任务、理符与成就四个切换标签页，并分别展示与对应原页面一致的双栏详情或全宽表格界面。 |
 | `internal/uiapp/view_diff.go` | 悬浮面板版本快照对比视图（含内置页内搜索栏、多实体筛选、三语本地化变更明细与详情一键直跳）。 |
 | `internal/uiapp/view_modals.go` | Godwit 对话框规范地图贴图预览弹窗（带坐标大头针）、全量 CSV 导出弹窗（原生目录/保存对话框 + 细进度条 + 取消控制）及 GitHub Release 检查更新弹窗。 |
 | `.github/workflows/ci.yml` | PR 与非主分支推送自动检查：`mygo.json` 校验、`gofmt`、`go vet`、`mygo vet`、单元测试（含无头 UI 测试）及 Windows `amd64/arm64` 构建验证。 |
@@ -59,7 +62,7 @@
         ▼
 [internal/i18n]   ──────────(三语内嵌词条、系统语言探测、副语言展示规则)
         │
-        ├──► [internal/config]   (路径校验、config.json 持久化 language/theme、ffxivgame.ver)
+        ├──► [internal/config]   (路径校验、config.json 持久化 language/theme、history.json 持久化最近与收藏、ffxivgame.ver)
         ├──► [internal/sqpack]   (Archive/GameReader, EXH/EXD/EXL, Schema 对齐, SeString, .tex 解码)
         ├──► [internal/gamedata] (按语言切换主数据、保留三语检索、eorzea_time、各类解析器)
         ├──► [internal/backup]   (按语言隔离 backups/ 快照备份与本地化版本 Diff)
@@ -72,7 +75,9 @@
   ├──► view_detail.go       (道具完整详情 + 副语言展示 + 收藏品 + 配方树 + 采集倒计时)
   ├──► view_quests.go       (任务检索与详情 + 副语言展示 + 前置任务与奖励跳转)
   ├──► view_leves.go        (理符分类检索 + 副语言展示 + 交纳委托与奖励池)
-  ├──► view_achievements.go (成就与称号一览 + 副语言展示)
+  ├──► view_achievements.go (成就与称号一览 + 副语言展示 + 星标收藏)
+  ├──► view_recent.go       (最近打开的物品/任务/理符工作台，上限 500 条)
+  ├──► view_favorites.go    (分标签页展示收藏的物品/任务/理符/成就)
   ├──► view_diff.go         (版本快照对比)
   ├──► view_changelog.go    (三语结构化更新日志展示)
   └──► view_modals.go       (原生贴图地图预览 + CSV 导出弹窗)

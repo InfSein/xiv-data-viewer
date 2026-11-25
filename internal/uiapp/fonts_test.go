@@ -103,3 +103,14 @@ func TestGoogleSansRegisteredWeightsAndTabularNums(t *testing.T) {
 		t.Fatalf("期望字重墨量递增 (400 < 500 < 700): 400=%d 500=%d 700=%d", ink400, ink500, ink700)
 	}
 }
+
+func TestAppLogoBitmapValid(t *testing.T) {
+	bmp := appLogoBitmap()
+	if bmp == nil {
+		t.Fatalf("appLogoBitmap() 不应返回 nil")
+	}
+	w, h := bmp.Size()
+	if w != 128 || h != 128 {
+		t.Fatalf("appLogoBitmap().Size() = %dx%d, 期望 128x128", w, h)
+	}
+}

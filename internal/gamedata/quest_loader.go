@@ -129,6 +129,48 @@ func repeatIntervalText(appLang i18n.Lang, repeatType int, isRepeatable bool) st
 	}
 }
 
+// compareQuestsForJournalOrder 按任务日志层级与剧情顺序排序：
+// FF14 的 SortKey 在每个 JournalGenre 内部独立编排且跨版本会重置（如 5.0 结局与 5.1 开头同为 80 级但 SortKey 重置为 10），
+// 且部分职业/支线存在高接取等级的前置或低等级彩蛋任务，因此先按 Section → Category → Genre 分组，再按 SortKey 排序。
+func compareQuestsForJournalOrder(a, b QuestEntry) bool {
+	aCategorized := a.SectionID >= 0 && a.GenreID > 0
+	bCategorized := b.SectionID >= 0 && b.GenreID > 0
+	if aCategorized != bCategorized {
+		return aCategorized
+	}
+	if aCategorized {
+		if a.SectionID != b.SectionID {
+			return a.SectionID < b.SectionID
+		}
+		if a.CategoryID != b.CategoryID {
+			return a.CategoryID < b.CategoryID
+		}
+		if a.GenreID != b.GenreID {
+			return a.GenreID < b.GenreID
+		}
+		// 同一章节内若同时存在已设定 SortKey 与未设定（0）的补充条目，已设定的排在前面
+		aHasSort := a.SortKey > 0
+		bHasSort := b.SortKey > 0
+		if aHasSort != bHasSort {
+			return aHasSort
+		}
+		if a.SortKey != b.SortKey {
+			return a.SortKey < b.SortKey
+		}
+		if a.Level != b.Level {
+			return a.Level < b.Level
+		}
+		return a.ID < b.ID
+	}
+	if a.Level != b.Level {
+		return a.Level < b.Level
+	}
+	if a.SortKey != b.SortKey {
+		return a.SortKey < b.SortKey
+	}
+	return a.ID < b.ID
+}
+
 func buildQuestData(in questLoaderInput) questIndices {
 	in.appLang = resolveAppLang(in.appLang)
 	out := questIndices{
@@ -223,13 +265,14 @@ func buildQuestData(in questLoaderInput) questIndices {
 
 		genreID := in.quests.Int(row, "JournalGenre")
 		genreName := ""
+		catID := 0
 		catName := ""
 		sectionID := -1
 		sectionName := ""
 		if genreID > 0 && in.journalGenres != nil {
 			if gRow, ok := in.journalGenres.Rows[genreID]; ok {
 				genreName = strings.TrimSpace(in.journalGenres.Str(gRow, "Name"))
-				catID := in.journalGenres.Int(gRow, "JournalCategory")
+				catID = in.journalGenres.Int(gRow, "JournalCategory")
 				if catID > 0 && in.journalCategories != nil {
 					if cRow, ok := in.journalCategories.Rows[catID]; ok {
 						catName = strings.TrimSpace(in.journalCategories.Str(cRow, "Name"))
@@ -429,6 +472,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 			IsJobFixed:            isJobFixed,
 			SectionID:             sectionID,
 			SectionName:           sectionName,
+			CategoryID:            catID,
 			CategoryName:          catName,
 			GenreID:               genreID,
 			GenreName:             genreName,
@@ -683,13 +727,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 	}
 
 	sort.Slice(out.quests, func(i, j int) bool {
-		if out.quests[i].Level != out.quests[j].Level {
-			return out.quests[i].Level < out.quests[j].Level
-		}
-		if out.quests[i].SortKey != out.quests[j].SortKey {
-			return out.quests[i].SortKey < out.quests[j].SortKey
-		}
-		return out.quests[i].ID < out.quests[j].ID
+		return compareQuestsForJournalOrder(out.quests[i], out.quests[j])
 	})
 
 	for secID, name := range sectionNames {
