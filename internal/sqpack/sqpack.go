@@ -3,7 +3,9 @@ package sqpack
 import (
 	"bytes"
 	"compress/flate"
+	"crypto/md5"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -205,6 +207,138 @@ func (a *ArchiveReader) ReadFile(filePath string) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("不支持的 SqPack 文件类型: %d (%s)", fi.fileType, filePath)
 	}
+}
+
+// ReadFileDigest 计算指定归档内资源的未解压大小与内容 MD5 摘要（标准分块文件跳过 zlib 解压以大幅提升批量校验速度）。
+func (a *ArchiveReader) ReadFileDigest(filePath string) (rawSize uint32, md5Hex string, ok bool, err error) {
+	entry, found := a.lookup(filePath)
+	if !found {
+		return 0, "", false, nil
+	}
+	f, err := a.getDataFile(entry.dataFileID)
+	if err != nil {
+		return 0, "", false, err
+	}
+
+	fi, fiBuf, err := readFileInfo(f, int64(entry.offset))
+	if err != nil {
+		return 0, "", false, fmt.Errorf("读取文件头失败 (%s): %w", filePath, err)
+	}
+	if fi.fileType == fileTypeEmpty || fi.rawFileSize == 0 {
+		return 0, "", false, nil
+	}
+	if fi.fileType == fileTypeStandard {
+		digest, err := hashStandardFileChunks(f, int64(entry.offset), fi, fiBuf)
+		if err != nil {
+			return 0, "", false, err
+		}
+		return fi.rawFileSize, digest, true, nil
+	}
+	raw, err := a.ReadFile(filePath)
+	if err != nil || len(raw) == 0 {
+		return 0, "", false, err
+	}
+	sum := md5.Sum(raw)
+	return fi.rawFileSize, hex.EncodeToString(sum[:]), true, nil
+}
+
+func hashStandardFileChunks(f *os.File, fileOffset int64, fi fileInfo, fiBuf []byte) (string, error) {
+	if len(fiBuf) < 24 {
+		return "", errors.New("标准文件头长度不足")
+	}
+	chunkCount := int(binary.LittleEndian.Uint32(fiBuf[20:24]))
+	pos := 24
+	if pos+chunkCount*8 > len(fiBuf) {
+		return "", errors.New("标准文件分块表越界")
+	}
+
+	h := md5.New()
+	var meta [12]byte
+	binary.LittleEndian.PutUint32(meta[0:4], fi.fileType)
+	binary.LittleEndian.PutUint32(meta[4:8], fi.rawFileSize)
+	binary.LittleEndian.PutUint32(meta[8:12], uint32(chunkCount))
+	h.Write(meta[:])
+
+	if chunkCount == 0 {
+		return hex.EncodeToString(h.Sum(nil)), nil
+	}
+
+	chunks := make([]standardChunkInfo, chunkCount)
+	var maxEnd uint64
+	for i := 0; i < chunkCount; i++ {
+		off := binary.LittleEndian.Uint32(fiBuf[pos : pos+4])
+		comp := binary.LittleEndian.Uint16(fiBuf[pos+4 : pos+6])
+		uncomp := binary.LittleEndian.Uint16(fiBuf[pos+6 : pos+8])
+		chunks[i] = standardChunkInfo{
+			offset:           off,
+			compressedSize:   comp,
+			uncompressedSize: uncomp,
+		}
+		if end := uint64(off) + uint64(comp); end > maxEnd {
+			maxEnd = end
+		}
+		pos += 8
+	}
+
+	baseOffset := fileOffset + int64(fi.size)
+	// 若分块在单个连续区间内（<= 64MB），一次性顺序读取后在内存内摘要，避免海量小 ReadAt 系统调用开销
+	if maxEnd > 0 && maxEnd <= 64<<20 {
+		span := make([]byte, maxEnd)
+		if err := readAtFull(f, span, baseOffset); err == nil {
+			allValid := true
+			for _, ci := range chunks {
+				off := int(ci.offset)
+				if off+16 > len(span) {
+					allValid = false
+					break
+				}
+				hdrSize := int(binary.LittleEndian.Uint32(span[off : off+4]))
+				compSize := int(binary.LittleEndian.Uint32(span[off+8 : off+12]))
+				uncompSize := int(binary.LittleEndian.Uint32(span[off+12 : off+16]))
+				payloadSize := compSize
+				if compSize == uncompressedChunkSz {
+					payloadSize = uncompSize
+				}
+				if hdrSize < 16 || off+hdrSize+payloadSize > len(span) {
+					allValid = false
+					break
+				}
+				h.Write(span[off+8 : off+16])
+				h.Write(span[off+hdrSize : off+hdrSize+payloadSize])
+			}
+			if allValid {
+				return hex.EncodeToString(h.Sum(nil)), nil
+			}
+			// 回退重算摘要
+			h.Reset()
+			h.Write(meta[:])
+		}
+	}
+
+	var buf []byte
+	for _, ci := range chunks {
+		var hdr [16]byte
+		chunkOff := baseOffset + int64(ci.offset)
+		if err := readAtFull(f, hdr[:], chunkOff); err != nil {
+			return "", err
+		}
+		hdrSize := binary.LittleEndian.Uint32(hdr[0:4])
+		compSize := binary.LittleEndian.Uint32(hdr[8:12])
+		uncompSize := binary.LittleEndian.Uint32(hdr[12:16])
+		payloadSize := int(compSize)
+		if compSize == uncompressedChunkSz {
+			payloadSize = int(uncompSize)
+		}
+		if cap(buf) < payloadSize {
+			buf = make([]byte, payloadSize)
+		}
+		if err := readAtFull(f, buf[:payloadSize], chunkOff+int64(hdrSize)); err != nil {
+			return "", err
+		}
+		h.Write(hdr[8:16])
+		h.Write(buf[:payloadSize])
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Close 关闭当前归档打开的所有只读文件句柄。
@@ -600,6 +734,15 @@ func (g *GameReader) ReadFile(resourcePath string) ([]byte, error) {
 func (g *GameReader) HasFile(resourcePath string) (bool, error) {
 	ar, _, err := g.locate(resourcePath)
 	return ar != nil, err
+}
+
+// ReadFileDigest 计算游戏内指定虚拟路径资源的大小与内容 MD5 摘要；文件不存在或为空时返回 ok=false。
+func (g *GameReader) ReadFileDigest(resourcePath string) (rawSize uint32, md5Hex string, ok bool, err error) {
+	ar, normPath, err := g.locate(resourcePath)
+	if err != nil || ar == nil {
+		return 0, "", false, err
+	}
+	return ar.ReadFileDigest(normPath)
 }
 
 // Close 释放所有已打开的只读归档句柄与索引缓存。

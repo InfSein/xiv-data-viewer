@@ -1,5 +1,7 @@
 package gamedata
 
+import "github.com/InfSein/xiv-data-viewer/internal/sqpack"
+
 // ItemCategoryInfo 表示道具 UI 分类统计信息。
 type ItemCategoryInfo struct {
 	ID     int
@@ -54,6 +56,11 @@ type SystemStats struct {
 	TotalQuests            int
 	TotalLeves             int
 	TotalCollectables      int
+	TotalBGMs              int
+	TotalOrchestrions      int
+	TotalMusic             int
+	TotalIcons             int
+	TotalIconGroups        int
 	LoadTimeMs             int64
 }
 
@@ -73,6 +80,10 @@ type SystemStatus struct {
 	AchievementCategories []AchievementCategoryInfo
 	QuestSections         []QuestSectionInfo
 	LeveAssignmentTypes   []LeveAssignmentTypeInfo
+	MusicCategories       []MusicCategoryInfo
+	MusicExpansions       []MusicExpansionInfo
+	IconGroups            []IconGroupInfo
+	AvailableIconVariants []string
 }
 
 // MapLocationPoint 描述一个可直接用于地图弹窗展示的地点与坐标信息。
@@ -185,6 +196,34 @@ type QuestEntry struct {
 	ReputationReward      int
 	RewardItems           []QuestRewardItem
 	Unlocks               []QuestUnlockReward
+	Cutscenes             []QuestCutsceneRef
+}
+
+// QuestCutsceneRef 保存任务在表解析阶段即可确定的关联过场动画索引。
+type QuestCutsceneRef struct {
+	CutsceneID int
+	Path       string
+	Source     string // "script" | "journal" | "script+journal"
+}
+
+// QuestCutsceneBGM 表示单个过场动画关联的一首游戏 BGM 及其跳转信息。
+type QuestCutsceneBGM struct {
+	BGMID      int
+	Title      string // 优先匹配同路径乐谱译名，否则为 BGM 文件名干
+	SubTitle   string // 若有乐谱译名则附带文件干（如 BGM_EX3_Event_16）
+	File       string
+	FileExists bool
+	FadeMs     int
+	Source     string // "cutb" | "lua"
+}
+
+// QuestCutsceneEntry 表示按需解析后的单段任务过场动画及其使用的 BGM 列表。
+type QuestCutsceneEntry struct {
+	CutsceneID  int
+	Path        string
+	Source      string
+	MissingCutb bool
+	BGMs        []QuestCutsceneBGM
 }
 
 // QuestDialogueLine 表示按剧情顺序整理的单段任务对话、选项或系统提示。
@@ -208,7 +247,7 @@ type QuestSearchQuery struct {
 	Q           string
 	SectionID   int
 	ExpansionID int
-	Filter      string // all|msq|feature|repeatable|with_item
+	Filter      string // all|msq|feature|repeatable|with_item|with_cutscene
 	MinLevel    int
 	MaxLevel    int
 	Page        int
@@ -845,12 +884,14 @@ const (
 	GlobalHitQuest       GlobalSearchHitKind = "quest"
 	GlobalHitLeve        GlobalSearchHitKind = "leve"
 	GlobalHitAchievement GlobalSearchHitKind = "achievement"
+	GlobalHitMusic       GlobalSearchHitKind = "music"
 )
 
 // GlobalSearchHit 表示一条全局名称精准匹配结果。
 type GlobalSearchHit struct {
 	Kind         GlobalSearchHitKind
 	ID           int
+	MusicKind    string
 	Title        string
 	MatchedAlias string
 	Category     string
@@ -868,4 +909,206 @@ type GlobalSearchResult struct {
 	Query        string
 	Hits         []GlobalSearchHit
 	TotalMatched int
+}
+
+// MusicKind 区分「音乐」页面中的原生游戏 BGM 表条目与管弦乐琴乐谱条目。
+const (
+	MusicKindBGM         = "bgm"
+	MusicKindOrchestrion = "orchestrion"
+)
+
+// MusicCategoryInfo 表示管弦乐琴分类统计信息。
+type MusicCategoryInfo struct {
+	ID     int
+	Name   string
+	IconID int
+	Order  int
+	Count  int
+}
+
+// MusicExpansionInfo 表示音乐条目按资料片（ffxiv / ex1..exN）归集的统计信息。
+type MusicExpansionInfo struct {
+	ID    int
+	Name  string
+	Count int
+}
+
+// MusicUsage 描述单首 BGM 在游戏内被区域、副本、坐骑或事件引用的场景来源。
+type MusicUsage struct {
+	Kind     string // territory|duty|mount|fate|gfate|wedding|leve|switch
+	Role     string // 白天|夜晚|战斗|破晓|黄昏|通关 等
+	Label    string
+	SubLabel string
+	IconID   int
+	RefID    int
+}
+
+// MusicEntry 表示单条游戏 BGM 或管弦乐琴音乐的完整解析记录。
+type MusicEntry struct {
+	Key                     string // "<kind>:<id>"
+	Kind                    string // bgm|orchestrion
+	ID                      int
+	Title                   string // 显示主名：管弦乐琴为曲名，BGM 为婚礼曲名或文件名干
+	NameCn                  string
+	NameZh                  string
+	NameEn                  string
+	NameJa                  string
+	Description             string
+	DescriptionEn           string
+	DescriptionJa           string
+	File                    string // 虚拟路径，如 music/ffxiv/BGM_System_Title.scd
+	FileStem                string // 无路径与扩展名，如 BGM_System_Title
+	ExpansionID             int
+	ExpansionName           string
+	CategoryID              int
+	CategoryName            string
+	CategoryIconID          int
+	Order                   int
+	ItemID                  int
+	ItemName                string
+	ItemIconID              int
+	Priority                int
+	SpecialMode             int
+	DisableRestartResetTime float64
+	DisableRestartTimeOut   bool
+	DisableRestart          bool
+	PassEnd                 bool
+	FileExists              bool
+	IsPlaceholder           bool
+	FileSize                uint32
+	ContentMD5              string
+	UsageSummary            string
+	Usages                  []MusicUsage
+}
+
+// MusicQuestRef 描述单个任务对音乐条目的引用关联与触发出处。
+type MusicQuestRef struct {
+	QuestID       int
+	NameCn        string
+	NameZh        string
+	NameEn        string
+	NameJa        string
+	Level         int
+	TypeIconID    int
+	SectionName   string
+	GenreName     string
+	ExpansionName string
+	IsMSQ         bool
+	IsFeature     bool
+	IsRepeatable  bool
+	CutsceneNames []string
+	ViaScript     bool
+	orderIndex    int
+}
+
+// BGMDigest 保存单个 BGM 资源文件的只读体积与 MD5 指纹，用于版本快照对比。
+type BGMDigest struct {
+	ID         int
+	File       string
+	FileExists bool
+	FileSize   uint32
+	ContentMD5 string
+}
+
+// MusicAudioDetail 保存按需从 SqPack 解压解析后的单首音频流与容器参数。
+type MusicAudioDetail struct {
+	File            string
+	FileSize        int
+	SCDVersion      uint32
+	Format          sqpack.ScdAudioFormat
+	FormatName      string
+	Playable        bool
+	Channels        int
+	SampleRate      int
+	DurationSec     float64
+	OggVersion      uint8
+	HasLoop         bool
+	LoopStartSample int64
+	LoopEndSample   int64
+	VorbisTitle     string
+	OggData         []byte
+	RawSCD          []byte
+}
+
+// MusicSearchQuery 定义「音乐」列表检索与筛选参数。
+type MusicSearchQuery struct {
+	Q             string
+	Kind          string // all|bgm|orchestrion
+	ExpansionID   int    // -1 表示全部资料片
+	CategoryID    int    // 0 表示全部分类
+	WithUsageOnly bool
+	Page          int
+	PageSize      int
+}
+
+// MusicSearchResponse 表示「音乐」分页检索结果。
+type MusicSearchResponse struct {
+	Items      []MusicEntry
+	Total      int
+	Page       int
+	PageSize   int
+	TotalPages int
+}
+
+// IconReaderSource 标识图标资源所属的客户端读取源。
+type IconReaderSource uint8
+
+const (
+	IconSourceNone IconReaderSource = iota
+	IconSourcePrimary
+	IconSourceCN
+	IconSourceGlobal
+)
+
+// IconVariantInfo 描述单个图标在某一子目录变体（默认 / hq / chs / en / ja / de / fr 等）下的可用文件。
+type IconVariantInfo struct {
+	Variant   string
+	HasStd    bool
+	HasHR1    bool
+	StdSource IconReaderSource
+	HR1Source IconReaderSource
+}
+
+// IconEntry 表示单个在客户端内实际存在有效资源的图标条目。
+type IconEntry struct {
+	ID             int
+	GroupID        int
+	Code           string // 6 位补零编号，如 "037618"
+	DefaultVariant string // 缩略图优先展示的变体目录
+	DefaultHR1     bool   // 仅存在高清 _hr1 时为 true
+	HasHQ          bool
+	HasHR1         bool
+	HasLocalized   bool
+	Variants       []IconVariantInfo
+}
+
+// IconGroupInfo 表示每 1000 个图标编号划分的非空分组摘要（如 037000）。
+type IconGroupInfo struct {
+	GroupID        int
+	Code           string
+	RangeLabel     string
+	Count          int
+	HQCount        int
+	HR1Count       int
+	LocalizedCount int
+}
+
+// IconUsageRef 描述引用某图标 ID 的游戏数据条目（物品、任务、成就、理符）。
+type IconUsageRef struct {
+	Kind string // item|quest|achievement|leve
+	ID   int
+	Name string
+}
+
+// IconSearchQuery 定义「图标」工作台的检索与筛选条件。
+type IconSearchQuery struct {
+	Q             string
+	GroupID       int    // < 0 表示跨全部分组检索，>= 0 表示限定分组
+	VariantFilter string // all|hr1|hq|localized
+}
+
+// IconSearchResponse 表示「图标」工作台的筛选结果。
+type IconSearchResponse struct {
+	Items []IconEntry
+	Total int
 }

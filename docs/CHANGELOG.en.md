@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-26
+
+### Added
+- **Icons Partition in Version Diff**: Added a dedicated "Icons" comparison partition in Version Diff (kept separate from the "All" view), rendering added and removed icons as tiled grids and displaying old and new icons side-by-side for modified entries.
+- **Game Icon Browser & Export**: Added an "Icons" page under the "Resources" sidebar group organizing icons in 1,000-ID groups while skipping empty groups and missing IDs, supporting searches by ID, group, or referencing items/quests/achievements, prioritizing HD previews in the details panel with single-click or double-click large image preview (with quick resolution and directory variant switching inside the lightbox), jumping to related entries, and exporting individual PNGs or bulk local folders and `.zip` archives matching SaintCoinach's directory layout (with all available variants pre-selected).
+- **Quest & Music Cross-Links**: Added linked cutscenes and BGM tracks inside Quest details alongside a referencing Quests section in Music details (covering cutscenes and quest scripts, including Orchestrion tracks sharing the same audio file), with one-click jumping both ways plus a "With Cutscenes" quest filter and Version Diff tracking.
+- **Music Browser & Built-In Player**: Added a new "Music" page under the "Resources" sidebar group combining game BGM and Orchestrion tracks with zone, duty, mount, event, and ceremony usages (auto-collapsed when exceeding 50 items, click to expand), built-in playback with seek, volume, and loop controls, `.ogg` / `.scd` export, global quick-search support, and full Recent history and Favorites tracking.
+- **BGM Tracking in Version Diff**: Added BGM stats and filter chips to Version Diff to highlight newly added BGMs and detect content changes in existing BGM tracks, with click-to-inspect navigation.
+
+### Changed
+- **Version Diff Filter Divider**: Added a vertical divider before the "Icons" filter button in Version Diff to visually separate it from the standard "All" summary and categories.
+
+### Fixed
+- **Export & Update Progress Bars**: Fixed progress bars not filling properly in the export and update dialogs.
+
 ## [2.3.0] - 2026-11-25
 
 ### Added

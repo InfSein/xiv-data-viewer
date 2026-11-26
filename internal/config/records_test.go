@@ -102,4 +102,25 @@ func TestUserRecordsRecentCapDedupeAndPersistence(t *testing.T) {
 	if !reloaded.ClearRecent() || len(reloaded.Recent) != 0 {
 		t.Fatalf("清空最近记录失败")
 	}
+
+	// 验证同 ID 的 BGM 与管弦乐琴可同时作为独立音乐记录进入最近浏览与收藏
+	var musicRec UserRecords
+	if !musicRec.RecordRecent(RecordKindBGM, 10, baseTime) || !musicRec.RecordRecent(RecordKindOrchestrion, 10, baseTime.Add(time.Second)) {
+		t.Fatalf("音乐记录写入最近浏览失败: %+v", musicRec.Recent)
+	}
+	if len(musicRec.Recent) != 2 {
+		t.Fatalf("相同 ID 的 BGM 与管弦乐琴不应互相去重，实际 %+v", musicRec.Recent)
+	}
+	if fav, chg := musicRec.ToggleFavorite(RecordKindBGM, 10, baseTime); !fav || !chg {
+		t.Fatalf("收藏 BGM #10 失败")
+	}
+	if fav, chg := musicRec.ToggleFavorite(RecordKindOrchestrion, 10, baseTime); !fav || !chg {
+		t.Fatalf("收藏管弦乐琴 #10 失败")
+	}
+	if !musicRec.IsFavorite(RecordKindBGM, 10) || !musicRec.IsFavorite(RecordKindOrchestrion, 10) {
+		t.Fatalf("音乐双子类型收藏状态判定异常")
+	}
+	if !IsMusicRecordKind(MusicRecordKind("bgm")) || MusicKindOfRecord(RecordKindOrchestrion) != "orchestrion" {
+		t.Fatalf("音乐类型转换辅助函数异常")
+	}
 }

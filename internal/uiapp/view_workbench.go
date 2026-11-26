@@ -254,6 +254,8 @@ func (a *App) globalJumpTargets() []globalJumpTarget {
 		{tab: tabQuests, label: a.t("search.global_module_quest"), icon: icoScroll},
 		{tab: tabLeves, label: a.t("search.global_module_leve"), icon: icoClipboard},
 		{tab: tabAchievements, label: a.t("search.global_module_achievement"), icon: icoTrophy},
+		{tab: tabMusic, label: a.t("search.global_module_music"), icon: icoMusic},
+		{tab: tabIcons, label: a.t("search.global_module_icon"), icon: icoImage},
 		{tab: tabDiff, label: a.t("search.global_module_diff"), icon: icoCompare},
 	}
 }
@@ -296,6 +298,8 @@ func (a *App) globalHitBadgeAndIcon(kind gamedata.GlobalSearchHitKind) (string, 
 		return a.t("search.global_module_leve"), pillPositive, icoClipboard
 	case gamedata.GlobalHitAchievement:
 		return a.t("search.global_module_achievement"), pillAccent, icoTrophy
+	case gamedata.GlobalHitMusic:
+		return a.t("search.global_module_music"), pillAccent, icoMusic
 	default:
 		return a.t("search.global_module_item"), pillNeutral, icoPackage
 	}
@@ -581,6 +585,10 @@ func (a *App) renderShellBody(c *ui.Context) {
 				a.renderLevesView(c)
 			case tabAchievements:
 				a.renderAchievementsView(c)
+			case tabMusic:
+				a.renderMusicView(c)
+			case tabIcons:
+				a.renderIconsView(c)
 			case tabRecent:
 				a.renderRecentView(c)
 			case tabFavorites:
@@ -627,6 +635,22 @@ func (a *App) renderSidebar(c *ui.Context) {
 				}
 				if kitSidebarItem(c, "nav-achievements", icoTrophy, icoTrophyFill, a.t("nav.achievements"), achCnt, a.tab == tabAchievements, false) {
 					a.navigateTab(tabAchievements)
+				}
+
+				ui.Text(c, a.t("nav.section.resources")).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).Padding(14, 10, 4, 10)
+				musicCnt := ""
+				if a.status != nil && a.status.Stats.TotalMusic > 0 {
+					musicCnt = formatInt(a.status.Stats.TotalMusic)
+				}
+				if kitSidebarItem(c, "nav-music", icoMusic, icoMusicFill, a.t("nav.music"), musicCnt, a.tab == tabMusic, false) {
+					a.navigateTab(tabMusic)
+				}
+				iconCnt := ""
+				if a.status != nil && a.status.Stats.TotalIcons > 0 {
+					iconCnt = formatInt(a.status.Stats.TotalIcons)
+				}
+				if kitSidebarItem(c, "nav-icons", icoImage, icoImageFill, a.t("nav.icons"), iconCnt, a.tab == tabIcons, false) {
+					a.navigateTab(tabIcons)
 				}
 
 				ui.Text(c, a.t("nav.section.history")).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).Padding(14, 10, 4, 10)

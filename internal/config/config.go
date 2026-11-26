@@ -16,11 +16,12 @@ var ErrNoClientConfigured = errors.New("尚未配置国服或国际服 FF14 游�
 
 // AppConfig 存储客户端持久化用户配置（保存在应用数据目录的 config.json）。
 type AppConfig struct {
-	CNPath          string `json:"cnPath"`
-	GlobalPath      string `json:"globalPath"`
-	ExportOutputDir string `json:"exportOutputDir"`
-	Theme           string `json:"theme,omitempty"`    // "system" | "light" | "dark"，空值默认跟随系统
-	Language        string `json:"language,omitempty"` // "zh" | "ja" | "en"，空值表示自动跟随系统语言
+	CNPath              string `json:"cnPath"`
+	GlobalPath          string `json:"globalPath"`
+	ExportOutputDir     string `json:"exportOutputDir"`
+	IconExportOutputDir string `json:"iconExportOutputDir,omitempty"`
+	Theme               string `json:"theme,omitempty"`    // "system" | "light" | "dark"，空值默认跟随系统
+	Language            string `json:"language,omitempty"` // "zh" | "ja" | "en"，空值表示自动跟随系统语言
 }
 
 // ClientInfo 表示经过只读校验后的单个服务器客户端目录信息。
@@ -75,6 +76,7 @@ func normalizeConfigFields(cfg *AppConfig) {
 	cfg.CNPath = strings.TrimSpace(cfg.CNPath)
 	cfg.GlobalPath = strings.TrimSpace(cfg.GlobalPath)
 	cfg.ExportOutputDir = strings.TrimSpace(cfg.ExportOutputDir)
+	cfg.IconExportOutputDir = strings.TrimSpace(cfg.IconExportOutputDir)
 	if lang, ok := i18n.ParseLang(cfg.Language); ok {
 		cfg.Language = string(lang)
 	} else {

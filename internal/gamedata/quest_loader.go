@@ -44,6 +44,7 @@ var questNeededFields = func() []string {
 		"IsHouseRequired", "IsRepeatable", "CanCancel",
 	}
 	for i := 0; i < 50; i++ {
+		fields = append(fields, fmt.Sprintf("QuestParams[%d].ScriptInstruction", i))
 		fields = append(fields, fmt.Sprintf("QuestParams[%d].ScriptArg", i))
 	}
 	for i := 0; i < 64; i++ {
@@ -77,6 +78,9 @@ type questLoaderInput struct {
 	instanceContents        *sqpack.SchemaSheet
 	contentFinderConditions *sqpack.SchemaSheet
 	eobjNames               *sqpack.SchemaSheet
+	cutscenes               *sqpack.SchemaSheet
+	completeJournals        *sqpack.SchemaSheet
+	bgms                    *sqpack.SchemaSheet
 	npcNames                map[int]RawNpcName
 	npcLocations            map[int]RawNpcLocation
 	levelLocations          map[int]RawNpcLocation
@@ -95,6 +99,8 @@ type questIndices struct {
 	questsByRewardItem map[int][]ItemQuestSource
 	sectionList        []QuestSectionInfo
 	questActorIDs      map[int][]int
+	questCutVars       map[int]map[string]int
+	questBGMVars       map[int]map[string]int
 }
 
 // CleanQuestTitle 去除任务标题前缀中的 FF14 私有字体符号（如 \ue0be 等级调整、\ue0bf 固定职业）。
@@ -230,6 +236,10 @@ func buildQuestData(in questLoaderInput) questIndices {
 		}
 		return "", 0
 	}
+
+	cutLinks := buildQuestCutsceneLinks(in.quests, in.cutscenes, in.completeJournals, in.bgms)
+	out.questCutVars = cutLinks.questCutVars
+	out.questBGMVars = cutLinks.questBGMVars
 
 	sectionCount := make(map[int]int)
 	sectionNames := make(map[int]string)
@@ -721,6 +731,8 @@ func buildQuestData(in questLoaderInput) questIndices {
 				}
 			}
 		}
+
+		entry.Cutscenes = cutLinks.questCutscenes[questID]
 
 		out.quests = append(out.quests, entry)
 		out.questByID[questID] = entry

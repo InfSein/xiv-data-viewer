@@ -97,6 +97,13 @@ type Service struct {
 	questTextCache map[int]*QuestTextData
 	questTextOrder []int
 
+	questCutMu    sync.Mutex
+	questCutCache map[int][]QuestCutsceneEntry
+	questCutOrder []int
+
+	musicQuestOnce sync.Once
+	questsByBGMID  map[int][]MusicQuestRef
+
 	actorEnOnce  sync.Once
 	actorEnNames map[int]string
 }
@@ -173,6 +180,11 @@ func (s *Service) GetSystemStatus() SystemStatus {
 			TotalQuests:            len(s.store.Quests),
 			TotalLeves:             len(s.store.Leves),
 			TotalCollectables:      s.store.TotalCollectables,
+			TotalBGMs:              len(s.store.BGMs),
+			TotalOrchestrions:      len(s.store.Orchestrions),
+			TotalMusic:             len(s.allMusicEntries()),
+			TotalIcons:             len(s.store.Icons),
+			TotalIconGroups:        len(s.store.IconGroups),
 			LoadTimeMs:             s.store.LoadTimeMs,
 		},
 		Categories:            s.store.CategoryList,
@@ -181,6 +193,10 @@ func (s *Service) GetSystemStatus() SystemStatus {
 		AchievementCategories: s.store.AchievementCategoryList,
 		QuestSections:         s.store.QuestSectionList,
 		LeveAssignmentTypes:   s.store.LeveAssignmentTypes,
+		MusicCategories:       s.store.MusicCategoryList,
+		MusicExpansions:       s.store.MusicExpansionList,
+		IconGroups:            s.store.IconGroups,
+		AvailableIconVariants: s.store.AvailableIconVariants,
 	}
 }
 
@@ -1703,6 +1719,10 @@ func (s *Service) filterQuests(query QuestSearchQuery) []QuestEntry {
 			if len(qe.RewardItems) == 0 {
 				continue
 			}
+		case "with_cutscene":
+			if len(qe.Cutscenes) == 0 {
+				continue
+			}
 		}
 		rank := 0
 		if qRaw != "" {
@@ -2116,8 +2136,10 @@ func selectTopGlobalHits(groups [][]GlobalSearchHit, maxTotal int) ([]GlobalSear
 			return 2
 		case GlobalHitAchievement:
 			return 3
-		default:
+		case GlobalHitMusic:
 			return 4
+		default:
+			return 5
 		}
 	}
 	sort.SliceStable(selected, func(i, j int) bool {
@@ -2141,7 +2163,7 @@ func (s *Service) SearchGlobal(rawQuery string, maxTotal int) GlobalSearchResult
 	qLower := toLowerFast(q)
 	idTarget := parseExactPositiveID(q)
 
-	var itemHits, questHits, leveHits, achHits []GlobalSearchHit
+	var itemHits, questHits, leveHits, achHits, musicHits []GlobalSearchHit
 
 	for _, it := range s.store.ItemSummaries {
 		rank, alias, ok := matchNameByContains(q, qLower, it.NameCn, it.NameZh, it.NameJa, it.NameEn)
@@ -2267,7 +2289,44 @@ func (s *Service) SearchGlobal(rawQuery string, maxTotal int) GlobalSearchResult
 		})
 	}
 
-	hits, totalMatched := selectTopGlobalHits([][]GlobalSearchHit{itemHits, questHits, leveHits, achHits}, maxTotal)
+	for _, m := range s.allMusicEntries() {
+		rank, alias, ok := matchNameByContains(q, qLower, m.Title, m.NameCn, m.NameZh, m.NameJa, m.NameEn, m.FileStem)
+		if !ok && len(m.Usages) > 0 {
+			for _, u := range m.Usages {
+				if strings.Contains(toLowerFast(u.Label), qLower) {
+					rank = 6
+					alias = u.Label
+					ok = true
+					break
+				}
+			}
+		}
+		if idTarget > 0 && m.ID == idTarget && (!ok || rank > 2) {
+			rank = 2
+			alias = ""
+			ok = true
+		}
+		if !ok {
+			continue
+		}
+		cat := m.CategoryName
+		if m.Kind == MusicKindBGM && m.ExpansionName != "" {
+			cat = m.ExpansionName
+		}
+		musicHits = append(musicHits, GlobalSearchHit{
+			Kind:         GlobalHitMusic,
+			ID:           m.ID,
+			MusicKind:    m.Kind,
+			Title:        m.Title,
+			MatchedAlias: alias,
+			Category:     cat,
+			IconID:       m.ItemIconID,
+			matchRank:    rank,
+			sortLevel:    0,
+		})
+	}
+
+	hits, totalMatched := selectTopGlobalHits([][]GlobalSearchHit{itemHits, questHits, leveHits, achHits, musicHits}, maxTotal)
 	return GlobalSearchResult{
 		Query:        q,
 		Hits:         hits,
@@ -2297,4 +2356,229 @@ func (s *Service) GetMapImage(mapPath string) (*image.RGBA, error) {
 		return sqpack.ReadMapImage(s.store.GlobalReader, s.store.TextureCache, mapPath)
 	}
 	return nil, nil
+}
+
+func (s *Service) allMusicEntries() []MusicEntry {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	if len(s.store.Music) > 0 {
+		return s.store.Music
+	}
+	if len(s.store.BGMs) == 0 && len(s.store.Orchestrions) == 0 {
+		return nil
+	}
+	out := make([]MusicEntry, 0, len(s.store.BGMs)+len(s.store.Orchestrions))
+	out = append(out, s.store.BGMs...)
+	out = append(out, s.store.Orchestrions...)
+	return out
+}
+
+func (s *Service) filterMusic(query MusicSearchQuery) []MusicEntry {
+	qRaw := strings.TrimSpace(query.Q)
+	qLower := toLowerFast(qRaw)
+	numericQuery := parseExactPositiveID(qRaw)
+	kindFilter := query.Kind
+	if kindFilter == "" {
+		kindFilter = "all"
+	}
+
+	type musicMatch struct {
+		entry MusicEntry
+		rank  int
+	}
+	matches := make([]musicMatch, 0, 128)
+	for _, m := range s.allMusicEntries() {
+		if kindFilter != "all" && m.Kind != kindFilter {
+			continue
+		}
+		if query.ExpansionID >= 0 && m.ExpansionID != query.ExpansionID {
+			continue
+		}
+		if query.CategoryID > 0 && m.CategoryID != query.CategoryID {
+			continue
+		}
+		if query.WithUsageOnly && len(m.Usages) == 0 && m.ItemID == 0 {
+			continue
+		}
+		rank := 0
+		if qRaw != "" {
+			matchedRank, _, ok := matchNameByContains(qRaw, qLower, m.Title, m.NameCn, m.NameZh, m.NameJa, m.NameEn, m.FileStem)
+			if numericQuery > 0 && m.ID == numericQuery && (!ok || matchedRank > 2) {
+				matchedRank = 2
+				ok = true
+			}
+			if !ok {
+				if strings.Contains(toLowerFast(m.File), qLower) ||
+					strings.Contains(toLowerFast(m.Description), qLower) ||
+					strings.Contains(toLowerFast(m.CategoryName), qLower) ||
+					strings.Contains(toLowerFast(m.ExpansionName), qLower) ||
+					strings.Contains(toLowerFast(m.ItemName), qLower) ||
+					strings.Contains(toLowerFast(m.UsageSummary), qLower) {
+					matchedRank = 7
+					ok = true
+				} else {
+					for _, u := range m.Usages {
+						if strings.Contains(toLowerFast(u.Label), qLower) || strings.Contains(toLowerFast(u.Role), qLower) {
+							matchedRank = 7
+							ok = true
+							break
+						}
+					}
+				}
+			}
+			if !ok {
+				continue
+			}
+			rank = matchedRank
+		}
+		matches = append(matches, musicMatch{entry: m, rank: rank})
+	}
+	if qRaw != "" && len(matches) > 1 {
+		sort.SliceStable(matches, func(i, j int) bool {
+			return matches[i].rank < matches[j].rank
+		})
+	}
+	out := make([]MusicEntry, len(matches))
+	for i, m := range matches {
+		out[i] = m.entry
+	}
+	return out
+}
+
+// SearchMusic 检索并分页返回游戏 BGM 与管弦乐琴音乐列表。
+func (s *Service) SearchMusic(query MusicSearchQuery) MusicSearchResponse {
+	filtered := s.filterMusic(query)
+	page, totalPages, start, end := paginateRange(len(filtered), query.Page, query.PageSize)
+	var items []MusicEntry
+	if start < end {
+		items = filtered[start:end]
+	}
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 30
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	return MusicSearchResponse{
+		Items:      items,
+		Total:      len(filtered),
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+	}
+}
+
+// LocateMusicPage 在当前筛选条件下定位指定音乐条目所在分页。
+func (s *Service) LocateMusicPage(query MusicSearchQuery, kind string, id int) (MusicSearchResponse, bool) {
+	if s == nil || s.store == nil || id <= 0 {
+		return MusicSearchResponse{}, false
+	}
+	filtered := s.filterMusic(query)
+	idx := -1
+	for i, m := range filtered {
+		if m.ID == id && (kind == "" || m.Kind == kind) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return MusicSearchResponse{}, false
+	}
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 30
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	page, totalPages, start, end := paginateRange(len(filtered), idx/pageSize+1, pageSize)
+	var items []MusicEntry
+	if start < end {
+		items = filtered[start:end]
+	}
+	return MusicSearchResponse{
+		Items:      items,
+		Total:      len(filtered),
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+	}, true
+}
+
+// GetMusicDetail 根据类型与 ID 返回单条音乐元数据详情。
+func (s *Service) GetMusicDetail(kind string, id int) *MusicEntry {
+	if s == nil || s.store == nil || id <= 0 {
+		return nil
+	}
+	if kind == "" {
+		kind = MusicKindBGM
+	}
+	if len(s.store.MusicByKey) > 0 {
+		if m, ok := s.store.MusicByKey[musicKey(kind, id)]; ok {
+			return &m
+		}
+	}
+	if kind == MusicKindBGM && len(s.store.BGMByID) > 0 {
+		if m, ok := s.store.BGMByID[id]; ok {
+			return &m
+		}
+	}
+	if kind == MusicKindOrchestrion && len(s.store.OrchByID) > 0 {
+		if m, ok := s.store.OrchByID[id]; ok {
+			return &m
+		}
+	}
+	for _, m := range s.allMusicEntries() {
+		if m.ID == id && m.Kind == kind {
+			cp := m
+			return &cp
+		}
+	}
+	return nil
+}
+
+// LoadMusicAudio 按需从只读 SqPack 读取并解析指定音乐的 .scd 音频容器。
+func (s *Service) LoadMusicAudio(kind string, id int) (*MusicAudioDetail, error) {
+	entry := s.GetMusicDetail(kind, id)
+	if entry == nil || entry.File == "" {
+		return nil, fmt.Errorf("未找到音乐条目 (%s #%d)", kind, id)
+	}
+	var raw []byte
+	var err error
+	if s.store.PrimaryReader != nil {
+		raw, err = s.store.PrimaryReader.ReadFile(entry.File)
+	}
+	if (len(raw) == 0 && err == nil) && s.store.GlobalReader != nil && s.store.GlobalReader != s.store.PrimaryReader {
+		raw, err = s.store.GlobalReader.ReadFile(entry.File)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("客户端中未包含音频文件: %s", entry.File)
+	}
+	info, err := sqpack.ParseSCD(raw)
+	if err != nil {
+		return nil, err
+	}
+	return &MusicAudioDetail{
+		File:            entry.File,
+		FileSize:        len(raw),
+		SCDVersion:      info.SCDVersion,
+		Format:          info.Format,
+		FormatName:      info.FormatName,
+		Playable:        info.Format == sqpack.ScdFormatOggVorbis && len(info.OggData) > 0,
+		Channels:        info.Channels,
+		SampleRate:      info.SampleRate,
+		DurationSec:     info.Duration.Seconds(),
+		OggVersion:      info.OggVersion,
+		HasLoop:         info.HasLoop,
+		LoopStartSample: info.LoopStartSample,
+		LoopEndSample:   info.LoopEndSample,
+		VorbisTitle:     info.VorbisTitle,
+		OggData:         info.OggData,
+		RawSCD:          raw,
+	}, nil
 }

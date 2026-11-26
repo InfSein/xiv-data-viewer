@@ -55,6 +55,8 @@ const (
 	tabQuests
 	tabLeves
 	tabAchievements
+	tabMusic
+	tabIcons
 	tabRecent
 	tabFavorites
 	tabDiff
@@ -85,6 +87,7 @@ type langSessionCache struct {
 	service         *gamedata.Service
 	backupSvc       *backup.Service
 	exporterSvc     *exporter.Service
+	iconExporterSvc *exporter.IconService
 	status          gamedata.SystemStatus
 	versionStatus   backup.VersionStatusResponse
 	exportTotalShts int
@@ -167,10 +170,11 @@ type App struct {
 	loadingStatusTxt string
 
 	// 核心后端服务
-	service     *gamedata.Service
-	backupSvc   *backup.Service
-	exporterSvc *exporter.Service
-	bitmaps     *BitmapCache
+	service         *gamedata.Service
+	backupSvc       *backup.Service
+	exporterSvc     *exporter.Service
+	iconExporterSvc *exporter.IconService
+	bitmaps         *BitmapCache
 
 	// 系统与版本状态
 	status              *gamedata.SystemStatus
@@ -195,19 +199,22 @@ type App struct {
 	scrollItemListToID int
 
 	// 任务视图状态
-	questQuery          gamedata.QuestSearchQuery
-	questPageStr        string
-	questRes            gamedata.QuestSearchResponse
-	questListScroll     ui.ScrollState
-	questDetailScroll   ui.ScrollState
-	scrollQuestListToID int
-	selectedQuestID     int
-	selectedQuest       *gamedata.QuestEntry
-	selectedQuestText   *gamedata.QuestTextData
-	questTextLoading    bool
-	questTextSeq        uint64
-	questSummaryOpen    bool
-	questDialogueOpen   bool
+	questQuery             gamedata.QuestSearchQuery
+	questPageStr           string
+	questRes               gamedata.QuestSearchResponse
+	questListScroll        ui.ScrollState
+	questDetailScroll      ui.ScrollState
+	scrollQuestListToID    int
+	selectedQuestID        int
+	selectedQuest          *gamedata.QuestEntry
+	selectedQuestText      *gamedata.QuestTextData
+	questTextLoading       bool
+	questTextSeq           uint64
+	questSummaryOpen       bool
+	questDialogueOpen      bool
+	selectedQuestCutscenes []gamedata.QuestCutsceneEntry
+	questCutscenesLoading  bool
+	questCutscenesSeq      uint64
 
 	// 理符视图状态
 	leveQuery          gamedata.LeveSearchQuery
@@ -226,78 +233,148 @@ type App struct {
 	achScroll     ui.ScrollState
 	scrollAchToID int
 
+	// 音乐（游戏 BGM 与管弦乐琴）视图状态
+	musicQuery         gamedata.MusicSearchQuery
+	musicPageStr       string
+	musicRes           gamedata.MusicSearchResponse
+	musicListScroll    ui.ScrollState
+	musicDetailScroll  ui.ScrollState
+	scrollMusicListKey string
+	selectedMusicKey   string
+	selectedMusicKind  string
+	selectedMusicID    int
+	musicDetail        *gamedata.MusicEntry
+	musicAudioSlot     musicAudioSlot
+	musicVolume        float64
+	musicPlayer        *musicPlayer
+
+	// 「图标」视图与导出状态
+	iconGroupListW         float32
+	iconGroupFilterQ       string
+	iconQuery              gamedata.IconSearchQuery
+	iconRes                gamedata.IconSearchResponse
+	iconGroupScroll        ui.ScrollState
+	iconGridState          ui.GridState
+	iconGridSelIdx         int
+	iconInspectorScroll    ui.ScrollState
+	selectedIconID         int // < 0 表示未选中（注意 #0 为有效图标编号）
+	selectedIconDetail     *gamedata.IconEntry
+	iconInspectorVariant   string
+	iconInspectorHR1       bool
+	iconPreviewCache       map[string]*cachedIconPreview
+	iconTileCache          *iconTileBitmapCache
+	iconSingleExportMsg    string
+	iconSingleExportIsErr  bool
+	iconExportOpen         bool
+	iconExportDirDraft     string
+	iconExportIncludeStd   bool
+	iconExportIncludeHR1   bool
+	iconExportVariants     map[string]bool
+	iconExportScopeGroup   bool
+	iconExportProgress     *exporter.IconExportProgress
+	iconExportError        string
+	iconExportTaskCount    int
+	iconExportTaskCountKey string
+	iconLightboxOpen       bool
+	iconLightboxID         int
+	iconLightboxVariant    string
+	iconLightboxHR1        bool
+	iconLightboxTitle      string
+	iconLightboxSubtitle   string
+	iconLightboxBlobKey    string
+	iconLightboxThumbPNG   []byte
+
 	// 「最近」视图状态
-	recentFilter            string // all|item|quest|leve
-	recentQueryQ            string
-	recentPage              int
-	recentPageStr           string
-	recentListScroll        ui.ScrollState
-	recentSelectedKind      config.RecordKind
-	recentSelectedID        int
-	recentItemDetail        *gamedata.ItemDetail
-	recentItemRecipeIdx     int
-	recentItemScroll        ui.ScrollState
-	recentQuest             *gamedata.QuestEntry
-	recentQuestText         *gamedata.QuestTextData
-	recentQuestTextLoading  bool
-	recentQuestTextSeq      uint64
-	recentQuestSummaryOpen  bool
-	recentQuestDialogueOpen bool
-	recentQuestScroll       ui.ScrollState
-	recentLeve              *gamedata.LeveEntry
-	recentLeveScroll        ui.ScrollState
+	recentFilter                string // all|item|quest|leve|music
+	recentQueryQ                string
+	recentPage                  int
+	recentPageStr               string
+	recentListScroll            ui.ScrollState
+	recentSelectedKind          config.RecordKind
+	recentSelectedID            int
+	recentItemDetail            *gamedata.ItemDetail
+	recentItemRecipeIdx         int
+	recentItemScroll            ui.ScrollState
+	recentQuest                 *gamedata.QuestEntry
+	recentQuestText             *gamedata.QuestTextData
+	recentQuestTextLoading      bool
+	recentQuestTextSeq          uint64
+	recentQuestSummaryOpen      bool
+	recentQuestDialogueOpen     bool
+	recentQuestCutscenes        []gamedata.QuestCutsceneEntry
+	recentQuestCutscenesLoading bool
+	recentQuestCutscenesSeq     uint64
+	recentQuestScroll           ui.ScrollState
+	recentLeve                  *gamedata.LeveEntry
+	recentLeveScroll            ui.ScrollState
+	recentMusicDetail           *gamedata.MusicEntry
+	recentMusicScroll           ui.ScrollState
+	recentMusicAudioSlot        musicAudioSlot
 
 	// 「收藏」视图状态
-	favTab               string // item|quest|leve|achievement
-	favItemQ             string
-	favItemSort          string // added|id_asc|id_desc|ilvl_desc
-	favItemPage          int
-	favItemPageStr       string
-	favItemScroll        ui.ScrollState
-	favSelectedItemID    int
-	favItemDetail        *gamedata.ItemDetail
-	favItemRecipeIdx     int
-	favItemDetailScroll  ui.ScrollState
-	favQuestQ            string
-	favQuestFilter       string // all|msq|feature|repeatable|with_item
-	favQuestPage         int
-	favQuestPageStr      string
-	favQuestScroll       ui.ScrollState
-	favSelectedQuestID   int
-	favQuest             *gamedata.QuestEntry
-	favQuestText         *gamedata.QuestTextData
-	favQuestTextLoading  bool
-	favQuestTextSeq      uint64
-	favQuestSummaryOpen  bool
-	favQuestDialogueOpen bool
-	favQuestDetailScroll ui.ScrollState
-	favLeveQ             string
-	favLeveKind          string // all|craft|gathering|battle|company
-	favLevePage          int
-	favLevePageStr       string
-	favLeveScroll        ui.ScrollState
-	favSelectedLeveID    int
-	favLeve              *gamedata.LeveEntry
-	favLeveDetailScroll  ui.ScrollState
-	favAchQ              string
-	favAchFilter         string // all|with_title|with_item
-	favAchPage           int
-	favAchPageStr        string
-	favAchScroll         ui.ScrollState
+	favTab                   string // item|quest|leve|achievement|music
+	favItemQ                 string
+	favItemSort              string // added|id_asc|id_desc|ilvl_desc
+	favItemPage              int
+	favItemPageStr           string
+	favItemScroll            ui.ScrollState
+	favSelectedItemID        int
+	favItemDetail            *gamedata.ItemDetail
+	favItemRecipeIdx         int
+	favItemDetailScroll      ui.ScrollState
+	favQuestQ                string
+	favQuestFilter           string // all|msq|feature|repeatable|with_item
+	favQuestPage             int
+	favQuestPageStr          string
+	favQuestScroll           ui.ScrollState
+	favSelectedQuestID       int
+	favQuest                 *gamedata.QuestEntry
+	favQuestText             *gamedata.QuestTextData
+	favQuestTextLoading      bool
+	favQuestTextSeq          uint64
+	favQuestSummaryOpen      bool
+	favQuestDialogueOpen     bool
+	favQuestCutscenes        []gamedata.QuestCutsceneEntry
+	favQuestCutscenesLoading bool
+	favQuestCutscenesSeq     uint64
+	favQuestDetailScroll     ui.ScrollState
+	favLeveQ                 string
+	favLeveKind              string // all|craft|gathering|battle|company
+	favLevePage              int
+	favLevePageStr           string
+	favLeveScroll            ui.ScrollState
+	favSelectedLeveID        int
+	favLeve                  *gamedata.LeveEntry
+	favLeveDetailScroll      ui.ScrollState
+	favAchQ                  string
+	favAchFilter             string // all|with_title|with_item
+	favAchPage               int
+	favAchPageStr            string
+	favAchScroll             ui.ScrollState
+	favMusicQ                string
+	favMusicKind             string // all|bgm|orchestrion
+	favMusicPage             int
+	favMusicPageStr          string
+	favMusicScroll           ui.ScrollState
+	favSelectedMusicKey      string
+	favMusicDetail           *gamedata.MusicEntry
+	favMusicDetailScroll     ui.ScrollState
+	favMusicAudioSlot        musicAudioSlot
 
 	// 版本 Diff 视图状态
-	diffFromVer string
-	diffToVer   string
-	diffFilter  string
-	diffEntity  string
-	diffSearch  string
-	diffPage    int
-	diffPageStr string
-	diffRes     *backup.VersionDiffResponse
-	diffBusy    bool
-	diffNotice  string
-	diffError   string
-	diffScroll  ui.ScrollState
+	diffFromVer   string
+	diffToVer     string
+	diffFilter    string
+	diffEntity    string
+	diffSearch    string
+	diffPage      int
+	diffPageStr   string
+	diffRes       *backup.VersionDiffResponse
+	diffBusy      bool
+	diffNotice    string
+	diffError     string
+	diffScroll    ui.ScrollState
+	diffIconCache map[string]*ui.Bitmap
 
 	// 更新日志视图状态
 	changelogFS        fs.FS
@@ -403,7 +480,16 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 			Page:     1,
 			PageSize: 30,
 		},
-		achPageStr:         "1",
+		achPageStr: "1",
+		musicQuery: gamedata.MusicSearchQuery{
+			Kind:        "all",
+			ExpansionID: -1,
+			Page:        1,
+			PageSize:    30,
+		},
+		musicPageStr:       "1",
+		musicVolume:        75,
+		musicPlayer:        newMusicPlayer(),
 		recentFilter:       "all",
 		recentPage:         1,
 		recentPageStr:      "1",
@@ -420,10 +506,14 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 		favAchFilter:       "all",
 		favAchPage:         1,
 		favAchPageStr:      "1",
+		favMusicKind:       "all",
+		favMusicPage:       1,
+		favMusicPageStr:    "1",
 		diffFilter:         "all",
 		diffEntity:         "all",
 		diffPage:           1,
 		diffPageStr:        "1",
+		diffIconCache:      make(map[string]*ui.Bitmap),
 		changelogCatFilter: "all",
 		changelogDocs:      make(map[i18n.Lang]changelog.Document),
 		changelogCollapsed: make(map[string]bool),
@@ -434,8 +524,18 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 			"de":  true,
 			"fr":  true,
 		},
-		exportDirDraft: cfg.ExportOutputDir,
-		langCache:      make(map[i18n.Lang]*langSessionCache),
+		exportDirDraft:       cfg.ExportOutputDir,
+		iconGroupListW:       iconGroupListDefWidth,
+		iconQuery:            gamedata.IconSearchQuery{GroupID: -1, VariantFilter: "all"},
+		iconGridSelIdx:       -1,
+		selectedIconID:       -1,
+		iconPreviewCache:     make(map[string]*cachedIconPreview),
+		iconTileCache:        newIconTileBitmapCache(900),
+		iconExportDirDraft:   cfg.IconExportOutputDir,
+		iconExportIncludeStd: true,
+		iconExportIncludeHR1: true,
+		iconExportVariants:   make(map[string]bool),
+		langCache:            make(map[i18n.Lang]*langSessionCache),
 		updaterClient: updater.NewClient(updater.Options{
 			CurrentVersion: appVersion,
 		}),
@@ -634,7 +734,11 @@ func (a *App) clearRecent() {
 		a.recentQuest = nil
 		a.recentQuestText = nil
 		a.recentQuestTextLoading = false
+		a.recentQuestCutscenes = nil
+		a.recentQuestCutscenesLoading = false
 		a.recentLeve = nil
+		a.recentMusicDetail = nil
+		a.recentMusicAudioSlot = musicAudioSlot{}
 		a.recentPage = 1
 		a.recentPageStr = "1"
 		a.saveRecordsAsync()
@@ -791,6 +895,9 @@ func (a *App) Close() {
 	}
 	a.flushConfigSave()
 	a.flushRecordsSave()
+	if a.musicPlayer != nil {
+		a.musicPlayer.Close()
+	}
 	a.resetLangCacheAndReaders()
 }
 
@@ -859,7 +966,7 @@ func (a *App) panelRadius(c *ui.Context) float32 {
 
 // windowBackground 返回根窗口画布色（启用 Mica/Vibrancy 时保持通透，否则回退中性底色）。
 func (a *App) windowBackground(t uiTokens) ui.Color {
-	if a.vibrancy && !a.mapOpen && !a.exportOpen && !a.updateModalOpen {
+	if a.vibrancy && !a.mapOpen && !a.exportOpen && !a.iconExportOpen && !a.iconLightboxOpen && !a.updateModalOpen {
 		if t.dark {
 			return ui.Transparent
 		}
@@ -876,8 +983,15 @@ func (a *App) View(c *ui.Context) {
 		// 驱动加载页已用时间秒数平稳刷新
 		c.After(150 * time.Millisecond)
 	case modeReady:
-		// 每秒驱动一次重绘以刷新实时艾欧泽亚时钟及限时采集倒计时
-		c.After(time.Second)
+		// 播放音乐或执行后台批量导出时提升刷新频率，确保进度条与时间计数平滑推进
+		musicPlaying := a.musicPlayer != nil && a.musicPlayer.Snapshot().Playing
+		exportRunning := (a.iconExportProgress != nil && a.iconExportProgress.IsRunning) ||
+			(a.exportProgress != nil && a.exportProgress.IsRunning)
+		if musicPlaying || exportRunning {
+			c.After(120 * time.Millisecond)
+		} else {
+			c.After(time.Second)
+		}
 
 		// 全局快捷键（参考 Godwit 桌面端交互）
 		if c.Shortcut(ui.Cmd, ui.KeyB) {
@@ -917,9 +1031,11 @@ func (a *App) View(c *ui.Context) {
 		})
 	}
 
-	// 全局模态弹窗层（地图预览、CSV 导出、应用检查更新）
+	// 全局模态弹窗层（地图预览、CSV 导出、图标导出、图标大图预览、应用检查更新）
 	a.renderMapModal(c)
 	a.renderExportModal(c)
+	a.renderIconExportModal(c)
+	a.renderIconLightboxModal(c)
 	a.renderUpdateModal(c)
 
 	// 末尾同步 Root 背景，防止 SetTheme 重置透明材质底色
@@ -1000,6 +1116,9 @@ func (a *App) resetLangCacheAndReaders() {
 	if a.exporterSvc != nil {
 		a.exporterSvc.Cancel()
 	}
+	if a.iconExporterSvc != nil {
+		a.iconExporterSvc.Cancel()
+	}
 	closedSvc := make(map[*gamedata.Service]bool, len(a.langCache)+1)
 	for _, cached := range a.langCache {
 		if cached == nil {
@@ -1008,10 +1127,19 @@ func (a *App) resetLangCacheAndReaders() {
 		if cached.exporterSvc != nil {
 			cached.exporterSvc.Cancel()
 		}
+		if cached.iconExporterSvc != nil {
+			cached.iconExporterSvc.Cancel()
+		}
+		if cached.backupSvc != nil {
+			cached.backupSvc.Close()
+		}
 		if cached.service != nil && !closedSvc[cached.service] {
 			closedSvc[cached.service] = true
 			_ = cached.service.Close()
 		}
+	}
+	if a.backupSvc != nil {
+		a.backupSvc.Close()
 	}
 	if a.service != nil && !closedSvc[a.service] {
 		_ = a.service.Close()
@@ -1021,6 +1149,7 @@ func (a *App) resetLangCacheAndReaders() {
 	a.service = nil
 	a.backupSvc = nil
 	a.exporterSvc = nil
+	a.iconExporterSvc = nil
 	a.status = nil
 	a.versionStatus = nil
 
@@ -1035,6 +1164,13 @@ func (a *App) resetLangCacheAndReaders() {
 	if a.bitmaps != nil {
 		a.bitmaps.Clear()
 	}
+	if a.iconTileCache != nil {
+		a.iconTileCache.Clear()
+	}
+	clear(a.iconPreviewCache)
+	clear(a.diffIconCache)
+	a.iconExportTaskCountKey = ""
+	a.iconLightboxOpen = false
 }
 
 func (a *App) buildLangSessionState(
@@ -1066,11 +1202,13 @@ func (a *App) buildLangSessionState(
 
 	sm := exporter.NewSchemaManager(a.schemasFS)
 	expSvc := exporter.NewService(store.CNReader, store.GlobalReader, sm)
+	iconExpSvc := exporter.NewIconService(svc)
 
 	state := &langSessionCache{
 		service:         svc,
 		backupSvc:       bSvc,
 		exporterSvc:     expSvc,
+		iconExporterSvc: iconExpSvc,
 		status:          status,
 		versionStatus:   vStatus,
 		exportTotalShts: expSvc.TotalSheetCount(),
@@ -1095,20 +1233,31 @@ func (a *App) activateLangState(state *langSessionCache, preserveSelection bool)
 	prevDetailScroll := a.detailScroll.Y
 	prevQuestID := a.selectedQuestID
 	prevLeveID := a.selectedLeveID
+	prevMusicKind := a.selectedMusicKind
+	prevMusicID := a.selectedMusicID
+	prevIconID := a.selectedIconID
 
 	st := state.status
 	vst := state.versionStatus
 	a.service = state.service
 	a.backupSvc = state.backupSvc
 	a.exporterSvc = state.exporterSvc
+	a.iconExporterSvc = state.iconExporterSvc
 	a.status = &st
 	a.versionStatus = &vst
 	a.dismissUpdateBanner = false
 	a.exportTotalShts = state.exportTotalShts
 	if a.backupSvc != nil {
 		a.backupSvc.SetLang(a.Language())
+		if a.win != nil {
+			a.backupSvc.StartBackgroundBlobSync()
+		}
 	}
 	a.syncAvailableExportLangs()
+	a.syncAvailableIconExportVariants()
+	clear(a.iconPreviewCache)
+	clear(a.diffIconCache)
+	a.iconExportTaskCountKey = ""
 
 	if !preserveSelection {
 		a.itemQuery.Page = 1
@@ -1135,6 +1284,30 @@ func (a *App) activateLangState(state *langSessionCache, preserveSelection bool)
 		a.selectedLeve = nil
 	}
 	a.refreshAchievements()
+
+	a.refreshMusicList()
+	if preserveSelection && prevMusicID > 0 && a.service.GetMusicDetail(prevMusicKind, prevMusicID) != nil {
+		a.jumpToMusicInternal(prevMusicKind, prevMusicID, false)
+	} else if len(a.musicRes.Items) > 0 {
+		a.selectMusicInternal(a.musicRes.Items[0].Kind, a.musicRes.Items[0].ID, false)
+	} else {
+		a.selectedMusicKey = ""
+		a.selectedMusicKind = ""
+		a.selectedMusicID = 0
+		a.musicDetail = nil
+	}
+
+	if !preserveSelection {
+		a.iconQuery.GroupID = -1
+	} else if a.iconQuery.GroupID >= 0 && !a.hasIconGroup(a.iconQuery.GroupID) {
+		a.iconQuery.GroupID = -1
+	}
+	if !preserveSelection {
+		a.selectedIconID = -1
+	} else {
+		a.selectedIconID = prevIconID
+	}
+	a.refreshIcons(!preserveSelection)
 
 	if preserveSelection && prevItemID > 0 && a.service.GetItemDetail(prevItemID) != nil {
 		a.jumpToItemInternal(prevItemID, false)
@@ -1445,6 +1618,42 @@ func (a *App) refreshQuests() {
 	a.questListScroll.Y = 0
 }
 
+func loadQuestAsyncData[T any](
+	a *App,
+	questID int,
+	seqPtr *uint64,
+	loadingPtr *bool,
+	isStillSelected func() bool,
+	fetch func(*gamedata.Service, int) T,
+	onLoaded func(T),
+) {
+	*seqPtr++
+	seq := *seqPtr
+	svc := a.service
+	var zero T
+	if svc == nil || questID <= 0 {
+		*loadingPtr = false
+		onLoaded(zero)
+		return
+	}
+	if a.win == nil {
+		*loadingPtr = false
+		onLoaded(fetch(svc, questID))
+		return
+	}
+	*loadingPtr = true
+	go func() {
+		val := fetch(svc, questID)
+		a.win.Update(func() {
+			if *seqPtr != seq || !isStillSelected() {
+				return
+			}
+			*loadingPtr = false
+			onLoaded(val)
+		})
+	}()
+}
+
 func (a *App) loadQuestTextAsync(
 	questID int,
 	seqPtr *uint64,
@@ -1452,30 +1661,29 @@ func (a *App) loadQuestTextAsync(
 	isStillSelected func() bool,
 	onLoaded func(*gamedata.QuestTextData),
 ) {
-	*seqPtr++
-	seq := *seqPtr
-	svc := a.service
-	if svc == nil || questID <= 0 {
-		*loadingPtr = false
-		onLoaded(nil)
-		return
-	}
-	if a.win == nil {
-		*loadingPtr = false
-		onLoaded(svc.GetQuestText(questID))
-		return
-	}
-	*loadingPtr = true
-	go func() {
-		txt := svc.GetQuestText(questID)
-		a.win.Update(func() {
-			if *seqPtr != seq || !isStillSelected() {
-				return
-			}
-			*loadingPtr = false
-			onLoaded(txt)
-		})
-	}()
+	loadQuestAsyncData(
+		a, questID, seqPtr, loadingPtr, isStillSelected,
+		func(svc *gamedata.Service, qid int) *gamedata.QuestTextData {
+			return svc.GetQuestText(qid)
+		},
+		onLoaded,
+	)
+}
+
+func (a *App) loadQuestCutscenesAsync(
+	questID int,
+	seqPtr *uint64,
+	loadingPtr *bool,
+	isStillSelected func() bool,
+	onLoaded func([]gamedata.QuestCutsceneEntry),
+) {
+	loadQuestAsyncData(
+		a, questID, seqPtr, loadingPtr, isStillSelected,
+		func(svc *gamedata.Service, qid int) []gamedata.QuestCutsceneEntry {
+			return svc.GetQuestCutscenes(qid)
+		},
+		onLoaded,
+	)
 }
 
 func (a *App) selectQuest(questID int) {
@@ -1497,18 +1705,31 @@ func (a *App) selectQuestInternal(questID int, record bool) {
 	a.questSummaryOpen = false
 	a.questDialogueOpen = false
 	a.selectedQuestText = nil
+	a.selectedQuestCutscenes = nil
 
 	if record {
 		a.recordRecent(config.RecordKindQuest, questID)
 	}
 
+	isCur := func() bool { return a.selectedQuestID == questID }
 	a.loadQuestTextAsync(
 		questID,
 		&a.questTextSeq,
 		&a.questTextLoading,
-		func() bool { return a.selectedQuestID == questID },
+		isCur,
 		func(txt *gamedata.QuestTextData) { a.selectedQuestText = txt },
 	)
+	if len(detail.Cutscenes) > 0 {
+		a.loadQuestCutscenesAsync(
+			questID,
+			&a.questCutscenesSeq,
+			&a.questCutscenesLoading,
+			isCur,
+			func(cuts []gamedata.QuestCutsceneEntry) { a.selectedQuestCutscenes = cuts },
+		)
+	} else {
+		a.questCutscenesLoading = false
+	}
 }
 
 func (a *App) locateQuestInList(questID int) {
@@ -1694,6 +1915,25 @@ func (a *App) jumpToModuleSearch(target activeTab) {
 		a.achQuery.Q = q
 		a.achQuery.Page = 1
 		a.refreshAchievements()
+	case tabMusic:
+		a.musicQuery.Q = q
+		a.musicQuery.Page = 1
+		a.refreshMusicList()
+		if a.musicRes.Total == 0 && q != "" && a.hasMusicFilter() {
+			a.musicQuery.Kind = "all"
+			a.musicQuery.ExpansionID = -1
+			a.musicQuery.CategoryID = 0
+			a.musicQuery.WithUsageOnly = false
+			a.refreshMusicList()
+		}
+	case tabIcons:
+		a.iconQuery.Q = q
+		a.refreshIcons(true)
+		if a.iconRes.Total == 0 && q != "" && (a.iconQuery.GroupID >= 0 || a.iconQuery.VariantFilter != "all") {
+			a.iconQuery.GroupID = -1
+			a.iconQuery.VariantFilter = "all"
+			a.refreshIcons(true)
+		}
 	case tabDiff:
 		a.diffSearch = q
 		a.diffPage = 1
@@ -1718,12 +1958,44 @@ func (a *App) openGlobalSearchHit(hit gamedata.GlobalSearchHit) {
 		a.inspectLeveFromOtherTab(hit.ID)
 	case gamedata.GlobalHitAchievement:
 		a.inspectAchievementFromOtherTab(hit.ID, hit.RewardItemID)
+	case gamedata.GlobalHitMusic:
+		a.inspectMusicFromOtherTab(hit.MusicKind, hit.ID)
 	}
+}
+
+// inspectIconFromOtherTab 从其他视图（如版本对比）跳转至「图标」页并定位高亮对应编号图标。
+func (a *App) inspectIconFromOtherTab(iconID int) {
+	if a.service == nil || iconID < 0 {
+		return
+	}
+	detail := a.service.GetIconDetail(iconID)
+	if detail == nil {
+		return
+	}
+	a.selectedIconID = iconID
+	if a.iconQuery.GroupID >= 0 && a.iconQuery.GroupID != sqpack.IconGroupID(iconID) {
+		a.iconQuery.GroupID = sqpack.IconGroupID(iconID)
+	}
+	a.refreshIcons(false)
+	if a.iconGridSelIdx < 0 {
+		a.iconQuery.Q = ""
+		a.iconQuery.VariantFilter = "all"
+		a.iconQuery.GroupID = -1
+		a.refreshIcons(false)
+	}
+	if a.iconGridSelIdx >= 0 {
+		a.iconGridState.ScrollIntoView(a.iconGridSelIdx)
+	}
+	a.navigateTab(tabIcons)
 }
 
 func (a *App) refreshDiff() {
 	if a.backupSvc == nil {
 		return
+	}
+	pageSize := 25
+	if a.diffEntity == "icon" {
+		pageSize = 120
 	}
 	res, err := a.backupSvc.CompareVersions(backup.VersionDiffQuery{
 		From:       a.diffFromVer,
@@ -1732,7 +2004,7 @@ func (a *App) refreshDiff() {
 		EntityType: a.diffEntity,
 		Q:          a.diffSearch,
 		Page:       a.diffPage,
-		PageSize:   25,
+		PageSize:   pageSize,
 	})
 	if err != nil {
 		a.diffError = a.tf("diff.err_compare", "err", err.Error())

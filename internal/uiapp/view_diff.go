@@ -20,7 +20,7 @@ func (a *App) diffFilterLabels() []string {
 	}
 }
 
-var diffEntityModes = []string{"all", "item", "quest", "leve", "achievement"}
+var diffEntityModes = []string{"all", "item", "quest", "leve", "achievement", "bgm", "icon"}
 
 func (a *App) diffEntityLabels() []string {
 	return []string{
@@ -29,6 +29,8 @@ func (a *App) diffEntityLabels() []string {
 		a.t("diff.entity_quest"),
 		a.t("diff.entity_leve"),
 		a.t("diff.entity_achievement"),
+		a.t("diff.entity_bgm"),
+		a.t("diff.entity_icon"),
 	}
 }
 
@@ -45,7 +47,7 @@ func canInspectDiffEntry(entry backup.DiffItemEntry) bool {
 		return false
 	}
 	switch entry.EntityType {
-	case "item", "quest", "leve", "achievement":
+	case "item", "quest", "leve", "achievement", "bgm", "icon":
 		return true
 	default:
 		return false
@@ -65,6 +67,10 @@ func (a *App) inspectDiffEntry(entry backup.DiffItemEntry) {
 		a.inspectLeveFromOtherTab(entry.ID)
 	case "achievement":
 		a.inspectAchievementFromOtherTab(entry.ID, entry.RewardItemID)
+	case "bgm":
+		a.inspectBGMFromOtherTab(entry.ID)
+	case "icon":
+		a.inspectIconFromOtherTab(entry.ID)
 	}
 }
 
@@ -138,6 +144,8 @@ func (a *App) renderDiffView(c *ui.Context) {
 					drawCompactDiffStat(c, a.t("diff.stat_added_recipes"), "+"+formatInt(sum.AddedRecipes), t.foreground)
 					drawCompactDiffStat(c, a.t("diff.stat_added_achievements"), "+"+formatInt(sum.AddedAchievements), t.infoText)
 					drawCompactDiffStat(c, a.t("diff.stat_added_titles"), "+"+formatInt(sum.AddedTitles), t.foreground)
+					drawCompactDiffStat(c, a.t("diff.stat_added_bgms"), "+"+formatInt(sum.AddedBGMs), t.successText)
+					drawCompactDiffStat(c, a.t("diff.stat_modified_bgms"), formatInt(sum.ModifiedBGMs), t.warningText)
 				})
 			}
 
@@ -180,9 +188,21 @@ func (a *App) renderDiffView(c *ui.Context) {
 
 					entityLabels := a.diffEntityLabels()
 					for i, m := range diffEntityModes {
-						if kitToggleChip(c, "df-ent-"+m, entityLabels[i], "", a.diffEntity == m, nil) {
+						if m == "icon" {
+							// 图标采用独立对比分区且不计入「全部」等常规统计，在按钮前以竖线分隔提示边界
+							kitSeparator(c, true)
+						}
+						chipCount := ""
+						if m == "icon" && a.diffRes != nil {
+							tot := a.diffRes.Summary.AddedIcons + a.diffRes.Summary.ModifiedIcons + a.diffRes.Summary.RemovedIcons
+							if tot > 0 {
+								chipCount = formatInt(tot)
+							}
+						}
+						if kitToggleChip(c, "df-ent-"+m, entityLabels[i], chipCount, a.diffEntity == m, nil) {
 							a.diffEntity = m
 							a.diffPage = 1
+							a.diffScroll.Y = 0
 							a.refreshDiff()
 						}
 					}
@@ -190,120 +210,136 @@ func (a *App) renderDiffView(c *ui.Context) {
 			})
 		})
 
-		// 3. 变更表头
-		ui.Row(c).FillWidth().Padding(8, 16).Background(t.card).
-			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Gap(diffColGap).Children(func() {
-			ui.Text(c, a.t("diff.col_id")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColIDW).Shrink(0)
-			ui.Text(c, a.t("diff.col_name")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColNameW).Shrink(0)
-			ui.Text(c, a.t("diff.col_type")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColTypeW).Shrink(0).TextAlign(ui.Center)
-			ui.Text(c, a.t("diff.col_changes")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(diffColChgMin)
-		})
-
-		// 4. 变更明细行
-		if a.diffRes == nil || len(a.diffRes.Items) == 0 {
-			kitEmpty(c, icoCompare, a.t("diff.empty_title"), a.t("diff.empty_desc"), nil)
+		// 3 & 4. 图标分区采用独立平铺网格与新旧图像对照展示（不套用逐行文本表格）
+		if a.diffEntity == "icon" {
+			if a.diffRes == nil || len(a.diffRes.Items) == 0 {
+				kitEmpty(c, icoImage, a.t("diff.empty_title"), a.t("diff.empty_desc"), nil)
+			} else {
+				a.renderIconDiffPartition(c)
+			}
 		} else {
-			ui.Scroll(c.Key("diff-table-scroll")).TrackScroll(&a.diffScroll).Grow(1).Shrink(1).Children(func() {
-				ui.Column(c).FillWidth().Children(func() {
-					for i, entry := range a.diffRes.Items {
-						if i > 0 {
-							kitSeparator(c, false).Margin(0, 16)
-						}
-						row := ui.Row(c.Key(fmt.Sprintf("df-row-%s-%d", entry.EntityType, entry.ID))).
-							FillWidth().Padding(10, 16).Gap(diffColGap).
-							AlignItems(ui.Center).Transition(colorTransition(motionFast))
-						if row.Hovered() {
-							row.Background(t.tint(0.85))
-						}
-						row.Children(func() {
-							dispName := entry.NameCn
-							if entry.EntityType == "quest" {
-								dispName = gamedata.CleanQuestTitle(dispName)
+			// 非图标实体保留清晰四列表头与明细行
+			ui.Row(c).FillWidth().Padding(8, 16).Background(t.card).
+				BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Gap(diffColGap).Children(func() {
+				ui.Text(c, a.t("diff.col_id")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColIDW).Shrink(0)
+				ui.Text(c, a.t("diff.col_name")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColNameW).Shrink(0)
+				ui.Text(c, a.t("diff.col_type")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffColTypeW).Shrink(0).TextAlign(ui.Center)
+				ui.Text(c, a.t("diff.col_changes")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(diffColChgMin)
+			})
+
+			if a.diffRes == nil || len(a.diffRes.Items) == 0 {
+				kitEmpty(c, icoCompare, a.t("diff.empty_title"), a.t("diff.empty_desc"), nil)
+			} else {
+				ui.Scroll(c.Key("diff-table-scroll")).TrackScroll(&a.diffScroll).Grow(1).Shrink(1).Children(func() {
+					ui.Column(c).FillWidth().Children(func() {
+						for i, entry := range a.diffRes.Items {
+							if i > 0 {
+								kitSeparator(c, false).Margin(0, 16)
 							}
-							canJump := canInspectDiffEntry(entry)
-							renderIDAndName := func(hovered bool) {
-								// ID 列左对齐，并将类型 tag 收纳在 ID 下方，避免单独占列或挤压名称
-								ui.Column(c).Width(diffColIDW).Shrink(0).AlignItems(ui.Start).Gap(3).Children(func() {
-									numTextf(c, "#%d", entry.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
-									switch entry.EntityType {
-									case "achievement":
-										drawPill(c, a.t("diff.tag_achievement"), pillAccent)
-									case "quest":
-										drawPill(c, a.t("diff.tag_quest"), pillWarning)
-									case "leve":
-										drawPill(c, a.t("diff.tag_leve"), pillPositive)
-									default:
-										if entry.HasCollectableChange {
-											drawPill(c, a.t("diff.tag_collectable"), pillAccent)
+							row := ui.Row(c.Key(fmt.Sprintf("df-row-%s-%d", entry.EntityType, entry.ID))).
+								FillWidth().Padding(10, 16).Gap(diffColGap).
+								AlignItems(ui.Center).Transition(colorTransition(motionFast))
+							if row.Hovered() {
+								row.Background(t.tint(0.85))
+							}
+							row.Children(func() {
+								dispName := entry.NameCn
+								if entry.EntityType == "quest" {
+									dispName = gamedata.CleanQuestTitle(dispName)
+								}
+								canJump := canInspectDiffEntry(entry)
+								renderIDAndName := func(hovered bool) {
+									// ID 列左对齐，并将类型 tag 收纳在 ID 下方，避免单独占列或挤压名称
+									ui.Column(c).Width(diffColIDW).Shrink(0).AlignItems(ui.Start).Gap(3).Children(func() {
+										numTextf(c, "#%d", entry.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+										switch entry.EntityType {
+										case "achievement":
+											drawPill(c, a.t("diff.tag_achievement"), pillAccent)
+										case "quest":
+											drawPill(c, a.t("diff.tag_quest"), pillWarning)
+										case "leve":
+											drawPill(c, a.t("diff.tag_leve"), pillPositive)
+										case "bgm":
+											drawPill(c, a.t("diff.tag_bgm"), pillAccent)
+										default:
+											if entry.HasCollectableChange {
+												drawPill(c, a.t("diff.tag_collectable"), pillAccent)
+											}
 										}
+									})
+
+									ui.Row(c).Width(diffColNameW).Shrink(0).Gap(8).AlignItems(ui.Center).Children(func() {
+										if entry.EntityType == "bgm" && entry.IconID <= 0 {
+											ui.Box(c).Size(26, 26).Radius(t.radius.md).Background(t.tint(1)).Border(hairline, t.border).Center().Shrink(0).Children(func() {
+												ui.Icon(c, icoMusic).Size(14, 14).TextColor(t.subdued)
+											})
+										} else {
+											a.drawGameIcon(c, entry.IconID, false, 26, t.radius.md)
+										}
+										ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
+											nameCol := t.foreground
+											if hovered {
+												nameCol = t.primary
+											}
+											ui.Text(c, dispName).FontSize(t.text.xs).FontWeight(500).TextColor(nameCol).SingleLine()
+											ui.Text(c, entry.CategoryName).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+										})
+									})
+								}
+
+								jumpW := diffColIDW + diffColGap + diffColNameW
+								if canJump {
+									jumpBtn := ui.ButtonBase(c.Key(fmt.Sprintf("df-jump-%s-%d", entry.EntityType, entry.ID))).
+										Label(a.tf("common.view_item", "name", dispName)).Width(jumpW).Shrink(0).Gap(diffColGap).Padding(0).
+										Justify(ui.Start).AlignItems(ui.Center).
+										Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+									jumpBtn.Children(func() {
+										renderIDAndName(jumpBtn.Hovered())
+									})
+									if jumpBtn.Clicked() {
+										a.inspectDiffEntry(entry)
+									}
+								} else {
+									ui.Row(c).Width(jumpW).Shrink(0).Gap(diffColGap).AlignItems(ui.Center).Children(func() {
+										renderIDAndName(false)
+									})
+								}
+
+								// 类型列使用 Row 居中，防止 Column 默认 Stretch 拉宽胶囊产生多余空白
+								ui.Row(c).Width(diffColTypeW).Shrink(0).Center().Children(func() {
+									switch entry.ChangeType {
+									case "added":
+										drawPill(c, a.t("diff.change_added"), pillPositive)
+									case "modified":
+										drawPill(c, a.t("diff.change_modified"), pillWarning)
+									default:
+										drawPill(c, a.t("diff.change_removed"), pillNegative)
 									}
 								})
 
-								ui.Row(c).Width(diffColNameW).Shrink(0).Gap(8).AlignItems(ui.Center).Children(func() {
-									a.drawGameIcon(c, entry.IconID, false, 26, t.radius.md)
-									ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
-										nameCol := t.foreground
-										if hovered {
-											nameCol = t.primary
-										}
-										ui.Text(c, dispName).FontSize(t.text.xs).FontWeight(500).TextColor(nameCol).SingleLine()
-										ui.Text(c, entry.CategoryName).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
-									})
-								})
-							}
-
-							jumpW := diffColIDW + diffColGap + diffColNameW
-							if canJump {
-								jumpBtn := ui.ButtonBase(c.Key(fmt.Sprintf("df-jump-%s-%d", entry.EntityType, entry.ID))).
-									Label(a.tf("common.view_item", "name", dispName)).Width(jumpW).Shrink(0).Gap(diffColGap).Padding(0).
-									Justify(ui.Start).AlignItems(ui.Center).
-									Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-								jumpBtn.Children(func() {
-									renderIDAndName(jumpBtn.Hovered())
-								})
-								if jumpBtn.Clicked() {
-									a.inspectDiffEntry(entry)
-								}
-							} else {
-								ui.Row(c).Width(jumpW).Shrink(0).Gap(diffColGap).AlignItems(ui.Center).Children(func() {
-									renderIDAndName(false)
-								})
-							}
-
-							// 类型列使用 Row 居中，防止 Column 默认 Stretch 拉宽胶囊产生多余空白
-							ui.Row(c).Width(diffColTypeW).Shrink(0).Center().Children(func() {
-								switch entry.ChangeType {
-								case "added":
-									drawPill(c, a.t("diff.change_added"), pillPositive)
-								case "modified":
-									drawPill(c, a.t("diff.change_modified"), pillWarning)
-								default:
-									drawPill(c, a.t("diff.change_removed"), pillNegative)
-								}
-							})
-
-							// 仅“变更”条目显示具体字段变化；新增与已移除条目保持空白
-							ui.Row(c).Grow(1).Shrink(1).MinWidth(diffColChgMin).Gap(10).Wrap().AlignItems(ui.Center).Children(func() {
-								if entry.ChangeType != "modified" {
-									return
-								}
-								for _, chg := range entry.Changes {
-									ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
-										ui.Text(c, chg.Label).FontSize(t.text.micro).TextColor(t.muted)
-										ui.Box(c).Padding(1, 4).Radius(t.radius.xs).Background(t.delBg).Children(func() {
-											numText(c, chg.Before).FontSize(t.text.micro).TextColor(t.delText).Strikethrough()
+								// 仅“变更”条目显示具体字段变化；新增与已移除条目保持空白
+								ui.Row(c).Grow(1).Shrink(1).MinWidth(diffColChgMin).Gap(10).Wrap().AlignItems(ui.Center).Children(func() {
+									if entry.ChangeType != "modified" {
+										return
+									}
+									for _, chg := range entry.Changes {
+										ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
+											ui.Text(c, chg.Label).FontSize(t.text.micro).TextColor(t.muted)
+											ui.Box(c).Padding(1, 4).Radius(t.radius.xs).Background(t.delBg).Children(func() {
+												numText(c, chg.Before).FontSize(t.text.micro).TextColor(t.delText).Strikethrough()
+											})
+											ui.Text(c, "→").FontSize(t.text.micro).TextColor(t.muted)
+											ui.Box(c).Padding(1, 4).Radius(t.radius.xs).Background(t.insBg).Children(func() {
+												numText(c, chg.After).FontSize(t.text.micro).FontWeight(500).TextColor(t.insText)
+											})
 										})
-										ui.Text(c, "→").FontSize(t.text.micro).TextColor(t.muted)
-										ui.Box(c).Padding(1, 4).Radius(t.radius.xs).Background(t.insBg).Children(func() {
-											numText(c, chg.After).FontSize(t.text.micro).FontWeight(500).TextColor(t.insText)
-										})
-									})
-								}
+									}
+								})
 							})
-						})
-					}
+						}
+					})
 				})
-			})
+			}
 		}
 
 		// 5. 底部分页栏

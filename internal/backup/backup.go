@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/InfSein/xiv-data-viewer/internal/i18n"
+	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
 // VersionBackupMeta 保存单个本地版本快照的元信息。
@@ -32,6 +34,8 @@ type VersionBackupMeta struct {
 	LeveCount            int    `json:"leveCount,omitempty"`
 	CollectableCount     int    `json:"collectableCount,omitempty"`
 	CollectableItemCount int    `json:"collectableItemCount,omitempty"`
+	BGMCount             int    `json:"bgmCount,omitempty"`
+	IconCount            int    `json:"iconCount,omitempty"`
 	IsBaseline           bool   `json:"isBaseline"`
 }
 
@@ -54,10 +58,10 @@ type ItemFieldChange struct {
 	After  string `json:"after"`
 }
 
-// DiffItemEntry 描述版本对比结果中的单条道具、任务、理符或成就差异记录。
+// DiffItemEntry 描述版本对比结果中的单条道具、任务、理符、成就或音乐差异记录。
 type DiffItemEntry struct {
 	ID                   int               `json:"id"`
-	EntityType           string            `json:"entityType"` // item|quest|leve|achievement
+	EntityType           string            `json:"entityType"` // item|quest|leve|achievement|bgm
 	ChangeType           string            `json:"changeType"` // added|modified|removed
 	NameCn               string            `json:"nameCn"`
 	NameEn               string            `json:"nameEn"`
@@ -66,6 +70,7 @@ type DiffItemEntry struct {
 	ItemLevel            int               `json:"itemLevel"`
 	EquipLevel           int               `json:"equipLevel"`
 	CategoryName         string            `json:"categoryName"`
+	File                 string            `json:"file,omitempty"`
 	PriceMid             int               `json:"priceMid"`
 	IsCraftable          bool              `json:"isCraftable"`
 	IsGatherable         bool              `json:"isGatherable"`
@@ -75,6 +80,11 @@ type DiffItemEntry struct {
 	TitleNameCn          string            `json:"titleNameCn"`
 	RewardItemID         int               `json:"rewardItemId"`
 	RewardItemNameCn     string            `json:"rewardItemNameCn"`
+	IconVariantSummary   string            `json:"iconVariantSummary,omitempty"`
+	OldBlobKey           string            `json:"oldBlobKey,omitempty"`
+	NewBlobKey           string            `json:"newBlobKey,omitempty"`
+	OldThumbPNG          []byte            `json:"oldThumbPng,omitempty"`
+	NewThumbPNG          []byte            `json:"newThumbPng,omitempty"`
 	Changes              []ItemFieldChange `json:"changes"`
 }
 
@@ -99,6 +109,12 @@ type DiffSummary struct {
 	ModifiedAchievements      int `json:"modifiedAchievements"`
 	RemovedAchievements       int `json:"removedAchievements"`
 	AddedTitles               int `json:"addedTitles"`
+	AddedBGMs                 int `json:"addedBgms"`
+	ModifiedBGMs              int `json:"modifiedBgms"`
+	RemovedBGMs               int `json:"removedBgms"`
+	AddedIcons                int `json:"addedIcons"`
+	ModifiedIcons             int `json:"modifiedIcons"`
+	RemovedIcons              int `json:"removedIcons"`
 }
 
 // VersionDiffQuery 版本差异检索条件。
@@ -106,7 +122,7 @@ type VersionDiffQuery struct {
 	From       string
 	To         string
 	Filter     string // all|added|modified|removed
-	EntityType string // all|item|quest|leve|achievement
+	EntityType string // all|item|quest|leve|achievement|bgm
 	Q          string
 	Page       int
 	PageSize   int
@@ -147,23 +163,25 @@ type compactItemRecord struct {
 }
 
 type compactQuestRecord struct {
-	ID            int    `json:"id"`
-	NameCn        string `json:"nameCn"`
-	NameEn        string `json:"nameEn"`
-	NameJa        string `json:"nameJa,omitempty"`
-	IconID        int    `json:"iconId"`
-	Level         int    `json:"level"`
-	GenreName     string `json:"genreName"`
-	SectionName   string `json:"sectionName"`
-	ExpansionName string `json:"expansionName"`
-	IssuerName    string `json:"issuerName"`
-	GilReward     int    `json:"gilReward"`
-	ExpReward     int    `json:"expReward"`
-	RewardSummary string `json:"rewardSummary,omitempty"`
-	PrimaryItemID int    `json:"primaryItemId,omitempty"`
-	IsMSQ         bool   `json:"isMsq"`
-	IsFeature     bool   `json:"isFeature"`
-	IsRepeatable  bool   `json:"isRepeatable"`
+	ID              int    `json:"id"`
+	NameCn          string `json:"nameCn"`
+	NameEn          string `json:"nameEn"`
+	NameJa          string `json:"nameJa,omitempty"`
+	IconID          int    `json:"iconId"`
+	Level           int    `json:"level"`
+	GenreName       string `json:"genreName"`
+	SectionName     string `json:"sectionName"`
+	ExpansionName   string `json:"expansionName"`
+	IssuerName      string `json:"issuerName"`
+	GilReward       int    `json:"gilReward"`
+	ExpReward       int    `json:"expReward"`
+	RewardSummary   string `json:"rewardSummary,omitempty"`
+	PrimaryItemID   int    `json:"primaryItemId,omitempty"`
+	IsMSQ           bool   `json:"isMsq"`
+	IsFeature       bool   `json:"isFeature"`
+	IsRepeatable    bool   `json:"isRepeatable"`
+	CutsceneCount   *int   `json:"cutsceneCount,omitempty"`
+	CutsceneSummary string `json:"cutsceneSummary,omitempty"`
 }
 
 type compactLeveRecord struct {
@@ -200,12 +218,30 @@ type compactAchievementRecord struct {
 	RewardItemNameCn string `json:"rewardItemNameCn"`
 }
 
+type compactBGMRecord struct {
+	ID            int    `json:"id"`
+	File          string `json:"file"`
+	Title         string `json:"title"`
+	NameCn        string `json:"nameCn,omitempty"`
+	NameEn        string `json:"nameEn,omitempty"`
+	NameJa        string `json:"nameJa,omitempty"`
+	ExpansionID   int    `json:"expansionId"`
+	ExpansionName string `json:"expansionName"`
+	UsageSummary  string `json:"usageSummary,omitempty"`
+	IsPlaceholder bool   `json:"isPlaceholder,omitempty"`
+	FileExists    bool   `json:"fileExists"`
+	FileSize      uint32 `json:"fileSize,omitempty"`
+	ContentMD5    string `json:"contentMd5,omitempty"`
+}
+
 type snapshotPayload struct {
 	Meta         VersionBackupMeta          `json:"meta"`
 	Items        []compactItemRecord        `json:"items"`
 	Quests       []compactQuestRecord       `json:"quests,omitempty"`
 	Leves        []compactLeveRecord        `json:"leves,omitempty"`
 	Achievements []compactAchievementRecord `json:"achievements,omitempty"`
+	BGMs         []compactBGMRecord         `json:"bgms,omitempty"`
+	Icons        []compactIconRecord        `json:"icons,omitempty"`
 }
 
 type backupManifest struct {
@@ -232,6 +268,13 @@ type Service struct {
 	uiLang        i18n.Lang
 	manifest      *backupManifest
 	snapshotCache map[string]*snapshotPayload
+
+	blobMu         sync.Mutex
+	blobLoaded     bool
+	blobIndex      map[string]iconBlobLoc
+	pendingBlobs   []sqpack.IconBlobTask
+	blobSyncCancel context.CancelFunc
+	blobSyncWg     sync.WaitGroup
 }
 
 // NewService 创建版本快照备份服务，快照保存在 backupDir 下。
@@ -341,7 +384,11 @@ func (s *Service) InitializeOnStartup() (VersionStatusResponse, error) {
 
 	currentVersion := s.store.DataVersion()
 	existing := s.readManifest()
-	currentSnap := s.buildLiveSnapshot(currentVersion, s.langLocked())
+	var existingCurrent *snapshotPayload
+	if s.snapshotExists(currentVersion) {
+		existingCurrent = s.loadSnapshot(currentVersion)
+	}
+	currentSnap := s.buildLiveSnapshot(currentVersion, s.langLocked(), existingCurrent, false)
 
 	baselineVer := deriveBaselineVersionName(currentVersion)
 	var baselineMeta *VersionBackupMeta
@@ -461,7 +508,7 @@ func (s *Service) CreateOrRefreshBackup() (VersionStatusResponse, error) {
 	defer s.mu.Unlock()
 
 	currentVersion := s.store.DataVersion()
-	payload := s.buildLiveSnapshot(currentVersion, s.langLocked())
+	payload := s.buildLiveSnapshot(currentVersion, s.langLocked(), nil, true)
 	if err := s.writeSnapshot(currentVersion, payload); err != nil {
 		return VersionStatusResponse{}, err
 	}
@@ -501,10 +548,19 @@ func snapshotNeedsSchemaUpgrade(loaded, current *snapshotPayload) bool {
 	if current.Meta.CollectableItemCount > 0 && loaded.Meta.CollectableItemCount == 0 {
 		return true
 	}
+	if len(current.BGMs) > 0 && len(loaded.BGMs) == 0 {
+		return true
+	}
+	if len(current.Icons) > 0 && len(loaded.Icons) == 0 {
+		return true
+	}
+	if len(current.Quests) > 0 && len(loaded.Quests) > 0 && current.Quests[0].CutsceneCount != nil && loaded.Quests[0].CutsceneCount == nil {
+		return true
+	}
 	return false
 }
 
-// CompareVersions 计算两个本地快照之间的道具（含收藏品）、任务、理符与成就字段级差异。
+// CompareVersions 计算两个本地快照之间的道具（含收藏品）、任务、理符、成就、BGM 与独立图标分区差异。
 func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, error) {
 	s.mu.Lock()
 	if s.manifest == nil {
@@ -532,7 +588,7 @@ func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, 
 
 	toSnap := s.loadSnapshot(toVersion)
 	if toSnap == nil {
-		toSnap = s.buildLiveSnapshot(liveVer, lang)
+		toSnap = s.buildLiveSnapshot(liveVer, lang, nil, false)
 	}
 	fromSnap := s.loadSnapshot(fromVersion)
 	if fromSnap == nil {
@@ -546,6 +602,8 @@ func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, 
 	allEntries = append(allEntries, diffQuests(lang, fromSnap, toSnap, &summary)...)
 	allEntries = append(allEntries, diffLeves(lang, fromSnap, toSnap, &summary)...)
 	allEntries = append(allEntries, diffAchievements(lang, fromSnap, toSnap, &summary)...)
+	allEntries = append(allEntries, diffBGMs(lang, fromSnap, toSnap, &summary)...)
+	iconEntries := diffIcons(lang, fromSnap, toSnap, &summary)
 	summary.AddedRecipes = max(0, toSnap.Meta.RecipeCount-fromSnap.Meta.RecipeCount)
 
 	filter := query.Filter
@@ -558,33 +616,66 @@ func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, 
 	}
 	q := strings.ToLower(strings.TrimSpace(query.Q))
 
-	filtered := make([]DiffItemEntry, 0, len(allEntries))
-	for _, e := range allEntries {
-		if filter != "all" && e.ChangeType != filter {
-			continue
+	filtered := make([]DiffItemEntry, 0, 128)
+	if entityType == "icon" {
+		// 图标对比独立分区：不在「全部」中混入，仅当显式筛选 icon 时输出
+		for _, e := range iconEntries {
+			if filter != "all" && e.ChangeType != filter {
+				continue
+			}
+			if q != "" && !diffEntryMatchesQuery(e, q) {
+				continue
+			}
+			filtered = append(filtered, e)
 		}
-		if entityType != "all" && e.EntityType != entityType {
-			continue
+		sort.Slice(filtered, func(i, j int) bool {
+			rank := func(ct string) int {
+				switch ct {
+				case "modified":
+					return 0
+				case "added":
+					return 1
+				default:
+					return 2
+				}
+			}
+			ri, rj := rank(filtered[i].ChangeType), rank(filtered[j].ChangeType)
+			if ri != rj {
+				return ri < rj
+			}
+			return filtered[i].ID < filtered[j].ID
+		})
+	} else {
+		for _, e := range allEntries {
+			if filter != "all" && e.ChangeType != filter {
+				continue
+			}
+			if entityType != "all" && e.EntityType != entityType {
+				continue
+			}
+			if q != "" && !diffEntryMatchesQuery(e, q) {
+				continue
+			}
+			filtered = append(filtered, e)
 		}
-		if q != "" && !diffEntryMatchesQuery(e, q) {
-			continue
-		}
-		filtered = append(filtered, e)
+		sort.Slice(filtered, func(i, j int) bool {
+			if filtered[i].ItemLevel != filtered[j].ItemLevel {
+				return filtered[i].ItemLevel > filtered[j].ItemLevel
+			}
+			return filtered[i].ID > filtered[j].ID
+		})
 	}
-
-	sort.Slice(filtered, func(i, j int) bool {
-		if filtered[i].ItemLevel != filtered[j].ItemLevel {
-			return filtered[i].ItemLevel > filtered[j].ItemLevel
-		}
-		return filtered[i].ID > filtered[j].ID
-	})
 
 	pageSize := query.PageSize
 	if pageSize <= 0 {
 		pageSize = 30
 	}
-	if pageSize > 100 {
-		pageSize = 100
+	maxPageSize := 100
+	if entityType == "icon" {
+		maxPageSize = 240
+	}
+	if pageSize > maxPageSize {
+		pageSize = maxPageSize
 	}
 	totalFiltered := len(filtered)
 	totalPages := max(1, (totalFiltered+pageSize-1)/pageSize)
@@ -621,6 +712,7 @@ func diffEntryMatchesQuery(e DiffItemEntry, q string) bool {
 		strings.Contains(strings.ToLower(e.NameEn), q) ||
 		strings.Contains(strings.ToLower(e.NameJa), q) ||
 		strings.Contains(strings.ToLower(e.CategoryName), q) ||
+		strings.Contains(strings.ToLower(e.File), q) ||
 		strings.Contains(strings.ToLower(e.TitleNameCn), q) ||
 		strings.Contains(strings.ToLower(e.RewardItemNameCn), q) ||
 		strconv.Itoa(e.ID) == q {
@@ -1070,6 +1162,171 @@ func diffAchievements(lang i18n.Lang, fromSnap, toSnap *snapshotPayload, summary
 	return entries
 }
 
+func bgmCategoryLabel(lang i18n.Lang, b compactBGMRecord) string {
+	if b.ExpansionName != "" {
+		return i18n.Tf(lang, "backup.bgm_cat_exp", "exp", b.ExpansionName)
+	}
+	return i18n.T(lang, "backup.bgm_cat")
+}
+
+func bgmDiffNames(b compactBGMRecord) (string, string, string) {
+	cn := nonEmptyOr(b.NameCn, b.Title)
+	en := nonEmptyOr(b.NameEn, b.Title)
+	ja := nonEmptyOr(b.NameJa, b.Title)
+	if cn == "" && en == "" && ja == "" {
+		cn = b.File
+	}
+	return cn, en, ja
+}
+
+func formatBGMByteSize(size uint32) string {
+	switch {
+	case size >= 1024*1024:
+		return fmt.Sprintf("%.1f MB", float64(size)/(1024*1024))
+	case size >= 1024:
+		return fmt.Sprintf("%.0f KB", float64(size)/1024)
+	case size > 0:
+		return fmt.Sprintf("%d B", size)
+	default:
+		return ""
+	}
+}
+
+func diffBGMs(lang i18n.Lang, fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffItemEntry {
+	// 兼容旧版未采集 BGM 的历史快照：缺少 BGM 记录时不误报全量新增
+	if len(fromSnap.BGMs) == 0 || len(toSnap.BGMs) == 0 {
+		return nil
+	}
+	fromMap := make(map[int]compactBGMRecord, len(fromSnap.BGMs))
+	for _, b := range fromSnap.BGMs {
+		fromMap[b.ID] = b
+	}
+	toMap := make(map[int]compactBGMRecord, len(toSnap.BGMs))
+	for _, b := range toSnap.BGMs {
+		toMap[b.ID] = b
+	}
+
+	noneStr := i18n.T(lang, "common.none")
+	var entries []DiffItemEntry
+	for _, toB := range toSnap.BGMs {
+		fromB, exists := fromMap[toB.ID]
+		cn, en, ja := bgmDiffNames(toB)
+		if !exists {
+			summary.AddedBGMs++
+			var parts []string
+			if toB.ExpansionName != "" {
+				parts = append(parts, toB.ExpansionName)
+			}
+			if toB.UsageSummary != "" {
+				parts = append(parts, toB.UsageSummary)
+			} else if toB.File != "" {
+				parts = append(parts, toB.File)
+			}
+			if sz := formatBGMByteSize(toB.FileSize); sz != "" {
+				parts = append(parts, sz)
+			}
+			entries = append(entries, DiffItemEntry{
+				ID:           toB.ID,
+				EntityType:   "bgm",
+				ChangeType:   "added",
+				NameCn:       cn,
+				NameEn:       en,
+				NameJa:       ja,
+				CategoryName: bgmCategoryLabel(lang, toB),
+				File:         toB.File,
+				Changes: []ItemFieldChange{{
+					Field:  "bgm",
+					Label:  i18n.T(lang, "backup.bgm_added"),
+					Before: noneStr,
+					After:  nonEmptyOr(strings.Join(parts, " · "), toB.File),
+				}},
+			})
+			continue
+		}
+		if changes := diffSingleBGM(lang, fromB, toB); len(changes) > 0 {
+			summary.ModifiedBGMs++
+			entries = append(entries, DiffItemEntry{
+				ID:           toB.ID,
+				EntityType:   "bgm",
+				ChangeType:   "modified",
+				NameCn:       cn,
+				NameEn:       en,
+				NameJa:       ja,
+				CategoryName: bgmCategoryLabel(lang, toB),
+				File:         toB.File,
+				Changes:      changes,
+			})
+		}
+	}
+
+	for _, fromB := range fromSnap.BGMs {
+		if _, exists := toMap[fromB.ID]; !exists {
+			summary.RemovedBGMs++
+			cn, en, ja := bgmDiffNames(fromB)
+			entries = append(entries, DiffItemEntry{
+				ID:           fromB.ID,
+				EntityType:   "bgm",
+				ChangeType:   "removed",
+				NameCn:       cn,
+				NameEn:       en,
+				NameJa:       ja,
+				CategoryName: bgmCategoryLabel(lang, fromB),
+				File:         fromB.File,
+				Changes: []ItemFieldChange{{
+					Field:  "bgm",
+					Label:  i18n.T(lang, "backup.bgm_removed"),
+					Before: nonEmptyOr(fromB.UsageSummary, fromB.File),
+					After:  i18n.T(lang, "diff.change_removed"),
+				}},
+			})
+		}
+	}
+	return entries
+}
+
+func diffSingleBGM(lang i18n.Lang, before, after compactBGMRecord) []ItemFieldChange {
+	var changes []ItemFieldChange
+	noneStr := i18n.T(lang, "common.none")
+	if before.File != after.File {
+		changes = append(changes, ItemFieldChange{
+			Field:  "file",
+			Label:  i18n.T(lang, "backup.bgm_field_file"),
+			Before: nonEmptyOr(before.File, noneStr),
+			After:  nonEmptyOr(after.File, noneStr),
+		})
+	}
+	// 仅告知用户音频内容发生变化，不在展示层暴露新旧 MD5 哈希值
+	if !before.FileExists && after.FileExists {
+		changes = append(changes, ItemFieldChange{
+			Field:  "content",
+			Label:  i18n.T(lang, "backup.bgm_field_content"),
+			Before: i18n.T(lang, "backup.bgm_missing"),
+			After:  i18n.T(lang, "backup.bgm_content_added"),
+		})
+		return changes
+	}
+	if before.FileExists && !after.FileExists {
+		changes = append(changes, ItemFieldChange{
+			Field:  "content",
+			Label:  i18n.T(lang, "backup.bgm_field_content"),
+			Before: i18n.T(lang, "backup.bgm_content_prev"),
+			After:  i18n.T(lang, "backup.bgm_missing"),
+		})
+		return changes
+	}
+	md5Changed := before.ContentMD5 != "" && after.ContentMD5 != "" && before.ContentMD5 != after.ContentMD5
+	sizeChanged := before.FileSize > 0 && after.FileSize > 0 && before.FileSize != after.FileSize
+	if (before.FileExists || after.FileExists) && (md5Changed || sizeChanged) {
+		changes = append(changes, ItemFieldChange{
+			Field:  "content",
+			Label:  i18n.T(lang, "backup.bgm_field_content"),
+			Before: i18n.T(lang, "backup.bgm_content_prev"),
+			After:  i18n.T(lang, "backup.bgm_content_changed"),
+		})
+	}
+	return changes
+}
+
 func diffSingleItem(lang i18n.Lang, before, after compactItemRecord) ([]ItemFieldChange, bool) {
 	var changes []ItemFieldChange
 	colChanged := false
@@ -1155,7 +1412,25 @@ func diffSingleQuest(lang i18n.Lang, before, after compactQuestRecord) []ItemFie
 	if before.RewardSummary != after.RewardSummary {
 		changes = append(changes, ItemFieldChange{Field: "rewardSummary", Label: i18n.T(lang, "backup.quest_field_reward"), Before: nonEmptyOr(before.RewardSummary, noneStr), After: nonEmptyOr(after.RewardSummary, noneStr)})
 	}
+	if before.CutsceneCount != nil && after.CutsceneCount != nil && (*before.CutsceneCount != *after.CutsceneCount || before.CutsceneSummary != after.CutsceneSummary) {
+		changes = append(changes, ItemFieldChange{
+			Field:  "cutscenes",
+			Label:  i18n.T(lang, "backup.quest_field_cutscene"),
+			Before: formatQuestCutsceneDiffVal(lang, *before.CutsceneCount, before.CutsceneSummary, noneStr),
+			After:  formatQuestCutsceneDiffVal(lang, *after.CutsceneCount, after.CutsceneSummary, noneStr),
+		})
+	}
 	return changes
+}
+
+func formatQuestCutsceneDiffVal(lang i18n.Lang, cnt int, summary, noneStr string) string {
+	if cnt <= 0 {
+		return noneStr
+	}
+	if summary != "" {
+		return i18n.Tf(lang, "backup.quest_cutscene_val", "count", strconv.Itoa(cnt), "summary", summary)
+	}
+	return strconv.Itoa(cnt)
 }
 
 func diffSingleLeve(lang i18n.Lang, before, after compactLeveRecord) []ItemFieldChange {
@@ -1332,7 +1607,7 @@ func boolPtr(b bool) *bool {
 	return &v
 }
 
-func (s *Service) buildLiveSnapshot(version string, lang i18n.Lang) *snapshotPayload {
+func (s *Service) buildLiveSnapshot(version string, lang i18n.Lang, reuse *snapshotPayload, forceDigest bool) *snapshotPayload {
 	var gatherCnt, purchCnt, colTurnInCnt int
 	items := make([]compactItemRecord, 0, len(s.store.ItemSummaries))
 	for _, it := range s.store.ItemSummaries {
@@ -1374,24 +1649,27 @@ func (s *Service) buildLiveSnapshot(version string, lang i18n.Lang) *snapshotPay
 		} else if q.TomestoneItemID > 0 {
 			primaryItem = q.TomestoneItemID
 		}
+		cutCnt := len(q.Cutscenes)
 		quests = append(quests, compactQuestRecord{
-			ID:            q.ID,
-			NameCn:        q.NameCn,
-			NameEn:        q.NameEn,
-			NameJa:        q.NameJa,
-			IconID:        q.IconID,
-			Level:         q.Level,
-			GenreName:     q.GenreName,
-			SectionName:   q.SectionName,
-			ExpansionName: q.ExpansionName,
-			IssuerName:    q.IssuerName,
-			GilReward:     q.GilReward,
-			ExpReward:     q.ExpReward,
-			RewardSummary: summarizeQuestRewards(lang, q),
-			PrimaryItemID: primaryItem,
-			IsMSQ:         q.IsMSQ,
-			IsFeature:     q.IsFeature,
-			IsRepeatable:  q.IsRepeatable,
+			ID:              q.ID,
+			NameCn:          q.NameCn,
+			NameEn:          q.NameEn,
+			NameJa:          q.NameJa,
+			IconID:          q.IconID,
+			Level:           q.Level,
+			GenreName:       q.GenreName,
+			SectionName:     q.SectionName,
+			ExpansionName:   q.ExpansionName,
+			IssuerName:      q.IssuerName,
+			GilReward:       q.GilReward,
+			ExpReward:       q.ExpReward,
+			RewardSummary:   summarizeQuestRewards(lang, q),
+			PrimaryItemID:   primaryItem,
+			IsMSQ:           q.IsMSQ,
+			IsFeature:       q.IsFeature,
+			IsRepeatable:    q.IsRepeatable,
+			CutsceneCount:   &cutCnt,
+			CutsceneSummary: gamedata.SummarizeQuestCutscenes(q.Cutscenes),
 		})
 	}
 
@@ -1443,6 +1721,65 @@ func (s *Service) buildLiveSnapshot(version string, lang i18n.Lang) *snapshotPay
 		})
 	}
 
+	bgms := make([]compactBGMRecord, 0, len(s.store.BGMs))
+	if len(s.store.BGMs) > 0 {
+		canReuse := !forceDigest && reuse != nil && len(reuse.BGMs) > 0
+		var reuseByID map[int]compactBGMRecord
+		if canReuse {
+			reuseByID = make(map[int]compactBGMRecord, len(reuse.BGMs))
+			for _, rec := range reuse.BGMs {
+				reuseByID[rec.ID] = rec
+			}
+			for _, b := range s.store.BGMs {
+				if b.File == "" {
+					continue
+				}
+				rec, ok := reuseByID[b.ID]
+				if !ok || rec.File != b.File || rec.FileExists != b.FileExists || (b.FileExists && rec.ContentMD5 == "") {
+					canReuse = false
+					break
+				}
+			}
+		}
+		var digests map[int]gamedata.BGMDigest
+		if !canReuse {
+			digests = s.store.ComputeBGMDigests(forceDigest)
+		}
+		for _, b := range s.store.BGMs {
+			fileExists := b.FileExists
+			fileSize := b.FileSize
+			contentMD5 := b.ContentMD5
+			if canReuse {
+				if rec, ok := reuseByID[b.ID]; ok {
+					fileExists = rec.FileExists
+					fileSize = rec.FileSize
+					contentMD5 = rec.ContentMD5
+				}
+			} else if d, ok := digests[b.ID]; ok {
+				fileExists = d.FileExists
+				fileSize = d.FileSize
+				contentMD5 = d.ContentMD5
+			}
+			bgms = append(bgms, compactBGMRecord{
+				ID:            b.ID,
+				File:          b.File,
+				Title:         b.Title,
+				NameCn:        b.NameCn,
+				NameEn:        b.NameEn,
+				NameJa:        b.NameJa,
+				ExpansionID:   b.ExpansionID,
+				ExpansionName: b.ExpansionName,
+				UsageSummary:  b.UsageSummary,
+				IsPlaceholder: b.IsPlaceholder,
+				FileExists:    fileExists,
+				FileSize:      fileSize,
+				ContentMD5:    contentMD5,
+			})
+		}
+	}
+
+	icons := s.buildLiveIcons(reuse, forceDigest)
+
 	return &snapshotPayload{
 		Meta: VersionBackupMeta{
 			Version:              version,
@@ -1458,12 +1795,16 @@ func (s *Service) buildLiveSnapshot(version string, lang i18n.Lang) *snapshotPay
 			LeveCount:            len(leves),
 			CollectableCount:     s.store.TotalCollectables,
 			CollectableItemCount: colTurnInCnt,
+			BGMCount:             len(bgms),
+			IconCount:            len(icons),
 			IsBaseline:           false,
 		},
 		Items:        items,
 		Quests:       quests,
 		Leves:        leves,
 		Achievements: achs,
+		BGMs:         bgms,
+		Icons:        icons,
 	}
 }
 
@@ -1526,6 +1867,10 @@ func (s *Service) buildBaselineSnapshot(baselineVer string, current *snapshotPay
 				continue
 			}
 			clone := q
+			if q.CutsceneCount != nil {
+				c := *q.CutsceneCount
+				clone.CutsceneCount = &c
+			}
 			if len(sortedQIDs) >= 20 && clone.GilReward > 0 && clone.ID%37 == 0 {
 				clone.GilReward = max(0, clone.GilReward-100)
 			}
@@ -1573,6 +1918,47 @@ func (s *Service) buildBaselineSnapshot(baselineVer string, current *snapshotPay
 		baseAchs = append(baseAchs, clone)
 	}
 
+	var baseBGMs []compactBGMRecord
+	if len(current.BGMs) > 0 {
+		realIDs := make([]int, 0, len(current.BGMs))
+		byID := make(map[int]compactBGMRecord, len(current.BGMs))
+		for _, b := range current.BGMs {
+			byID[b.ID] = b
+			if !b.IsPlaceholder && b.File != "" {
+				realIDs = append(realIDs, b.ID)
+			}
+		}
+		sort.Ints(realIDs)
+		cutIDs := make(map[int]bool)
+		modIDs := make(map[int]bool)
+		if len(realIDs) >= 20 {
+			cutCount := min(15, max(3, len(realIDs)/80))
+			for _, id := range realIDs[len(realIDs)-cutCount:] {
+				cutIDs[id] = true
+			}
+			remain := realIDs[:len(realIDs)-cutCount]
+			for i := len(remain) - 1; i >= 0 && len(modIDs) < 2; i-- {
+				b := byID[remain[i]]
+				if b.FileExists && b.ContentMD5 != "" && b.ID%17 == 0 {
+					modIDs[b.ID] = true
+				}
+			}
+		}
+		baseBGMs = make([]compactBGMRecord, 0, len(current.BGMs))
+		for _, b := range current.BGMs {
+			if cutIDs[b.ID] {
+				continue
+			}
+			clone := b
+			if modIDs[b.ID] {
+				clone.ContentMD5 = "baseline-prev"
+			}
+			baseBGMs = append(baseBGMs, clone)
+		}
+	}
+
+	baseIcons := buildBaselineIcons(current.Icons)
+
 	return &snapshotPayload{
 		Meta: VersionBackupMeta{
 			Version:              baselineVer,
@@ -1588,11 +1974,15 @@ func (s *Service) buildBaselineSnapshot(baselineVer string, current *snapshotPay
 			LeveCount:            len(baseLeves),
 			CollectableCount:     current.Meta.CollectableCount,
 			CollectableItemCount: colTurnInCnt,
+			BGMCount:             len(baseBGMs),
+			IconCount:            len(baseIcons),
 			IsBaseline:           true,
 		},
 		Items:        baseItems,
 		Quests:       baseQuests,
 		Leves:        baseLeves,
 		Achievements: baseAchs,
+		BGMs:         baseBGMs,
+		Icons:        baseIcons,
 	}
 }

@@ -100,13 +100,16 @@ const (
 	hairline     float32 = 0.01 // MyGo 向上取整为 1 物理像素
 	materialTint float32 = 0.68 // 浅色 Mica 窗口材质微透明叠层
 
-	titleBarHeight   float32 = 40
-	sidebarDefWidth  float32 = 220
-	sidebarMinWidth  float32 = 176
-	sidebarMaxWidth  float32 = 276
-	itemListDefWidth float32 = 380
-	itemListMinWidth float32 = 316
-	itemListMaxWidth float32 = 500
+	titleBarHeight        float32 = 40
+	sidebarDefWidth       float32 = 220
+	sidebarMinWidth       float32 = 176
+	sidebarMaxWidth       float32 = 276
+	itemListDefWidth      float32 = 380
+	itemListMinWidth      float32 = 316
+	itemListMaxWidth      float32 = 500
+	iconGroupListDefWidth float32 = 216
+	iconGroupListMinWidth float32 = 184
+	iconGroupListMaxWidth float32 = 300
 
 	ringWidth  float32 = 2.5
 	gripWidth  float32 = 3
@@ -642,6 +645,61 @@ func drawDetailSection(c *ui.Context, title string, meta string, trailing func()
 			}
 		})
 		body()
+	})
+}
+
+// drawCollapsibleDetailSection 绘制带点击展开/收起标题栏的详情页分节。
+func drawCollapsibleDetailSection(
+	c *ui.Context,
+	key any,
+	title string,
+	meta string,
+	open *bool,
+	collapsedHint string,
+	expandedHint string,
+	body func(),
+) {
+	t := themeOf(c)
+	ui.Column(c).FillWidth().Padding(14, 0, 0, 0).Gap(10).
+		BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).Children(func() {
+		trig := ui.ButtonBase(c.Key(key)).Label(title).
+			FillWidth().Padding(6, 10).Radius(t.radius.lg).
+			Justify(ui.SpaceBetween).AlignItems(ui.Center).
+			Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+		if *open {
+			trig.Background(t.card)
+		} else if trig.Hovered() {
+			trig.Background(t.tint(1.25))
+		} else {
+			trig.Background(t.tint(0.6))
+		}
+		trig.Children(func() {
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).Children(func() {
+				ico := icoChevronRight
+				if *open {
+					ico = icoChevronDown
+				}
+				ui.Icon(c, ico).Size(iconSm, iconSm).Shrink(0).TextColor(t.muted)
+				ui.Text(c, title).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
+				if meta != "" {
+					numText(c, meta).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+				}
+			})
+			hint := collapsedHint
+			if *open {
+				hint = expandedHint
+			}
+			if hint != "" {
+				ui.Text(c, hint).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
+			}
+		})
+		if trig.Clicked() {
+			*open = !*open
+		}
+
+		if *open && body != nil {
+			body()
+		}
 	})
 }
 
@@ -1372,4 +1430,24 @@ var (
 	icoExternalLink = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M10 14 20 4"/><path d="M19 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/></svg>`))
 
 	icoGlobe = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3c2.5 2.6 4 5.7 4 9s-1.5 6.4-4 9c-2.5-2.6-4-5.7-4-9s1.5-6.4 4-9Z"/><line x1="3.6" y1="9" x2="20.4" y2="9"/><line x1="3.6" y1="15" x2="20.4" y2="15"/></svg>`))
+
+	icoMusic = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l11-2v13"/><circle cx="6.5" cy="18" r="2.7"/><circle cx="17.5" cy="16" r="2.7"/></svg>`))
+
+	icoMusicFill = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M20.2 2.26a1 1 0 0 0-.87-.24l-11 2A1 1 0 0 0 7.5 5v9.8a3.7 3.7 0 1 0 2 3.2V9.83l9.5-1.73v4.7a3.7 3.7 0 1 0 2 3.2V3a1 1 0 0 0-.8-.74Z"/></svg>`))
+
+	icoPlay = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M7.2 4.6a1 1 0 0 1 1.5-.86l10.6 6.4a1 1 0 0 1 0 1.72l-10.6 6.4A1 1 0 0 1 7.2 17.4V4.6Z"/></svg>`))
+
+	icoPause = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="4.5" width="4" height="15" rx="1.2"/><rect x="13.5" y="4.5" width="4" height="15" rx="1.2"/></svg>`))
+
+	icoStop = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><rect x="5.5" y="5.5" width="13" height="13" rx="2"/></svg>`))
+
+	icoRepeat = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 2 21 6 17 10"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><polyline points="7 22 3 18 7 14"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg>`))
+
+	icoVolume = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2.5 9 2.5 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.6 6a8.5 8.5 0 0 1 0 12"/></svg>`))
+
+	icoVolumeMute = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2.5 9 2.5 15 6 15 11 19 11 5"/><line x1="21.5" y1="9" x2="15.5" y2="15"/><line x1="15.5" y1="9" x2="21.5" y2="15"/></svg>`))
+
+	icoImage = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m21 15-4.5-4.5a2 2 0 0 0-2.8 0L6 18"/></svg>`))
+
+	icoImageFill = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path fill-rule="evenodd" d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm3.5 5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Zm10.5 10V13.8l-3.1-3.1a2 2 0 0 0-2.8 0L5.8 18H19Z"/></svg>`))
 )

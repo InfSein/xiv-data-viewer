@@ -172,6 +172,8 @@ type Store struct {
 	QuestsByRewardItem       map[int][]ItemQuestSource
 	QuestSectionList         []QuestSectionInfo
 	QuestActorIDs            map[int][]int
+	QuestCutVars             map[int]map[string]int
+	QuestBGMVars             map[int]map[string]int
 	EventItemNames           map[int]string
 	BNpcNames                map[int]string
 	EObjNames                map[int]string
@@ -196,6 +198,32 @@ type Store struct {
 	AchievementKindList      []AchievementKindInfo
 	AchievementCategoryList  []AchievementCategoryInfo
 	TotalTitles              int
+
+	// 音乐（游戏 BGM 与管弦乐琴）索引
+	Music              []MusicEntry
+	BGMs               []MusicEntry
+	Orchestrions       []MusicEntry
+	MusicByKey         map[string]MusicEntry
+	BGMByID            map[int]MusicEntry
+	OrchByID           map[int]MusicEntry
+	MusicCategoryList  []MusicCategoryInfo
+	MusicExpansionList []MusicExpansionInfo
+	EventSystemBGMs    map[string]int
+	BGMByFile          map[string]MusicEntry
+	OrchByFile         map[string]MusicEntry
+
+	bgmDigestMu sync.Mutex
+	bgmDigests  map[int]BGMDigest
+
+	// 图标资源索引（ui/icon）与按客户端缓存的原始扫描结果
+	Icons                 []IconEntry
+	IconByID              map[int]IconEntry
+	IconGroups            []IconGroupInfo
+	IconsByGroup          map[int][]IconEntry
+	AvailableIconVariants []string
+	IconUsagesByID        map[int][]IconUsageRef
+	cnIconFiles           []sqpack.IconFileEntry
+	globalIconFiles       []sqpack.IconFileEntry
 
 	sharedReaders bool
 	langNone      *rawLangNoneSheets
@@ -254,6 +282,16 @@ type rawLangNoneSheets struct {
 	satisfactionRewards          *sqpack.SchemaSheet
 	hwdSupplies                  *sqpack.SchemaSheet
 	hwdRewards                   *sqpack.SchemaSheet
+	bgms                         *sqpack.SchemaSheet
+	bgmSituations                *sqpack.SchemaSheet
+	bgmSwitches                  *sqpack.SchemaSheet
+	bgmSystemDefines             *sqpack.SchemaSheet
+	orchPaths                    *sqpack.SchemaSheet
+	orchUiparams                 *sqpack.SchemaSheet
+	gfates                       *sqpack.SchemaSheet
+	gfateTypes                   *sqpack.SchemaSheet
+	cutscenes                    *sqpack.SchemaSheet
+	eventSystemDefines           *sqpack.SchemaSheet
 }
 
 type rawPrimaryLangSheets struct {
@@ -295,6 +333,7 @@ type rawPrimaryLangSheets struct {
 	journalGenres              *sqpack.SchemaSheet
 	journalCategories          *sqpack.SchemaSheet
 	journalSections            *sqpack.SchemaSheet
+	completeJournals           *sqpack.SchemaSheet
 	questRewardOthers          *sqpack.SchemaSheet
 	beastTribes                *sqpack.SchemaSheet
 	beastReputationRanks       *sqpack.SchemaSheet
@@ -322,6 +361,16 @@ type rawPrimaryLangSheets struct {
 	collectablesShops          *sqpack.SchemaSheet
 	collectablesShopItemGroups *sqpack.SchemaSheet
 	hwdTerms                   *sqpack.SchemaSheet
+	weddingBGMs                *sqpack.SchemaSheet
+	weddingBGMsEn              *sqpack.SchemaSheet
+	weddingBGMsJa              *sqpack.SchemaSheet
+	orchPrimary                *sqpack.SchemaSheet
+	orchCn                     *sqpack.SchemaSheet
+	orchEn                     *sqpack.SchemaSheet
+	orchJa                     *sqpack.SchemaSheet
+	orchCategories             *sqpack.SchemaSheet
+	fates                      *sqpack.SchemaSheet
+	goldSaucerTexts            *sqpack.SchemaSheet
 }
 
 // StoreLoadOptions 控制 GameDataStore 的加载选项，支持多语言切换时复用只读档案句柄与语言无关表。
@@ -510,6 +559,8 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		// Schema 对齐表（任务 / 理符 / 收藏品）
 		questsPrimary, questsCn, questsEn, questsJa                *sqpack.SchemaSheet
 		journalGenres, journalCategories, journalSections          *sqpack.SchemaSheet
+		completeJournals                                           *sqpack.SchemaSheet
+		cutscenes, eventSystemDefines                              *sqpack.SchemaSheet
 		questClassJobRewards                                       *sqpack.SchemaSubrowSheet
 		questRewardOthers, eventIconTypes, paramGrows              *sqpack.SchemaSheet
 		beastTribes, beastRankBonuses, beastReputationRanks        *sqpack.SchemaSheet
@@ -530,6 +581,11 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		satisfactionNpcs, satisfactionRewards                      *sqpack.SchemaSheet
 		satisfactionSupplies                                       *sqpack.SchemaSubrowSheet
 		hwdSupplies, hwdRewards, hwdTerms                          *sqpack.SchemaSheet
+		bgmSheet, bgmSituations, bgmSwitches, bgmSystemDefines     *sqpack.SchemaSheet
+		orchPaths, orchUiparams, gfates, gfateTypes                *sqpack.SchemaSheet
+		weddingBGMs, weddingBGMsEn, weddingBGMsJa                  *sqpack.SchemaSheet
+		orchPrimary, orchCn, orchEn, orchJa, orchCategories        *sqpack.SchemaSheet
+		fates, goldSaucerTexts                                     *sqpack.SchemaSheet
 	)
 
 	var (
@@ -661,6 +717,16 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		satisfactionRewards = bn.satisfactionRewards
 		hwdSupplies = bn.hwdSupplies
 		hwdRewards = bn.hwdRewards
+		bgmSheet = bn.bgms
+		bgmSituations = bn.bgmSituations
+		bgmSwitches = bn.bgmSwitches
+		bgmSystemDefines = bn.bgmSystemDefines
+		orchPaths = bn.orchPaths
+		orchUiparams = bn.orchUiparams
+		gfates = bn.gfates
+		gfateTypes = bn.gfateTypes
+		cutscenes = bn.cutscenes
+		eventSystemDefines = bn.eventSystemDefines
 	} else {
 		loadSheet(primaryReader, "EquipSlotCategory", sqpack.LangNone, nil, &rawEquipSlots)
 		loadSheet(primaryReader, "ItemRepairResource", sqpack.LangNone, nil, &rawRepairResources)
@@ -697,7 +763,7 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 			loadSchema(primaryReader, "EventIconType", sqpack.LangNone, []string{"NpcIconAvailable"}, &eventIconTypes)
 			loadSchema(primaryReader, "ParamGrow", sqpack.LangNone, []string{"ExpToNext", "ScaledQuestXP"}, &paramGrows)
 			loadSchema(primaryReader, "BeastRankBonus", sqpack.LangNone, nil, &beastRankBonuses)
-			loadSchema(primaryReader, "InstanceContent", sqpack.LangNone, []string{"ContentFinderCondition"}, &instanceContents)
+			loadSchema(primaryReader, "InstanceContent", sqpack.LangNone, []string{"ContentFinderCondition", "BGM", "WinBGM"}, &instanceContents)
 			loadSchema(primaryReader, "CraftLeve", sqpack.LangNone, nil, &craftLeves)
 			loadSchema(primaryReader, "GatheringLeve", sqpack.LangNone, nil, &gatheringLeves)
 			loadSchema(primaryReader, "GatheringLeveRoute", sqpack.LangNone, nil, &gatheringLeveRoutes)
@@ -714,6 +780,16 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 			loadSchema(primaryReader, "SatisfactionSupplyReward", sqpack.LangNone, nil, &satisfactionRewards)
 			loadSchema(primaryReader, "HWDCrafterSupply", sqpack.LangNone, nil, &hwdSupplies)
 			loadSchema(primaryReader, "HWDCrafterSupplyReward", sqpack.LangNone, nil, &hwdRewards)
+			loadSchema(primaryReader, "BGM", sqpack.LangNone, nil, &bgmSheet)
+			loadSchema(primaryReader, "BGMSituation", sqpack.LangNone, nil, &bgmSituations)
+			loadSchema(primaryReader, "BGMSwitch", sqpack.LangNone, nil, &bgmSwitches)
+			loadSchema(primaryReader, "BGMSystemDefine", sqpack.LangNone, nil, &bgmSystemDefines)
+			loadSchema(primaryReader, "OrchestrionPath", sqpack.LangNone, nil, &orchPaths)
+			loadSchema(primaryReader, "OrchestrionUiparam", sqpack.LangNone, nil, &orchUiparams)
+			loadSchema(primaryReader, "GFATE", sqpack.LangNone, []string{"BGM", "Type"}, &gfates)
+			loadSchema(primaryReader, "GFateType", sqpack.LangNone, []string{"Name"}, &gfateTypes)
+			loadSchema(primaryReader, "Cutscene", sqpack.LangNone, []string{"Path"}, &cutscenes)
+			loadSchema(primaryReader, "EventSystemDefine", sqpack.LangNone, []string{"Text", "DefineValue"}, &eventSystemDefines)
 		}
 	}
 
@@ -758,6 +834,7 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		journalGenres = bp.journalGenres
 		journalCategories = bp.journalCategories
 		journalSections = bp.journalSections
+		completeJournals = bp.completeJournals
 		questRewardOthers = bp.questRewardOthers
 		beastTribes = bp.beastTribes
 		beastReputationRanks = bp.beastReputationRanks
@@ -785,6 +862,16 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		collectablesShops = bp.collectablesShops
 		collectablesShopItemGroups = bp.collectablesShopItemGroups
 		hwdTerms = bp.hwdTerms
+		weddingBGMs = bp.weddingBGMs
+		weddingBGMsEn = bp.weddingBGMsEn
+		weddingBGMsJa = bp.weddingBGMsJa
+		orchPrimary = bp.orchPrimary
+		orchCn = bp.orchCn
+		orchEn = bp.orchEn
+		orchJa = bp.orchJa
+		orchCategories = bp.orchCategories
+		fates = bp.fates
+		goldSaucerTexts = bp.goldSaucerTexts
 	} else {
 		loadSheet(primaryReader, "Item", primaryLang, nil, &itemsPrimary)
 		if cnReader != nil && primaryLang != sqpack.LangChineseSimplified {
@@ -856,30 +943,36 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 			if cnReader != nil && primaryLang != sqpack.LangChineseSimplified {
 				loadSchema(cnReader, "Quest", sqpack.LangChineseSimplified, []string{"Name"}, &questsCn)
 				loadSchema(cnReader, "Leve", sqpack.LangChineseSimplified, []string{"Name"}, &levesCn)
+				loadSchema(cnReader, "Orchestrion", sqpack.LangChineseSimplified, []string{"Name"}, &orchCn)
 			}
 			if globalReader != nil {
 				if primaryLang != sqpack.LangEnglish {
 					loadSchema(globalReader, "Quest", sqpack.LangEnglish, []string{"Name"}, &questsEn)
 					loadSchema(globalReader, "Leve", sqpack.LangEnglish, []string{"Name"}, &levesEn)
+					loadSchema(globalReader, "Orchestrion", sqpack.LangEnglish, []string{"Name", "Description"}, &orchEn)
+					loadSchema(globalReader, "WeddingBGM", sqpack.LangEnglish, []string{"SongName"}, &weddingBGMsEn)
 				}
 				if primaryLang != sqpack.LangJapanese {
 					loadSchema(globalReader, "Quest", sqpack.LangJapanese, []string{"Name"}, &questsJa)
 					loadSchema(globalReader, "Leve", sqpack.LangJapanese, []string{"Name"}, &levesJa)
+					loadSchema(globalReader, "Orchestrion", sqpack.LangJapanese, []string{"Name", "Description"}, &orchJa)
+					loadSchema(globalReader, "WeddingBGM", sqpack.LangJapanese, []string{"SongName"}, &weddingBGMsJa)
 				}
 			}
 			loadSchema(primaryReader, "JournalGenre", primaryLang, []string{"Name", "Icon", "JournalCategory"}, &journalGenres)
 			loadSchema(primaryReader, "JournalCategory", primaryLang, []string{"Name", "JournalSection"}, &journalCategories)
 			loadSchema(primaryReader, "JournalSection", primaryLang, []string{"Name"}, &journalSections)
+			loadSchema(primaryReader, "CompleteJournal", primaryLang, completeJournalNeededFields, &completeJournals)
 			loadSchema(primaryReader, "QuestRewardOther", primaryLang, []string{"Name", "Icon"}, &questRewardOthers)
 			loadSchema(primaryReader, "BeastTribe", primaryLang, []string{"Name", "CurrencyItem", "BeastRankBonus"}, &beastTribes)
 			loadSchema(primaryReader, "BeastReputationRank", primaryLang, []string{"Name"}, &beastReputationRanks)
 			loadSchema(primaryReader, "GrandCompany", primaryLang, []string{"Singular"}, &grandCompanies)
 			loadSchema(primaryReader, "ExVersion", primaryLang, []string{"Name"}, &exVersions)
-			loadSchema(primaryReader, "Mount", primaryLang, []string{"Singular", "Icon"}, &mounts)
+			loadSchema(primaryReader, "Mount", primaryLang, []string{"Singular", "Icon", "RideBGM"}, &mounts)
 			loadSchema(primaryReader, "Action", primaryLang, []string{"Name", "Icon"}, &actions)
 			loadSchema(primaryReader, "Emote", primaryLang, []string{"Name", "Icon"}, &emotes)
 			loadSchema(primaryReader, "GeneralAction", primaryLang, []string{"Name", "Icon"}, &generalActions)
-			loadSchema(primaryReader, "ContentFinderCondition", primaryLang, []string{"Name"}, &contentFinderConditions)
+			loadSchema(primaryReader, "ContentFinderCondition", primaryLang, []string{"Name", "Icon"}, &contentFinderConditions)
 			loadSchema(primaryReader, "EObjName", primaryLang, []string{"Singular"}, &eobjNames)
 
 			loadSchema(primaryReader, "Leve", primaryLang, nil, &levesPrimary)
@@ -896,6 +989,42 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 			loadSchema(primaryReader, "CollectablesShop", primaryLang, nil, &collectablesShops)
 			loadSchema(primaryReader, "CollectablesShopItemGroup", primaryLang, []string{"Name"}, &collectablesShopItemGroups)
 			loadSchema(primaryReader, "HWDCrafterSupplyTerm", primaryLang, []string{"Name"}, &hwdTerms)
+			loadSchema(primaryReader, "WeddingBGM", primaryLang, nil, &weddingBGMs)
+			loadSchema(primaryReader, "Orchestrion", primaryLang, nil, &orchPrimary)
+			loadSchema(primaryReader, "OrchestrionCategory", primaryLang, nil, &orchCategories)
+			loadSchema(primaryReader, "Fate", primaryLang, []string{"Name", "Music", "Icon"}, &fates)
+			loadSchema(primaryReader, "GoldSaucerTextData", primaryLang, []string{"Text"}, &goldSaucerTexts)
+		}
+	}
+
+	// 3. 并发扫描客户端图标资源（语言无关，切换界面语言时直接按只读读取器复用）
+	var cnIconFiles, globalIconFiles []sqpack.IconFileEntry
+	if cnReader != nil {
+		if base != nil && base.CNReader == cnReader && base.cnIconFiles != nil {
+			cnIconFiles = base.cnIconFiles
+		} else {
+			tasks = append(tasks, func() {
+				files, err := sqpack.ScanIconFiles(cnReader)
+				if err != nil {
+					setErr("ui/icon(CN)", err)
+					return
+				}
+				cnIconFiles = files
+			})
+		}
+	}
+	if globalReader != nil {
+		if base != nil && base.GlobalReader == globalReader && base.globalIconFiles != nil {
+			globalIconFiles = base.globalIconFiles
+		} else {
+			tasks = append(tasks, func() {
+				files, err := sqpack.ScanIconFiles(globalReader)
+				if err != nil {
+					setErr("ui/icon(Global)", err)
+					return
+				}
+				globalIconFiles = files
+			})
 		}
 	}
 
@@ -981,12 +1110,16 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		titlesEn = titlesPrimary
 		questsEn = questsPrimary
 		levesEn = levesPrimary
+		orchEn = orchPrimary
+		weddingBGMsEn = weddingBGMs
 	case sqpack.LangJapanese:
 		itemsJa = itemsPrimary
 		achievementsJa = achievementsPrimary
 		titlesJa = titlesPrimary
 		questsJa = questsPrimary
 		levesJa = levesPrimary
+		orchJa = orchPrimary
+		weddingBGMsJa = weddingBGMs
 	}
 
 	// 构建基础字典映射
@@ -1317,6 +1450,9 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		instanceContents:        instanceContents,
 		contentFinderConditions: contentFinderConditions,
 		eobjNames:               eobjNames,
+		cutscenes:               cutscenes,
+		completeJournals:        completeJournals,
+		bgms:                    bgmSheet,
 		npcNames:                shopIdx.NpcNames,
 		npcLocations:            shopIdx.NpcLocations,
 		levelLocations:          shopIdx.LevelLocations,
@@ -1708,6 +1844,85 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		achievementCategoryList = append(achievementCategoryList, orphanCats...)
 	}
 
+	musicIdx := buildMusicData(musicLoaderInput{
+		appLang:                 appLang,
+		primaryReader:           primaryReader,
+		schemasFS:               schemasFS,
+		bgmSheet:                bgmSheet,
+		bgmSituations:           bgmSituations,
+		bgmSwitches:             bgmSwitches,
+		bgmSystemDefines:        bgmSystemDefines,
+		weddingBGMs:             weddingBGMs,
+		weddingBGMsEn:           weddingBGMsEn,
+		weddingBGMsJa:           weddingBGMsJa,
+		orchPrimary:             orchPrimary,
+		orchCn:                  orchCn,
+		orchEn:                  orchEn,
+		orchJa:                  orchJa,
+		orchPaths:               orchPaths,
+		orchUiparams:            orchUiparams,
+		orchCategories:          orchCategories,
+		exVersions:              exVersions,
+		territoryTypes:          territoryTypes,
+		placeNames:              placeNames,
+		instanceContents:        instanceContents,
+		contentFinderConditions: contentFinderConditions,
+		mounts:                  mounts,
+		fates:                   fates,
+		gfates:                  gfates,
+		gfateTypes:              gfateTypes,
+		goldSaucerTexts:         goldSaucerTexts,
+		leves:                   levesPrimary,
+		itemsPrimary:            itemsPrimary,
+		itemSummaryByID:         itemSummaryByID,
+	})
+
+	eventSystemBGMs := buildEventSystemBGMMap(eventSystemDefines, bgmSheet)
+	bgmByFile, orchByFile := buildMusicFileLookup(musicIdx)
+
+	iconIdx := buildIconIndex(iconBuildInput{
+		primaryReader:   primaryReader,
+		cnReader:        cnReader,
+		globalReader:    globalReader,
+		cnIconFiles:     cnIconFiles,
+		globalIconFiles: globalIconFiles,
+		itemSummaries:   itemSummaries,
+		achievements:    achievements,
+		quests:          questIdx.quests,
+		leves:           leveIdx.leves,
+	})
+
+	var reusedDigests map[int]BGMDigest
+	if base != nil && base.PrimaryReader == primaryReader {
+		base.bgmDigestMu.Lock()
+		if len(base.bgmDigests) > 0 {
+			reusedDigests = make(map[int]BGMDigest, len(base.bgmDigests))
+			for k, v := range base.bgmDigests {
+				reusedDigests[k] = v
+			}
+		}
+		base.bgmDigestMu.Unlock()
+	}
+	if len(reusedDigests) > 0 {
+		for i := range musicIdx.bgms {
+			b := &musicIdx.bgms[i]
+			if d, ok := reusedDigests[b.ID]; ok && d.File == b.File {
+				b.FileSize = d.FileSize
+				b.ContentMD5 = d.ContentMD5
+				musicIdx.bgmByID[b.ID] = *b
+				musicIdx.musicByKey[b.Key] = *b
+			}
+		}
+		for i := range musicIdx.music {
+			if musicIdx.music[i].Kind == MusicKindBGM {
+				if d, ok := reusedDigests[musicIdx.music[i].ID]; ok && d.File == musicIdx.music[i].File {
+					musicIdx.music[i].FileSize = d.FileSize
+					musicIdx.music[i].ContentMD5 = d.ContentMD5
+				}
+			}
+		}
+	}
+
 	var savedNone *rawLangNoneSheets
 	if reuseNone {
 		savedNone = base.langNone
@@ -1764,6 +1979,16 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 			satisfactionRewards:          satisfactionRewards,
 			hwdSupplies:                  hwdSupplies,
 			hwdRewards:                   hwdRewards,
+			bgms:                         bgmSheet,
+			bgmSituations:                bgmSituations,
+			bgmSwitches:                  bgmSwitches,
+			bgmSystemDefines:             bgmSystemDefines,
+			orchPaths:                    orchPaths,
+			orchUiparams:                 orchUiparams,
+			gfates:                       gfates,
+			gfateTypes:                   gfateTypes,
+			cutscenes:                    cutscenes,
+			eventSystemDefines:           eventSystemDefines,
 		}
 	}
 
@@ -1810,6 +2035,7 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 			journalGenres:              journalGenres,
 			journalCategories:          journalCategories,
 			journalSections:            journalSections,
+			completeJournals:           completeJournals,
 			questRewardOthers:          questRewardOthers,
 			beastTribes:                beastTribes,
 			beastReputationRanks:       beastReputationRanks,
@@ -1837,6 +2063,16 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 			collectablesShops:          collectablesShops,
 			collectablesShopItemGroups: collectablesShopItemGroups,
 			hwdTerms:                   hwdTerms,
+			weddingBGMs:                weddingBGMs,
+			weddingBGMsEn:              weddingBGMsEn,
+			weddingBGMsJa:              weddingBGMsJa,
+			orchPrimary:                orchPrimary,
+			orchCn:                     orchCn,
+			orchEn:                     orchEn,
+			orchJa:                     orchJa,
+			orchCategories:             orchCategories,
+			fates:                      fates,
+			goldSaucerTexts:            goldSaucerTexts,
 		}
 	}
 
@@ -1906,6 +2142,8 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		QuestsByRewardItem:             questIdx.questsByRewardItem,
 		QuestSectionList:               questIdx.sectionList,
 		QuestActorIDs:                  questIdx.questActorIDs,
+		QuestCutVars:                   questIdx.questCutVars,
+		QuestBGMVars:                   questIdx.questBGMVars,
 		EventItemNames:                 eventItemNames,
 		BNpcNames:                      bnpcNameMap,
 		EObjNames:                      eobjNameMap,
@@ -1926,5 +2164,25 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		AchievementKindList:            achievementKindList,
 		AchievementCategoryList:        achievementCategoryList,
 		TotalTitles:                    totalTitles,
+		Music:                          musicIdx.music,
+		BGMs:                           musicIdx.bgms,
+		Orchestrions:                   musicIdx.orchestrions,
+		MusicByKey:                     musicIdx.musicByKey,
+		BGMByID:                        musicIdx.bgmByID,
+		OrchByID:                       musicIdx.orchByID,
+		MusicCategoryList:              musicIdx.categories,
+		MusicExpansionList:             musicIdx.expansions,
+		EventSystemBGMs:                eventSystemBGMs,
+		BGMByFile:                      bgmByFile,
+		OrchByFile:                     orchByFile,
+		bgmDigests:                     reusedDigests,
+		Icons:                          iconIdx.icons,
+		IconByID:                       iconIdx.iconByID,
+		IconGroups:                     iconIdx.groups,
+		IconsByGroup:                   iconIdx.iconsByGroup,
+		AvailableIconVariants:          iconIdx.availableVariants,
+		IconUsagesByID:                 iconIdx.usagesByID,
+		cnIconFiles:                    cnIconFiles,
+		globalIconFiles:                globalIconFiles,
 	}, nil
 }

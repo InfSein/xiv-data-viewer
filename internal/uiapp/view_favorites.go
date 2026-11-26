@@ -17,6 +17,7 @@ type favoriteTabCounts struct {
 	quest       int
 	leve        int
 	achievement int
+	music       int
 }
 
 func (a *App) favoriteItemsAll() []gamedata.ItemSummary {
@@ -84,17 +85,35 @@ func (a *App) favoriteAchievementsAll() []gamedata.AchievementEntry {
 	return out
 }
 
+func (a *App) favoriteMusicAll() []gamedata.MusicEntry {
+	if a.service == nil {
+		return nil
+	}
+	var out []gamedata.MusicEntry
+	for _, rec := range a.records.Favorites {
+		if !config.IsMusicRecordKind(rec.Kind) {
+			continue
+		}
+		if m := a.service.GetMusicDetail(config.MusicKindOfRecord(rec.Kind), rec.ID); m != nil {
+			out = append(out, *m)
+		}
+	}
+	return out
+}
+
 func (a *App) favoriteCounts() favoriteTabCounts {
 	items := a.favoriteItemsAll()
 	quests := a.favoriteQuestsAll()
 	leves := a.favoriteLevesAll()
 	achs := a.favoriteAchievementsAll()
+	musics := a.favoriteMusicAll()
 	return favoriteTabCounts{
-		total:       len(items) + len(quests) + len(leves) + len(achs),
+		total:       len(items) + len(quests) + len(leves) + len(achs) + len(musics),
 		item:        len(items),
 		quest:       len(quests),
 		leve:        len(leves),
 		achievement: len(achs),
+		music:       len(musics),
 	}
 }
 
@@ -155,6 +174,10 @@ func (a *App) filteredFavoriteQuests() ([]gamedata.QuestEntry, int) {
 			}
 		case "with_item":
 			if len(q.RewardItems) == 0 {
+				continue
+			}
+		case "with_cutscene":
+			if len(q.Cutscenes) == 0 {
 				continue
 			}
 		}
@@ -222,6 +245,55 @@ func (a *App) filteredFavoriteAchievements() ([]gamedata.AchievementEntry, int) 
 	return filtered, len(all)
 }
 
+func (a *App) filteredFavoriteMusic() ([]gamedata.MusicEntry, int) {
+	all := a.favoriteMusicAll()
+	qRaw := strings.TrimSpace(a.favMusicQ)
+	qLower := strings.ToLower(qRaw)
+	numID := parseSearchNumericID(qRaw)
+	kindFilter := a.favMusicKind
+	if kindFilter == "" {
+		kindFilter = "all"
+	}
+
+	filtered := make([]gamedata.MusicEntry, 0, len(all))
+	for _, m := range all {
+		if kindFilter != "all" && m.Kind != kindFilter {
+			continue
+		}
+		if qLower != "" {
+			fields := []string{m.Title, m.NameCn, m.NameZh, m.NameJa, m.NameEn, m.FileStem, m.File, m.ExpansionName, m.CategoryName, m.ItemName, m.UsageSummary}
+			for _, u := range m.Usages {
+				fields = append(fields, u.Label, u.Role)
+			}
+			if !matchRecordSearch(qLower, numID, m.ID, fields...) {
+				continue
+			}
+		}
+		filtered = append(filtered, m)
+	}
+	return filtered, len(all)
+}
+
+func (a *App) selectFavoriteMusic(kind string, id int, record bool) {
+	if a.service == nil || id <= 0 {
+		return
+	}
+	detail := a.service.GetMusicDetail(kind, id)
+	if detail == nil {
+		return
+	}
+	a.favSelectedMusicKey = detail.Key
+	a.favMusicDetail = detail
+	a.favMusicDetailScroll.Y = 0
+	if record {
+		a.recordRecent(config.MusicRecordKind(detail.Kind), detail.ID)
+	}
+	targetKey := detail.Key
+	a.prepareMusicDetailSlot(&a.favMusicAudioSlot, detail, func() bool {
+		return a.favSelectedMusicKey == targetKey
+	})
+}
+
 func (a *App) selectFavoriteItem(itemID int, record bool) {
 	if a.service == nil || itemID <= 0 {
 		return
@@ -252,17 +324,29 @@ func (a *App) selectFavoriteQuest(questID int, record bool) {
 	a.favQuestSummaryOpen = false
 	a.favQuestDialogueOpen = false
 	a.favQuestText = nil
+	a.favQuestCutscenes = nil
+	a.favQuestCutscenesLoading = false
 	a.favQuestDetailScroll.Y = 0
 	if record {
 		a.recordRecent(config.RecordKindQuest, questID)
 	}
+	isCur := func() bool { return a.favSelectedQuestID == questID }
 	a.loadQuestTextAsync(
 		questID,
 		&a.favQuestTextSeq,
 		&a.favQuestTextLoading,
-		func() bool { return a.favSelectedQuestID == questID },
+		isCur,
 		func(txt *gamedata.QuestTextData) { a.favQuestText = txt },
 	)
+	if len(detail.Cutscenes) > 0 {
+		a.loadQuestCutscenesAsync(
+			questID,
+			&a.favQuestCutscenesSeq,
+			&a.favQuestCutscenesLoading,
+			isCur,
+			func(cuts []gamedata.QuestCutsceneEntry) { a.favQuestCutscenes = cuts },
+		)
+	}
 }
 
 func (a *App) selectFavoriteLeve(leveID int, record bool) {
@@ -294,11 +378,20 @@ func (a *App) syncFavoritesSelectionAfterRemoval(kind config.RecordKind, id int)
 			a.favQuest = nil
 			a.favQuestText = nil
 			a.favQuestTextLoading = false
+			a.favQuestCutscenes = nil
+			a.favQuestCutscenesLoading = false
 		}
 	case config.RecordKindLeve:
 		if a.favSelectedLeveID == id {
 			a.favSelectedLeveID = 0
 			a.favLeve = nil
+		}
+	case config.RecordKindBGM, config.RecordKindOrchestrion:
+		key := config.MusicKindOfRecord(kind) + ":" + strconv.Itoa(id)
+		if a.favSelectedMusicKey == key {
+			a.favSelectedMusicKey = ""
+			a.favMusicDetail = nil
+			a.favMusicAudioSlot = musicAudioSlot{}
 		}
 	}
 	a.ensureFavoriteSelection()
@@ -316,6 +409,8 @@ func (a *App) ensureFavoriteSelection() {
 			a.favQuest = nil
 			a.favQuestText = nil
 			a.favQuestTextLoading = false
+			a.favQuestCutscenes = nil
+			a.favQuestCutscenesLoading = false
 			return
 		}
 		if a.favSelectedQuestID > 0 && a.isFavorite(config.RecordKindQuest, a.favSelectedQuestID) {
@@ -357,6 +452,26 @@ func (a *App) ensureFavoriteSelection() {
 
 	case "achievement":
 		return
+
+	case "music":
+		filtered, total := a.filteredFavoriteMusic()
+		if total == 0 {
+			a.favSelectedMusicKey = ""
+			a.favMusicDetail = nil
+			a.favMusicAudioSlot = musicAudioSlot{}
+			return
+		}
+		if a.favMusicDetail != nil && a.isFavorite(config.MusicRecordKind(a.favMusicDetail.Kind), a.favMusicDetail.ID) {
+			return
+		}
+		if len(filtered) > 0 {
+			a.selectFavoriteMusic(filtered[0].Kind, filtered[0].ID, false)
+			return
+		}
+		all := a.favoriteMusicAll()
+		if len(all) > 0 {
+			a.selectFavoriteMusic(all[0].Kind, all[0].ID, false)
+		}
 
 	default:
 		filtered, total := a.filteredFavoriteItems()
@@ -401,6 +516,8 @@ func (a *App) renderFavoritesView(c *ui.Context) {
 				a.renderFavoritesLevesTab(c)
 			case "achievement":
 				a.renderFavoritesAchievementsTab(c)
+			case "music":
+				a.renderFavoritesMusicTab(c)
 			default:
 				a.renderFavoritesItemsTab(c)
 			}
@@ -423,6 +540,7 @@ func (a *App) renderFavoritesTabHeader(c *ui.Context, counts favoriteTabCounts) 
 		{"quest", a.t("favorites.tab_quest"), a.t("favorites.tab_quest_a11y"), counts.quest, icoScroll, icoScrollFill},
 		{"leve", a.t("favorites.tab_leve"), a.t("favorites.tab_leve_a11y"), counts.leve, icoClipboard, icoClipboardFill},
 		{"achievement", a.t("favorites.tab_achievement"), a.t("favorites.tab_ach_a11y"), counts.achievement, icoTrophy, icoTrophyFill},
+		{"music", a.t("favorites.tab_music"), a.t("favorites.tab_music_a11y"), counts.music, icoMusic, icoMusicFill},
 	}
 
 	kitPanel(c, a.panelRadius(c)).FillWidth().Shrink(0).Padding(8, 16).Children(func() {
@@ -690,16 +808,19 @@ func (a *App) renderFavoritesQuestsTab(c *ui.Context) {
 		},
 		func() {
 			a.renderQuestDetailWithOpts(c, questDetailPaneOpts{
-				keyPrefix:      "fav-quest",
-				showOpenInMain: true,
-				quest:          a.favQuest,
-				questText:      a.favQuestText,
-				textLoading:    a.favQuestTextLoading,
-				summaryOpen:    &a.favQuestSummaryOpen,
-				dialogueOpen:   &a.favQuestDialogueOpen,
-				scroll:         &a.favQuestDetailScroll,
-				onJumpItem:     a.inspectItemFromOtherTab,
-				onJumpQuest:    a.inspectQuestFromOtherTab,
+				keyPrefix:        "fav-quest",
+				showOpenInMain:   true,
+				quest:            a.favQuest,
+				questText:        a.favQuestText,
+				textLoading:      a.favQuestTextLoading,
+				cutscenes:        a.favQuestCutscenes,
+				cutscenesLoading: a.favQuestCutscenesLoading,
+				summaryOpen:      &a.favQuestSummaryOpen,
+				dialogueOpen:     &a.favQuestDialogueOpen,
+				scroll:           &a.favQuestDetailScroll,
+				onJumpItem:       a.inspectItemFromOtherTab,
+				onJumpQuest:      a.inspectQuestFromOtherTab,
+				onJumpBGM:        a.inspectBGMFromOtherTab,
 			})
 		},
 	)
@@ -908,4 +1029,135 @@ func (a *App) renderFavoritesAchievementsTab(c *ui.Context) {
 			},
 		)
 	})
+}
+
+func (a *App) hasFavMusicFilter() bool {
+	return strings.TrimSpace(a.favMusicQ) != "" || (a.favMusicKind != "" && a.favMusicKind != "all")
+}
+
+func (a *App) resetFavMusicFilters() {
+	a.favMusicQ = ""
+	a.favMusicKind = "all"
+	a.favMusicPage = 1
+	a.favMusicPageStr = "1"
+	a.favMusicScroll.Y = 0
+}
+
+func (a *App) renderFavoritesMusicTab(c *ui.Context) {
+	t := themeOf(c)
+	filtered, totalAll := a.filteredFavoriteMusic()
+	page, totalPages, start, end := paginateListRange(len(filtered), a.favMusicPage, 30)
+	if page != a.favMusicPage {
+		a.favMusicPage = page
+		a.favMusicPageStr = strconv.Itoa(page)
+	}
+	pageItems := filtered[start:end]
+
+	kitResizer(c, "fav-music-split", &a.listW, itemListMinWidth, itemListMaxWidth, 8, a.t("shell.resize_music_list"),
+		func() {
+			kitPanel(c, a.panelRadius(c)).Fill().Children(func() {
+				ui.Column(c).FillWidth().Padding(10, 12, 10, 12).Gap(8).
+					BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Children(func() {
+					ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
+						ui.Row(c).Gap(6).AlignItems(ui.Baseline).Grow(1).Shrink(1).Children(func() {
+							ui.Text(c, a.t("music.title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
+							numText(c, a.tf("common.items_count", "count", formatInt(len(filtered)))).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+						})
+						if a.hasFavMusicFilter() {
+							if kitButton(c, "fav-music-reset", a.t("common.reset"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
+								a.resetFavMusicFilters()
+							}
+						}
+					})
+
+					a.renderPageSearchInput(c, "fav-music-search", &a.favMusicQ, a.t("search.music_placeholder"), a.t("search.music_label"), func() {
+						a.favMusicPage = 1
+						a.favMusicPageStr = "1"
+						a.favMusicScroll.Y = 0
+					})
+
+					kindIdx := 0
+					switch a.favMusicKind {
+					case gamedata.MusicKindBGM:
+						kindIdx = 1
+					case gamedata.MusicKindOrchestrion:
+						kindIdx = 2
+					}
+					kindLabels := []string{
+						a.tf("music.filter_all", "count", formatInt(totalAll)),
+						a.t("music.filter_bgm"),
+						a.t("music.filter_orch"),
+					}
+					if next, changed := kitSegmentedTabs(c, "fav-music-kind-tabs", kindIdx, kindLabels); changed {
+						switch next {
+						case 1:
+							a.favMusicKind = gamedata.MusicKindBGM
+						case 2:
+							a.favMusicKind = gamedata.MusicKindOrchestrion
+						default:
+							a.favMusicKind = "all"
+						}
+						a.favMusicPage = 1
+						a.favMusicPageStr = "1"
+						a.favMusicScroll.Y = 0
+					}
+				})
+
+				if totalAll == 0 {
+					kitEmpty(c, icoStar, a.t("favorites.empty_music_title"), a.t("favorites.empty_music_desc"), func() {
+						if kitButton(c, "fav-go-music", a.t("favorites.browse_music"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
+							a.navigateTab(tabMusic)
+						}
+					})
+				} else if len(pageItems) == 0 {
+					kitEmpty(c, icoSearch, a.t("music.empty_title"), a.t("music.empty_desc"), func() {
+						if kitButton(c, "fav-music-empty-reset", a.t("common.reset_filters"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
+							a.resetFavMusicFilters()
+						}
+					})
+				} else {
+					var snap musicPlayerSnapshot
+					if a.musicPlayer != nil {
+						snap = a.musicPlayer.Snapshot()
+					}
+					ui.Scroll(c.Key("fav-music-list-scroll")).TrackScroll(&a.favMusicScroll).Grow(1).Shrink(1).Children(func() {
+						ui.Column(c).FillWidth().Padding(6, 8).Gap(2).Children(func() {
+							for _, m := range pageItems {
+								isSel := m.Key == a.favSelectedMusicKey
+								isPlaying := snap.TrackKey == m.Key && snap.Playing
+								if a.renderMusicListRow(c, "fav-music-row-"+m.Key, m, isSel, isPlaying, true, nil) {
+									a.selectFavoriteMusic(m.Kind, m.ID, true)
+								}
+							}
+						})
+					})
+				}
+
+				a.renderPaginationBar(
+					c,
+					"fav-music-pg",
+					page,
+					totalPages,
+					&a.favMusicPageStr,
+					func(next int) {
+						a.favMusicPage = next
+						a.favMusicPageStr = strconv.Itoa(next)
+						a.favMusicScroll.Y = 0
+					},
+				)
+			})
+		},
+		func() {
+			targetKey := a.favSelectedMusicKey
+			a.renderMusicDetailWithOpts(c, musicDetailPaneOpts{
+				keyPrefix:      "fav-music",
+				showOpenInMain: true,
+				entry:          a.favMusicDetail,
+				slot:           &a.favMusicAudioSlot,
+				scroll:         &a.favMusicDetailScroll,
+				isStillCurrent: func() bool { return a.favSelectedMusicKey == targetKey },
+				onJumpQuest:    a.inspectQuestFromOtherTab,
+			})
+		},
+	)
 }

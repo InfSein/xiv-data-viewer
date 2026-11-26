@@ -214,9 +214,10 @@ func (a *App) renderExportModal(c *ui.Context) {
 							numTextf(c, "%d%%", p.Percent).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground).Shrink(0)
 						})
 						done := float32(p.Percent)
-						ui.Row(c).FillWidth().Height(4).Radius(t.radius.full).Background(t.border).Clip().Children(func() {
-							ui.Box(c).Grow(done).Background(t.primary)
-							ui.Box(c).Grow(max(0, 100-done))
+						ui.Row(c).FillWidth().Height(4).Radius(t.radius.full).Background(t.border).Clip().
+							AlignItems(ui.Stretch).Children(func() {
+							ui.Box(c).Grow(done).FillHeight().Background(t.primary)
+							ui.Box(c).Grow(max(0, 100-done)).FillHeight()
 						})
 						ui.Row(c).FillWidth().Justify(ui.SpaceBetween).Children(func() {
 							numText(c, a.tf("export.processed", "done", formatInt(p.ProcessedTasks), "total", formatInt(p.TotalTasks))).FontSize(t.text.micro).TextColor(t.muted)
@@ -485,9 +486,10 @@ func (a *App) renderUpdateModal(c *ui.Context) {
 							numTextf(c, "%d%%", pct).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground).Shrink(0)
 						})
 						done := float32(max(4, pct))
-						ui.Row(c).FillWidth().Height(4).Radius(t.radius.full).Background(t.border).Clip().Children(func() {
-							ui.Box(c).Grow(done).Background(t.primary)
-							ui.Box(c).Grow(max(0, 100-done))
+						ui.Row(c).FillWidth().Height(4).Radius(t.radius.full).Background(t.border).Clip().
+							AlignItems(ui.Stretch).Children(func() {
+							ui.Box(c).Grow(done).FillHeight().Background(t.primary)
+							ui.Box(c).Grow(max(0, 100-done)).FillHeight()
 						})
 						if a.updateDownTotal > 0 {
 							numText(c, a.tf("update.download_progress_bytes",

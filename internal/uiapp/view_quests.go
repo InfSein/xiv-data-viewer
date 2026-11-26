@@ -16,6 +16,7 @@ func (a *App) questScopeFilters() []itemScopeDef {
 		{mode: "feature", label: a.t("quests.scope_feature")},
 		{mode: "repeatable", label: a.t("quests.scope_repeatable")},
 		{mode: "with_item", label: a.t("quests.scope_with_item")},
+		{mode: "with_cutscene", label: a.t("quests.scope_with_cutscene")},
 	}
 }
 
@@ -210,29 +211,35 @@ func (a *App) renderQuestListRow(c *ui.Context, key string, q gamedata.QuestEntr
 }
 
 type questDetailPaneOpts struct {
-	keyPrefix      string
-	showOpenInMain bool
-	quest          *gamedata.QuestEntry
-	questText      *gamedata.QuestTextData
-	textLoading    bool
-	summaryOpen    *bool
-	dialogueOpen   *bool
-	scroll         *ui.ScrollState
-	onJumpItem     func(int)
-	onJumpQuest    func(int)
+	keyPrefix        string
+	showOpenInMain   bool
+	quest            *gamedata.QuestEntry
+	questText        *gamedata.QuestTextData
+	textLoading      bool
+	cutscenes        []gamedata.QuestCutsceneEntry
+	cutscenesLoading bool
+	summaryOpen      *bool
+	dialogueOpen     *bool
+	scroll           *ui.ScrollState
+	onJumpItem       func(int)
+	onJumpQuest      func(int)
+	onJumpBGM        func(int)
 }
 
 func (a *App) renderQuestDetailPane(c *ui.Context) {
 	a.renderQuestDetailWithOpts(c, questDetailPaneOpts{
-		keyPrefix:    "wb-quest",
-		quest:        a.selectedQuest,
-		questText:    a.selectedQuestText,
-		textLoading:  a.questTextLoading,
-		summaryOpen:  &a.questSummaryOpen,
-		dialogueOpen: &a.questDialogueOpen,
-		scroll:       &a.questDetailScroll,
-		onJumpItem:   a.inspectItemFromOtherTab,
-		onJumpQuest:  a.jumpToQuest,
+		keyPrefix:        "wb-quest",
+		quest:            a.selectedQuest,
+		questText:        a.selectedQuestText,
+		textLoading:      a.questTextLoading,
+		cutscenes:        a.selectedQuestCutscenes,
+		cutscenesLoading: a.questCutscenesLoading,
+		summaryOpen:      &a.questSummaryOpen,
+		dialogueOpen:     &a.questDialogueOpen,
+		scroll:           &a.questDetailScroll,
+		onJumpItem:       a.inspectItemFromOtherTab,
+		onJumpQuest:      a.jumpToQuest,
+		onJumpBGM:        a.inspectBGMFromOtherTab,
 	})
 }
 
@@ -252,6 +259,10 @@ func (a *App) renderQuestDetailWithOpts(c *ui.Context, opts questDetailPaneOpts)
 		onJumpQuest := opts.onJumpQuest
 		if onJumpQuest == nil {
 			onJumpQuest = a.jumpToQuest
+		}
+		onJumpBGM := opts.onJumpBGM
+		if onJumpBGM == nil {
+			onJumpBGM = a.inspectBGMFromOtherTab
 		}
 		scroll := opts.scroll
 		if scroll == nil {
@@ -311,7 +322,10 @@ func (a *App) renderQuestDetailWithOpts(c *ui.Context, opts questDetailPaneOpts)
 					// 6. 接取条件与前置要求
 					a.renderQuestRequirementsSection(c, q, onJumpQuest)
 
-					// 7. 任务对话文本（成功解析时显示，默认折叠防剧透）
+					// 7. 关联过场动画与所用 BGM（点击曲目直跳音乐页）
+					a.renderQuestCutscenesSection(c, opts.keyPrefix, q, opts.cutscenes, opts.cutscenesLoading, onJumpBGM)
+
+					// 8. 任务对话文本（成功解析时显示，默认折叠防剧透）
 					a.renderQuestDialogueSection(c, opts.keyPrefix, q, opts.questText, dialogueOpen)
 				})
 			})
@@ -623,46 +637,7 @@ func (a *App) renderQuestRequirementsSection(c *ui.Context, q *gamedata.QuestEnt
 
 // renderQuestCollapsibleSection 绘制防剧透默认折叠区块（仅保留清晰顶部细线与可点击标题行）。
 func (a *App) renderQuestCollapsibleSection(c *ui.Context, key, title, countMeta string, open *bool, body func()) {
-	t := themeOf(c)
-	ui.Column(c).FillWidth().Padding(14, 0, 0, 0).Gap(10).
-		BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).Children(func() {
-		trig := ui.ButtonBase(c.Key(key)).Label(title).
-			FillWidth().Padding(6, 10).Radius(t.radius.lg).
-			Justify(ui.SpaceBetween).AlignItems(ui.Center).
-			Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-		if *open {
-			trig.Background(t.card)
-		} else if trig.Hovered() {
-			trig.Background(t.tint(1.25))
-		} else {
-			trig.Background(t.tint(0.6))
-		}
-		trig.Children(func() {
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).Children(func() {
-				ico := icoChevronRight
-				if *open {
-					ico = icoChevronDown
-				}
-				ui.Icon(c, ico).Size(iconSm, iconSm).Shrink(0).TextColor(t.muted)
-				ui.Text(c, title).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
-				if countMeta != "" {
-					numText(c, countMeta).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
-				}
-			})
-			hint := a.t("quests.spoiler_collapsed")
-			if *open {
-				hint = a.t("quests.spoiler_expanded")
-			}
-			ui.Text(c, hint).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
-		})
-		if trig.Clicked() {
-			*open = !*open
-		}
-
-		if *open && body != nil {
-			body()
-		}
-	})
+	drawCollapsibleDetailSection(c, key, title, countMeta, open, a.t("quests.spoiler_collapsed"), a.t("quests.spoiler_expanded"), body)
 }
 
 func (a *App) renderQuestSummarySection(c *ui.Context, keyPrefix string, q *gamedata.QuestEntry, qt *gamedata.QuestTextData, textLoading bool, summaryOpen *bool) {
@@ -757,6 +732,102 @@ func (a *App) renderQuestDialogueSection(c *ui.Context, keyPrefix string, q *gam
 						}
 					})
 					ui.Text(c, line.Text).FontSize(t.text.sm).LineHeight(lineProse).TextColor(t.subdued).Selectable()
+				})
+			}
+		})
+	})
+}
+
+func (a *App) renderQuestCutscenesSection(c *ui.Context, keyPrefix string, q *gamedata.QuestEntry, cutscenes []gamedata.QuestCutsceneEntry, loading bool, onJumpBGM func(int)) {
+	if q == nil || len(q.Cutscenes) == 0 {
+		return
+	}
+	t := themeOf(c)
+	meta := a.tf("quests.cutscenes_meta", "count", formatInt(len(q.Cutscenes)))
+	drawDetailSection(c, a.t("quests.cutscenes_title"), meta, nil, func() {
+		if loading {
+			ui.Row(c).FillWidth().Padding(8, 12).Gap(8).AlignItems(ui.Center).
+				Radius(t.radius.lg).Background(t.card).Border(hairline, t.border).Children(func() {
+				ui.Spinner(c).FontSize(13).TextColor(t.primary).Label(a.t("quests.loading_cutscenes"))
+				ui.Text(c, a.t("quests.loading_cutscenes")).FontSize(t.text.xs).TextColor(t.muted)
+			})
+			return
+		}
+		list := cutscenes
+		if list == nil && a.service != nil {
+			list = a.service.GetQuestCutscenes(q.ID)
+		}
+		if len(list) == 0 {
+			list = make([]gamedata.QuestCutsceneEntry, len(q.Cutscenes))
+			for i, ref := range q.Cutscenes {
+				list[i] = gamedata.QuestCutsceneEntry{
+					CutsceneID: ref.CutsceneID,
+					Path:       ref.Path,
+					Source:     ref.Source,
+				}
+			}
+		}
+
+		kitCard(c, ui.Column(c).FillWidth().Padding(10, 14).Gap(10), toneCard).Children(func() {
+			for idx, cs := range list {
+				if idx > 0 {
+					kitSeparator(c, false)
+				}
+				shortName := gamedata.ExtractCutsceneShortName(cs.Path)
+				if shortName == "" {
+					shortName = fmt.Sprintf("Cutscene #%d", cs.CutsceneID)
+				}
+				ui.Column(c).FillWidth().Gap(6).Children(func() {
+					ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Wrap().Children(func() {
+						ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+							drawPill(c, a.tf("quests.cutscene_index", "index", formatInt(idx+1)), pillNeutral)
+							ui.Text(c, shortName).FontSize(t.text.sm).FontWeight(600).TextColor(t.foreground).Selectable()
+						})
+						numTextf(c, "#%d · %s", cs.CutsceneID, cs.Path).FontSize(t.text.micro).TextColor(t.muted).Selectable()
+					})
+
+					if len(cs.BGMs) == 0 {
+						msg := a.t("quests.cutscene_no_bgm")
+						if cs.MissingCutb {
+							msg = a.t("quests.cutscene_missing")
+						}
+						ui.Text(c, msg).FontSize(t.text.xs).TextColor(t.muted)
+						return
+					}
+
+					ui.Column(c).FillWidth().Gap(4).Children(func() {
+						for bIdx, bgm := range cs.BGMs {
+							btn := ui.ButtonBase(c.Key(fmt.Sprintf("%s-qcs-%d-%d-%d-%d", keyPrefix, q.ID, cs.CutsceneID, idx, bIdx))).
+								Label(fmt.Sprintf("%s #%d", bgm.Title, bgm.BGMID)).
+								FillWidth().Padding(6, 10).Radius(t.radius.md).
+								Background(t.tint(0.75)).Border(hairline, t.border).
+								Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).
+								Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+							if btn.Hovered() {
+								btn.Background(t.tint(1.75))
+							}
+							btn.Children(func() {
+								ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+									ui.Icon(c, icoMusic).Size(iconXs, iconXs).Shrink(0).TextColor(t.primary)
+									ui.Text(c, bgm.Title).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine().Shrink(1)
+									if bgm.SubTitle != "" {
+										ui.Text(c, bgm.SubTitle).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(1)
+									}
+									if bgm.Source == "lua" {
+										drawPill(c, a.t("quests.cutscene_src_lua"), pillAccent)
+									}
+									numTextf(c, "#%d", bgm.BGMID).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
+								})
+								ui.Row(c).Gap(4).AlignItems(ui.Center).Shrink(0).Children(func() {
+									ui.Text(c, a.t("quests.cutscene_jump_bgm")).FontSize(t.text.xs).TextColor(t.primary).SingleLine()
+									ui.Icon(c, icoArrowRight).Size(12, 12).TextColor(t.primary)
+								})
+							})
+							if btn.Clicked() && bgm.BGMID > 0 && onJumpBGM != nil {
+								onJumpBGM(bgm.BGMID)
+							}
+						}
+					})
 				})
 			}
 		})

@@ -15,6 +15,7 @@ type recentCounts struct {
 	item  int
 	quest int
 	leve  int
+	music int
 }
 
 type resolvedRecentEntry struct {
@@ -144,6 +145,30 @@ func (a *App) resolveHistoryEntry(rec config.HistoryRecord) (resolvedRecentEntry
 			iconID:   iconID,
 			aliases:  []string{lv.NameZh, lv.NameJa, lv.NameEn, lv.TownName, lv.ClientName, sub},
 		}, true
+
+	case config.RecordKindBGM, config.RecordKindOrchestrion:
+		m := a.service.GetMusicDetail(config.MusicKindOfRecord(rec.Kind), rec.ID)
+		if m == nil {
+			return resolvedRecentEntry{}, false
+		}
+		title := nonEmptyMusicText(m.Title, m.FileStem, fmt.Sprintf("#%d", m.ID))
+		sub := a.formatMusicRowSubtitle(*m)
+		if sub == "" {
+			sub = a.t("music.title")
+		}
+		meta := a.t("music.kind_bgm")
+		if m.Kind == gamedata.MusicKindOrchestrion {
+			meta = a.t("music.kind_orch")
+		}
+		return resolvedRecentEntry{
+			kind:     rec.Kind,
+			id:       rec.ID,
+			title:    title,
+			subtitle: sub,
+			meta:     meta,
+			iconID:   m.ItemIconID,
+			aliases:  []string{m.Title, m.NameCn, m.NameZh, m.NameJa, m.NameEn, m.FileStem, m.File, m.ExpansionName, m.CategoryName, m.ItemName, m.UsageSummary},
+		}, true
 	}
 	return resolvedRecentEntry{}, false
 }
@@ -164,6 +189,8 @@ func (a *App) filteredRecentEntries() ([]resolvedRecentEntry, recentCounts) {
 			counts.quest++
 		case config.RecordKindLeve:
 			counts.leve++
+		case config.RecordKindBGM, config.RecordKindOrchestrion:
+			counts.music++
 		}
 		resolved = append(resolved, entry)
 	}
@@ -178,8 +205,14 @@ func (a *App) filteredRecentEntries() ([]resolvedRecentEntry, recentCounts) {
 
 	out := make([]resolvedRecentEntry, 0, len(resolved))
 	for _, e := range resolved {
-		if kindFilter != "all" && string(e.kind) != kindFilter {
-			continue
+		if kindFilter != "all" {
+			if kindFilter == "music" {
+				if !config.IsMusicRecordKind(e.kind) {
+					continue
+				}
+			} else if string(e.kind) != kindFilter {
+				continue
+			}
 		}
 		if qLower != "" {
 			fields := append([]string{e.title, e.subtitle}, e.aliases...)
@@ -202,7 +235,10 @@ func (a *App) selectRecentEntry(kind config.RecordKind, id int) {
 	a.recentQuest = nil
 	a.recentQuestText = nil
 	a.recentQuestTextLoading = false
+	a.recentQuestCutscenes = nil
+	a.recentQuestCutscenesLoading = false
 	a.recentLeve = nil
+	a.recentMusicDetail = nil
 
 	switch kind {
 	case config.RecordKindItem:
@@ -214,16 +250,36 @@ func (a *App) selectRecentEntry(kind config.RecordKind, id int) {
 		a.recentQuestSummaryOpen = false
 		a.recentQuestDialogueOpen = false
 		a.recentQuestScroll.Y = 0
+		isCur := func() bool { return a.recentSelectedKind == config.RecordKindQuest && a.recentSelectedID == id }
 		a.loadQuestTextAsync(
 			id,
 			&a.recentQuestTextSeq,
 			&a.recentQuestTextLoading,
-			func() bool { return a.recentSelectedKind == config.RecordKindQuest && a.recentSelectedID == id },
+			isCur,
 			func(txt *gamedata.QuestTextData) { a.recentQuestText = txt },
 		)
+		if a.recentQuest != nil && len(a.recentQuest.Cutscenes) > 0 {
+			a.loadQuestCutscenesAsync(
+				id,
+				&a.recentQuestCutscenesSeq,
+				&a.recentQuestCutscenesLoading,
+				isCur,
+				func(cuts []gamedata.QuestCutsceneEntry) { a.recentQuestCutscenes = cuts },
+			)
+		}
 	case config.RecordKindLeve:
 		a.recentLeve = a.service.GetLeveDetail(id)
 		a.recentLeveScroll.Y = 0
+	case config.RecordKindBGM, config.RecordKindOrchestrion:
+		a.recentMusicDetail = a.service.GetMusicDetail(config.MusicKindOfRecord(kind), id)
+		a.recentMusicScroll.Y = 0
+		if a.recentMusicDetail != nil {
+			targetKind := kind
+			targetID := id
+			a.prepareMusicDetailSlot(&a.recentMusicAudioSlot, a.recentMusicDetail, func() bool {
+				return a.recentSelectedKind == targetKind && a.recentSelectedID == targetID
+			})
+		}
 	}
 }
 
@@ -239,7 +295,11 @@ func (a *App) ensureRecentSelection() {
 		a.recentQuest = nil
 		a.recentQuestText = nil
 		a.recentQuestTextLoading = false
+		a.recentQuestCutscenes = nil
+		a.recentQuestCutscenesLoading = false
 		a.recentLeve = nil
+		a.recentMusicDetail = nil
+		a.recentMusicAudioSlot = musicAudioSlot{}
 		return
 	}
 
@@ -258,6 +318,10 @@ func (a *App) ensureRecentSelection() {
 					}
 				case config.RecordKindLeve:
 					if a.recentLeve != nil {
+						return
+					}
+				case config.RecordKindBGM, config.RecordKindOrchestrion:
+					if a.recentMusicDetail != nil {
 						return
 					}
 				}
@@ -295,6 +359,9 @@ func (a *App) refreshRecentAndFavoriteDetails() {
 	if a.favSelectedLeveID > 0 {
 		a.selectFavoriteLeve(a.favSelectedLeveID, false)
 	}
+	if a.favMusicDetail != nil {
+		a.selectFavoriteMusic(a.favMusicDetail.Kind, a.favMusicDetail.ID, false)
+	}
 }
 
 func (a *App) hasRecentFilter() bool {
@@ -315,6 +382,8 @@ func (a *App) recentKindTag(kind config.RecordKind) (string, pillKind) {
 		return a.t("recent.tag_quest"), pillWarning
 	case config.RecordKindLeve:
 		return a.t("recent.tag_leve"), pillPositive
+	case config.RecordKindBGM, config.RecordKindOrchestrion:
+		return a.t("recent.tag_music"), pillAccent
 	default:
 		return a.t("recent.tag_item"), pillNeutral
 	}
@@ -380,6 +449,7 @@ func (a *App) renderRecentListPane(c *ui.Context) {
 				{"item", a.t("recent.filter_item"), counts.item},
 				{"quest", a.t("recent.filter_quest"), counts.quest},
 				{"leve", a.t("recent.filter_leve"), counts.leve},
+				{"music", a.t("recent.filter_music"), counts.music},
 			}
 			ui.Row(c).FillWidth().Gap(4).Wrap().AlignItems(ui.Center).Children(func() {
 				for _, f := range filters {
@@ -424,7 +494,19 @@ func (a *App) renderRecentListPane(c *ui.Context) {
 							row.Background(t.tint(1))
 						}
 						row.Children(func() {
-							a.drawGameIcon(c, e.iconID, false, 32, t.radius.md)
+							if config.IsMusicRecordKind(e.kind) && e.iconID <= 0 {
+								icoCol := t.muted
+								bg := t.tint(1)
+								if isSel {
+									icoCol = t.primary
+									bg = t.tint(2)
+								}
+								ui.Box(c).Size(32, 32).Radius(t.radius.md).Background(bg).Border(hairline, t.border).Center().Shrink(0).Children(func() {
+									ui.Icon(c, icoMusic).Size(15, 15).TextColor(icoCol)
+								})
+							} else {
+								a.drawGameIcon(c, e.iconID, false, 32, t.radius.md)
+							}
 							ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
 								ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
 									fw := 500
@@ -489,16 +571,19 @@ func (a *App) renderRecentDetailPane(c *ui.Context) {
 		})
 	case config.RecordKindQuest:
 		a.renderQuestDetailWithOpts(c, questDetailPaneOpts{
-			keyPrefix:      "recent-quest",
-			showOpenInMain: true,
-			quest:          a.recentQuest,
-			questText:      a.recentQuestText,
-			textLoading:    a.recentQuestTextLoading,
-			summaryOpen:    &a.recentQuestSummaryOpen,
-			dialogueOpen:   &a.recentQuestDialogueOpen,
-			scroll:         &a.recentQuestScroll,
-			onJumpItem:     a.inspectItemFromOtherTab,
-			onJumpQuest:    a.inspectQuestFromOtherTab,
+			keyPrefix:        "recent-quest",
+			showOpenInMain:   true,
+			quest:            a.recentQuest,
+			questText:        a.recentQuestText,
+			textLoading:      a.recentQuestTextLoading,
+			cutscenes:        a.recentQuestCutscenes,
+			cutscenesLoading: a.recentQuestCutscenesLoading,
+			summaryOpen:      &a.recentQuestSummaryOpen,
+			dialogueOpen:     &a.recentQuestDialogueOpen,
+			scroll:           &a.recentQuestScroll,
+			onJumpItem:       a.inspectItemFromOtherTab,
+			onJumpQuest:      a.inspectQuestFromOtherTab,
+			onJumpBGM:        a.inspectBGMFromOtherTab,
 		})
 	case config.RecordKindLeve:
 		a.renderLeveDetailWithOpts(c, leveDetailPaneOpts{
@@ -507,6 +592,18 @@ func (a *App) renderRecentDetailPane(c *ui.Context) {
 			leve:           a.recentLeve,
 			scroll:         &a.recentLeveScroll,
 			onJumpItem:     a.inspectItemFromOtherTab,
+		})
+	case config.RecordKindBGM, config.RecordKindOrchestrion:
+		targetKind := a.recentSelectedKind
+		targetID := a.recentSelectedID
+		a.renderMusicDetailWithOpts(c, musicDetailPaneOpts{
+			keyPrefix:      "recent-music",
+			showOpenInMain: true,
+			entry:          a.recentMusicDetail,
+			slot:           &a.recentMusicAudioSlot,
+			scroll:         &a.recentMusicScroll,
+			isStillCurrent: func() bool { return a.recentSelectedKind == targetKind && a.recentSelectedID == targetID },
+			onJumpQuest:    a.inspectQuestFromOtherTab,
 		})
 	default:
 		kitPanel(c, a.panelRadius(c)).Grow(1).Shrink(1).FillHeight().Children(func() {

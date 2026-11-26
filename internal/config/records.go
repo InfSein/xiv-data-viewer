@@ -20,7 +20,30 @@ const (
 	RecordKindQuest       RecordKind = "quest"
 	RecordKindLeve        RecordKind = "leve"
 	RecordKindAchievement RecordKind = "achievement"
+	RecordKindBGM         RecordKind = "bgm"
+	RecordKindOrchestrion RecordKind = "orchestrion"
 )
+
+// IsMusicRecordKind 返回记录类型是否属于音乐（原生 BGM 或管弦乐琴）。
+func IsMusicRecordKind(kind RecordKind) bool {
+	return kind == RecordKindBGM || kind == RecordKindOrchestrion
+}
+
+// MusicRecordKind 将业务层的音乐子类型字符串转换为持久化记录类型。
+func MusicRecordKind(musicKind string) RecordKind {
+	if musicKind == string(RecordKindOrchestrion) {
+		return RecordKindOrchestrion
+	}
+	return RecordKindBGM
+}
+
+// MusicKindOfRecord 将音乐持久化记录类型还原为业务层音乐子类型字符串。
+func MusicKindOfRecord(kind RecordKind) string {
+	if kind == RecordKindOrchestrion {
+		return string(RecordKindOrchestrion)
+	}
+	return string(RecordKindBGM)
+}
 
 // HistoryRecord 表示单条最近浏览或收藏实体索引记录。
 type HistoryRecord struct {
@@ -41,7 +64,7 @@ func RecordsFilePath(dataDir string) string {
 }
 
 func isValidRecentKind(kind RecordKind) bool {
-	return kind == RecordKindItem || kind == RecordKindQuest || kind == RecordKindLeve
+	return kind == RecordKindItem || kind == RecordKindQuest || kind == RecordKindLeve || IsMusicRecordKind(kind)
 }
 
 func isValidFavoriteKind(kind RecordKind) bool {
