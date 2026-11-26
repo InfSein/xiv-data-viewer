@@ -18,6 +18,7 @@ import (
 	"github.com/InfSein/xiv-data-viewer/internal/exporter"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/InfSein/xiv-data-viewer/internal/i18n"
+	"github.com/InfSein/xiv-data-viewer/internal/snapshot"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 	"github.com/InfSein/xiv-data-viewer/internal/updater"
 	"github.com/egoist/mygo"
@@ -45,7 +46,6 @@ type loadStage uint8
 const (
 	loadStageSheets loadStage = iota
 	loadStageIndices
-	loadStageSnapshot
 )
 
 type activeTab uint8
@@ -60,6 +60,7 @@ const (
 	tabRecent
 	tabFavorites
 	tabDiff
+	tabTextSearch
 	tabChangelog
 	tabSettings
 )
@@ -88,6 +89,7 @@ type langSessionCache struct {
 	backupSvc       *backup.Service
 	exporterSvc     *exporter.Service
 	iconExporterSvc *exporter.IconService
+	diffExporterSvc *exporter.DiffService
 	status          gamedata.SystemStatus
 	versionStatus   backup.VersionStatusResponse
 	exportTotalShts int
@@ -174,6 +176,7 @@ type App struct {
 	backupSvc       *backup.Service
 	exporterSvc     *exporter.Service
 	iconExporterSvc *exporter.IconService
+	diffExporterSvc *exporter.DiffService
 	bitmaps         *BitmapCache
 
 	// 系统与版本状态
@@ -361,20 +364,68 @@ type App struct {
 	favMusicDetailScroll     ui.ScrollState
 	favMusicAudioSlot        musicAudioSlot
 
-	// 版本 Diff 视图状态
-	diffFromVer   string
-	diffToVer     string
-	diffFilter    string
-	diffEntity    string
-	diffSearch    string
-	diffPage      int
-	diffPageStr   string
-	diffRes       *backup.VersionDiffResponse
-	diffBusy      bool
-	diffNotice    string
-	diffError     string
-	diffScroll    ui.ScrollState
-	diffIconCache map[string]*ui.Bitmap
+	// 版本 Diff 与 GitHub 快照管理状态（统一按版本号下载，严格同服对比）
+	diffRegion               string // "cn"|"global"
+	diffFromVer              string
+	diffToVer                string
+	diffFilter               string
+	diffEntity               string
+	diffSearch               string
+	diffPage                 int
+	diffPageStr              string
+	diffRes                  *backup.VersionDiffResponse
+	diffBusy                 bool
+	diffSeq                  uint64
+	diffNotice               string
+	diffError                string
+	diffScroll               ui.ScrollState
+	diffIconCache            map[string]*ui.Bitmap
+	diffTextExpanded         map[string]bool
+	diffTextCopiedKey        string
+	diffTextCopiedEnd        time.Time
+	snapMgrOpen              bool
+	snapMgrScroll            ui.ScrollState
+	snapCatalogBusy          bool
+	snapCatalogTried         bool
+	snapDownID               string
+	snapDownName             string
+	snapDownBytes            int64
+	snapDownTotal            int64
+	snapDownCancel           context.CancelFunc
+	snapMgrNotice            string
+	snapMgrError             string
+	diffExportOpen           bool
+	diffExportKind           exporter.DiffExportKind
+	diffExportPreferHR1      bool
+	diffExportIconNaming     exporter.DiffIconNaming
+	diffExportIncludeOldIcon bool
+	diffExportAudioFormat    exporter.DiffAudioFormat
+	diffExportDirDraft       string
+	diffExportProgress       *exporter.DiffExportProgress
+	diffExportError          string
+
+	// 全量文本检索视图状态
+	textSearchLang      string
+	textSearchQ         string
+	textSearchScope     gamedata.TextSearchScope
+	textSearchSheet     string
+	textSearchPage      int
+	textSearchPageSize  int
+	textSearchPageStr   string
+	textSearchRes       gamedata.TextSearchResponse
+	textSearchScroll    ui.ScrollState
+	textSearchIdxBusy   bool
+	textSearchIdxErr    string
+	textSearchIdxProg   gamedata.TextIndexProgress
+	textSearchIdxSeq    uint64
+	textSearchIdxCancel context.CancelFunc
+	textSearchRunSeq    uint64
+	textSearchRunCancel context.CancelFunc
+	textSearchBusy      bool
+	textSearchExpanded  map[uint32]bool
+	textSearchCopiedDoc uint32
+	textSearchCopiedEnd time.Time
+	textIndexCache      map[string]*gamedata.TextSearchIndex
 
 	// 更新日志视图状态
 	changelogFS        fs.FS
@@ -514,6 +565,13 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 		diffPage:           1,
 		diffPageStr:        "1",
 		diffIconCache:      make(map[string]*ui.Bitmap),
+		diffTextExpanded:   make(map[string]bool),
+		textSearchScope:    gamedata.TextScopeAll,
+		textSearchPage:     1,
+		textSearchPageSize: 50,
+		textSearchPageStr:  "1",
+		textSearchExpanded: make(map[uint32]bool),
+		textIndexCache:     make(map[string]*gamedata.TextSearchIndex),
 		changelogCatFilter: "all",
 		changelogDocs:      make(map[i18n.Lang]changelog.Document),
 		changelogCollapsed: make(map[string]bool),
@@ -524,18 +582,21 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 			"de":  true,
 			"fr":  true,
 		},
-		exportDirDraft:       cfg.ExportOutputDir,
-		iconGroupListW:       iconGroupListDefWidth,
-		iconQuery:            gamedata.IconSearchQuery{GroupID: -1, VariantFilter: "all"},
-		iconGridSelIdx:       -1,
-		selectedIconID:       -1,
-		iconPreviewCache:     make(map[string]*cachedIconPreview),
-		iconTileCache:        newIconTileBitmapCache(900),
-		iconExportDirDraft:   cfg.IconExportOutputDir,
-		iconExportIncludeStd: true,
-		iconExportIncludeHR1: true,
-		iconExportVariants:   make(map[string]bool),
-		langCache:            make(map[i18n.Lang]*langSessionCache),
+		exportDirDraft:        cfg.ExportOutputDir,
+		iconGroupListW:        iconGroupListDefWidth,
+		iconQuery:             gamedata.IconSearchQuery{GroupID: -1, VariantFilter: "all"},
+		iconGridSelIdx:        -1,
+		selectedIconID:        -1,
+		iconPreviewCache:      make(map[string]*cachedIconPreview),
+		iconTileCache:         newIconTileBitmapCache(900),
+		iconExportDirDraft:    cfg.IconExportOutputDir,
+		iconExportIncludeStd:  true,
+		iconExportIncludeHR1:  true,
+		iconExportVariants:    make(map[string]bool),
+		diffExportDirDraft:    cfg.DiffExportOutputDir,
+		diffExportPreferHR1:   true,
+		diffExportAudioFormat: exporter.DiffAudioOGG,
+		langCache:             make(map[i18n.Lang]*langSessionCache),
 		updaterClient: updater.NewClient(updater.Options{
 			CurrentVersion: appVersion,
 		}),
@@ -952,6 +1013,8 @@ func (a *App) switchTabSideEffects(next activeTab) {
 		a.ensureRecentSelection()
 	case tabFavorites:
 		a.ensureFavoriteSelection()
+	case tabTextSearch:
+		a.ensureTextSearchReady()
 	}
 }
 
@@ -966,7 +1029,7 @@ func (a *App) panelRadius(c *ui.Context) float32 {
 
 // windowBackground 返回根窗口画布色（启用 Mica/Vibrancy 时保持通透，否则回退中性底色）。
 func (a *App) windowBackground(t uiTokens) ui.Color {
-	if a.vibrancy && !a.mapOpen && !a.exportOpen && !a.iconExportOpen && !a.iconLightboxOpen && !a.updateModalOpen {
+	if a.vibrancy && !a.mapOpen && !a.exportOpen && !a.iconExportOpen && !a.iconLightboxOpen && !a.updateModalOpen && !a.snapMgrOpen && !a.diffExportOpen {
 		if t.dark {
 			return ui.Transparent
 		}
@@ -983,11 +1046,13 @@ func (a *App) View(c *ui.Context) {
 		// 驱动加载页已用时间秒数平稳刷新
 		c.After(150 * time.Millisecond)
 	case modeReady:
-		// 播放音乐或执行后台批量导出时提升刷新频率，确保进度条与时间计数平滑推进
+		// 播放音乐或执行后台批量导出/快照下载时提升刷新频率，确保进度条与时间计数平滑推进
 		musicPlaying := a.musicPlayer != nil && a.musicPlayer.Snapshot().Playing
 		exportRunning := (a.iconExportProgress != nil && a.iconExportProgress.IsRunning) ||
-			(a.exportProgress != nil && a.exportProgress.IsRunning)
-		if musicPlaying || exportRunning {
+			(a.exportProgress != nil && a.exportProgress.IsRunning) ||
+			(a.diffExportProgress != nil && a.diffExportProgress.IsRunning)
+		snapActive := a.diffBusy || a.snapCatalogBusy || a.snapDownID != ""
+		if musicPlaying || exportRunning || a.textSearchIdxBusy || a.textSearchBusy || snapActive {
 			c.After(120 * time.Millisecond)
 		} else {
 			c.After(time.Second)
@@ -1031,11 +1096,13 @@ func (a *App) View(c *ui.Context) {
 		})
 	}
 
-	// 全局模态弹窗层（地图预览、CSV 导出、图标导出、图标大图预览、应用检查更新）
+	// 全局模态弹窗层（地图预览、CSV 导出、图标导出、图标大图预览、版本快照管理、版本对比导出、应用检查更新）
 	a.renderMapModal(c)
 	a.renderExportModal(c)
 	a.renderIconExportModal(c)
 	a.renderIconLightboxModal(c)
+	a.renderSnapshotManagerModal(c)
+	a.renderDiffExportModal(c)
 	a.renderUpdateModal(c)
 
 	// 末尾同步 Root 背景，防止 SetTheme 重置透明材质底色
@@ -1094,30 +1161,27 @@ func (a *App) SaveAndReloadPaths(cnPath, globalPath string) bool {
 	return true
 }
 
-func (a *App) backupDirForStore(store *gamedata.Store) string {
-	return a.backupDirForStoreAndLang(store, a.Language())
-}
-
-func (a *App) backupDirForStoreAndLang(store *gamedata.Store, lang i18n.Lang) string {
-	if store != nil {
-		if store.PrimaryLang == sqpack.LangJapanese {
-			return filepath.Join(a.dataDir, "backups", "ja")
-		}
-		if store.PrimaryLang == sqpack.LangEnglish && i18n.NormalizeLang(string(lang)) == i18n.LangEN {
-			return filepath.Join(a.dataDir, "backups", "en")
-		}
-	}
-	return filepath.Join(a.dataDir, "backups")
+func (a *App) snapshotDir() string {
+	return filepath.Join(a.dataDir, "snapshots")
 }
 
 // resetLangCacheAndReaders 释放已缓存的多语言数据仓库与共享只读 SqPack 句柄，并清空贴图缓存。
 // 仅在客户端路径变更或应用退出时调用，常规切换语言不调用以保留图标与会话缓存。
 func (a *App) resetLangCacheAndReaders() {
+	a.cancelSnapshotDownload()
+	a.cancelTextSearchTasks()
+	clear(a.textIndexCache)
+	a.textSearchRes = gamedata.TextSearchResponse{}
+	a.textSearchIdxErr = ""
+	a.textSearchLang = ""
 	if a.exporterSvc != nil {
 		a.exporterSvc.Cancel()
 	}
 	if a.iconExporterSvc != nil {
 		a.iconExporterSvc.Cancel()
+	}
+	if a.diffExporterSvc != nil {
+		a.diffExporterSvc.Cancel()
 	}
 	closedSvc := make(map[*gamedata.Service]bool, len(a.langCache)+1)
 	for _, cached := range a.langCache {
@@ -1129,6 +1193,9 @@ func (a *App) resetLangCacheAndReaders() {
 		}
 		if cached.iconExporterSvc != nil {
 			cached.iconExporterSvc.Cancel()
+		}
+		if cached.diffExporterSvc != nil {
+			cached.diffExporterSvc.Cancel()
 		}
 		if cached.backupSvc != nil {
 			cached.backupSvc.Close()
@@ -1150,6 +1217,7 @@ func (a *App) resetLangCacheAndReaders() {
 	a.backupSvc = nil
 	a.exporterSvc = nil
 	a.iconExporterSvc = nil
+	a.diffExporterSvc = nil
 	a.status = nil
 	a.versionStatus = nil
 
@@ -1171,6 +1239,9 @@ func (a *App) resetLangCacheAndReaders() {
 	clear(a.diffIconCache)
 	a.iconExportTaskCountKey = ""
 	a.iconLightboxOpen = false
+	a.diffExportOpen = false
+	a.diffExportProgress = nil
+	a.diffExportError = ""
 }
 
 func (a *App) buildLangSessionState(
@@ -1192,23 +1263,21 @@ func (a *App) buildLangSessionState(
 	svc := gamedata.NewService(store)
 	status := svc.GetSystemStatus()
 
-	backupDir := a.backupDirForStoreAndLang(store, loadLang)
-	bSvc := backup.NewService(store, backupDir)
+	bSvc := backup.NewService(store, a.snapshotDir())
 	bSvc.SetLang(loadLang)
-	vStatus, bErr := bSvc.InitializeOnStartup()
-	if bErr != nil {
-		vStatus = bSvc.GetVersionStatus()
-	}
+	vStatus := bSvc.GetVersionStatus()
 
 	sm := exporter.NewSchemaManager(a.schemasFS)
 	expSvc := exporter.NewService(store.CNReader, store.GlobalReader, sm)
 	iconExpSvc := exporter.NewIconService(svc)
+	diffExpSvc := exporter.NewDiffService(svc, bSvc)
 
 	state := &langSessionCache{
 		service:         svc,
 		backupSvc:       bSvc,
 		exporterSvc:     expSvc,
 		iconExporterSvc: iconExpSvc,
+		diffExporterSvc: diffExpSvc,
 		status:          status,
 		versionStatus:   vStatus,
 		exportTotalShts: expSvc.TotalSheetCount(),
@@ -1243,15 +1312,19 @@ func (a *App) activateLangState(state *langSessionCache, preserveSelection bool)
 	a.backupSvc = state.backupSvc
 	a.exporterSvc = state.exporterSvc
 	a.iconExporterSvc = state.iconExporterSvc
+	a.diffExporterSvc = state.diffExporterSvc
+	if a.diffExporterSvc == nil && a.backupSvc != nil {
+		a.diffExporterSvc = exporter.NewDiffService(a.service, a.backupSvc)
+	}
 	a.status = &st
 	a.versionStatus = &vst
 	a.dismissUpdateBanner = false
 	a.exportTotalShts = state.exportTotalShts
 	if a.backupSvc != nil {
 		a.backupSvc.SetLang(a.Language())
-		if a.win != nil {
-			a.backupSvc.StartBackgroundBlobSync()
-		}
+		freshStatus := a.backupSvc.ReloadLocalSnapshots()
+		a.versionStatus = &freshStatus
+		vst = freshStatus
 	}
 	a.syncAvailableExportLangs()
 	a.syncAvailableIconExportVariants()
@@ -1323,11 +1396,28 @@ func (a *App) activateLangState(state *langSessionCache, preserveSelection bool)
 
 	a.refreshRecentAndFavoriteDetails()
 
-	a.diffToVer = vst.CurrentVersion
-	a.diffFromVer = vst.PreviousVersion
+	if !preserveSelection || a.diffRegion == "" ||
+		(a.diffRegion == snapshot.RegionCN && !vst.HasCN) ||
+		(a.diffRegion == snapshot.RegionGlobal && !vst.HasGlobal) {
+		a.diffRegion = vst.DefaultRegion
+	}
+	a.diffFromVer, a.diffToVer = vst.DefaultPairForRegion(a.diffRegion)
 	a.diffPage = 1
 	a.diffPageStr = "1"
-	a.refreshDiff()
+	if a.diffFromVer != "" && a.diffToVer != "" {
+		a.refreshDiff()
+	} else {
+		a.diffError = ""
+		a.diffRes = &backup.VersionDiffResponse{
+			NeedsDownload: true,
+			Region:        a.diffRegion,
+			FromID:        a.diffFromVer,
+			ToID:          a.diffToVer,
+			Page:          1,
+			TotalPages:    1,
+		}
+	}
+	a.syncTextSearchOnLangChange()
 	a.refreshGlobalSearch()
 }
 
@@ -1444,7 +1534,6 @@ func (a *App) startAsyncLoadWithTarget(cfg config.AppConfig, returnTab activeTab
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		dispatchProgress(loadStageSnapshot, 0, 0, i18n.T(loadLang, "loading.checking_snapshot"))
 		return state, cnR, glR, nil
 	}
 
@@ -1475,8 +1564,6 @@ func (a *App) startAsyncLoadWithTarget(cfg config.AppConfig, returnTab activeTab
 		a.mode = modeReady
 		if a.loadReturnTab == tabSettings {
 			a.tab = tabSettings
-		} else if state.versionStatus.HasVersionUpdate {
-			a.tab = tabDiff
 		} else {
 			a.tab = tabWorkbench
 		}
@@ -1938,6 +2025,13 @@ func (a *App) jumpToModuleSearch(target activeTab) {
 		a.diffSearch = q
 		a.diffPage = 1
 		a.refreshDiff()
+	case tabTextSearch:
+		a.textSearchQ = q
+		a.textSearchSheet = ""
+		a.textSearchPage = 1
+		a.textSearchPageStr = "1"
+		a.ensureTextSearchReady()
+		a.runTextSearch(false)
 	default:
 		target = tabWorkbench
 		a.itemQuery.Q = q
@@ -1989,15 +2083,68 @@ func (a *App) inspectIconFromOtherTab(iconID int) {
 	a.navigateTab(tabIcons)
 }
 
+func (a *App) switchDiffRegion(region string) {
+	norm := snapshot.NormalizeRegion(region)
+	if a.versionStatus != nil {
+		if norm == snapshot.RegionCN && !a.versionStatus.HasCN {
+			return
+		}
+		if norm == snapshot.RegionGlobal && !a.versionStatus.HasGlobal {
+			return
+		}
+	}
+	if a.diffRegion == norm {
+		return
+	}
+	prevFrom := a.diffFromVer
+	prevTo := a.diffToVer
+	a.diffRegion = norm
+	if a.versionStatus != nil {
+		backups := a.versionStatus.BackupsForRegion(norm)
+		hasInRegion := func(id string) bool {
+			for _, b := range backups {
+				if b.ID == id {
+					return true
+				}
+			}
+			return false
+		}
+		defFrom, defTo := a.versionStatus.DefaultPairForRegion(norm)
+		if hasInRegion(prevFrom) {
+			a.diffFromVer = prevFrom
+		} else {
+			a.diffFromVer = defFrom
+		}
+		if hasInRegion(prevTo) {
+			a.diffToVer = prevTo
+		} else {
+			a.diffToVer = defTo
+		}
+		if a.diffFromVer == a.diffToVer && defFrom != "" && defFrom != a.diffToVer {
+			a.diffFromVer = defFrom
+		}
+	}
+	a.diffPage = 1
+	a.diffPageStr = "1"
+	a.diffScroll.Y = 0
+	a.refreshDiff()
+}
+
 func (a *App) refreshDiff() {
 	if a.backupSvc == nil {
 		return
 	}
+	if a.diffEntity == "text" && a.diffFilter == "added" {
+		a.diffFilter = "all"
+	}
 	pageSize := 25
 	if a.diffEntity == "icon" {
 		pageSize = 120
+	} else if a.diffEntity == "text" {
+		pageSize = 30
 	}
-	res, err := a.backupSvc.CompareVersions(backup.VersionDiffQuery{
+	query := backup.VersionDiffQuery{
+		Region:     a.diffRegion,
 		From:       a.diffFromVer,
 		To:         a.diffToVer,
 		Filter:     a.diffFilter,
@@ -2005,50 +2152,279 @@ func (a *App) refreshDiff() {
 		Q:          a.diffSearch,
 		Page:       a.diffPage,
 		PageSize:   pageSize,
-	})
-	if err != nil {
-		a.diffError = a.tf("diff.err_compare", "err", err.Error())
-		return
 	}
-	a.diffError = ""
-	a.diffRes = &res
-	a.diffPage = res.Page
-	a.diffPageStr = strconv.Itoa(res.Page)
-	a.diffScroll.Y = 0
-}
-
-// refreshVersionBackup 手动刷新当前客户端版本快照；在有窗口时异步执行，避免阻塞界面并明确提示成功或失败。
-func (a *App) refreshVersionBackup() {
-	if a.backupSvc == nil || a.diffBusy {
-		return
-	}
-	a.diffBusy = true
-	a.diffError = ""
-	a.diffNotice = ""
+	a.diffSeq++
+	seq := a.diffSeq
 	svc := a.backupSvc
 
-	apply := func(st backup.VersionStatusResponse, err error) {
-		a.diffBusy = false
-		if err != nil {
-			a.diffError = a.tf("diff.err_refresh", "err", err.Error())
+	apply := func(res backup.VersionDiffResponse, err error) {
+		if a.diffSeq != seq || a.backupSvc != svc {
 			return
 		}
-		a.versionStatus = &st
-		a.diffNotice = a.tf("diff.notice_refreshed", "version", st.CurrentVersion)
-		a.refreshDiff()
+		a.diffBusy = false
+		if err != nil {
+			a.diffError = a.tf("diff.err_compare", "err", err.Error())
+			return
+		}
+		a.diffError = ""
+		a.diffRes = &res
+		a.diffPage = res.Page
+		a.diffPageStr = strconv.Itoa(res.Page)
+		a.diffScroll.Y = 0
+		clear(a.diffTextExpanded)
 	}
 
 	if a.win == nil {
-		st, err := svc.CreateOrRefreshBackup()
+		res, err := svc.CompareVersions(query)
+		apply(res, err)
+		return
+	}
+
+	a.diffBusy = true
+	a.diffError = ""
+	go func() {
+		res, err := svc.CompareVersions(query)
+		a.dispatchUI(func() {
+			apply(res, err)
+		})
+	}()
+}
+
+func (a *App) openSnapshotManager() {
+	a.langPopoverOpen = false
+	a.statusPopoverOpen = false
+	a.globalSearchOpen = false
+	a.snapMgrOpen = true
+	a.snapMgrError = ""
+	a.snapMgrNotice = ""
+	if !a.snapCatalogTried && !a.snapCatalogBusy {
+		a.refreshSnapshotCatalog(false)
+	}
+}
+
+func (a *App) syncVersionStatus(st backup.VersionStatusResponse) {
+	cp := st
+	a.versionStatus = &cp
+	if a.langCache != nil {
+		if cached, ok := a.langCache[a.Language()]; ok && cached != nil {
+			cached.versionStatus = st
+		}
+	}
+	if a.diffRegion == "" ||
+		(a.diffRegion == snapshot.RegionCN && !st.HasCN) ||
+		(a.diffRegion == snapshot.RegionGlobal && !st.HasGlobal) {
+		a.diffRegion = st.DefaultRegion
+	}
+	backups := st.BackupsForRegion(a.diffRegion)
+	defFrom, defTo := st.DefaultPairForRegion(a.diffRegion)
+
+	// 如果尚未选定对比版本且当前区服已有可用快照，自动填入推荐组合
+	if a.diffToVer == "" && defTo != "" {
+		a.diffToVer = defTo
+	}
+	if a.diffFromVer == "" && defFrom != "" {
+		a.diffFromVer = defFrom
+	}
+	// 校验当前选中的快照是否仍存在于当前区服可用列表，若被删除则自动回退
+	hasID := func(id string) bool {
+		if id == "" {
+			return false
+		}
+		for _, b := range backups {
+			if b.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	if a.diffFromVer != "" && !hasID(a.diffFromVer) {
+		a.diffFromVer = defFrom
+	}
+	if a.diffToVer != "" && !hasID(a.diffToVer) {
+		a.diffToVer = defTo
+	}
+}
+
+func (a *App) refreshSnapshotCatalog(manual bool) {
+	if a.backupSvc == nil || a.snapCatalogBusy {
+		return
+	}
+	a.snapCatalogTried = true
+	a.snapCatalogBusy = true
+	if manual {
+		a.snapMgrError = ""
+		a.snapMgrNotice = ""
+	}
+	svc := a.backupSvc
+
+	apply := func(st backup.VersionStatusResponse, err error) {
+		a.snapCatalogBusy = false
+		if a.backupSvc != svc {
+			return
+		}
+		a.syncVersionStatus(st)
+		if err != nil {
+			if manual || !st.CatalogLoaded {
+				a.snapMgrError = a.tf("diff.snap_err_catalog", "err", err.Error())
+			}
+			return
+		}
+		a.snapMgrError = ""
+	}
+
+	if a.win == nil {
+		st, err := svc.RefreshCatalog(context.Background())
 		apply(st, err)
 		return
 	}
 	go func() {
-		st, err := svc.CreateOrRefreshBackup()
-		a.win.Update(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		st, err := svc.RefreshCatalog(ctx)
+		a.dispatchUI(func() {
 			apply(st, err)
 		})
 	}()
+}
+
+func (a *App) startSnapshotDownload(patch, displayName string) {
+	if a.backupSvc == nil || a.snapDownID != "" || patch == "" {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.snapDownID = patch
+	a.snapDownName = displayName
+	a.snapDownBytes = 0
+	a.snapDownTotal = 0
+	a.snapDownCancel = cancel
+	a.snapMgrError = ""
+	a.snapMgrNotice = ""
+	svc := a.backupSvc
+
+	apply := func(st backup.VersionStatusResponse, err error) {
+		if a.snapDownID != patch {
+			return
+		}
+		a.snapDownID = ""
+		a.snapDownName = ""
+		a.snapDownBytes = 0
+		a.snapDownTotal = 0
+		a.snapDownCancel = nil
+		if a.backupSvc != svc {
+			return
+		}
+		a.syncVersionStatus(st)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				a.snapMgrError = a.tf("diff.snap_err_download", "err", err.Error())
+			}
+			return
+		}
+		a.snapMgrNotice = a.tf("diff.snap_notice_downloaded", "name", displayName)
+		a.diffNotice = a.snapMgrNotice
+		if a.diffFromVer == "" || (a.diffRes != nil && a.diffRes.NeedsDownload) {
+			backups := st.BackupsForRegion(a.diffRegion)
+			hasPatch := false
+			for _, b := range backups {
+				if b.ID == patch {
+					hasPatch = true
+					break
+				}
+			}
+			defFrom, defTo := st.DefaultPairForRegion(a.diffRegion)
+			if hasPatch {
+				a.diffFromVer = patch
+			} else {
+				a.diffFromVer = defFrom
+			}
+			if a.diffToVer == "" {
+				a.diffToVer = defTo
+			}
+			a.diffPage = 1
+			a.refreshDiff()
+		}
+	}
+
+	onProgress := func(down, total int64) {
+		a.dispatchUI(func() {
+			if a.snapDownID == patch {
+				a.snapDownBytes = down
+				a.snapDownTotal = total
+			}
+		})
+	}
+
+	if a.win == nil {
+		st, err := svc.DownloadVersion(ctx, patch, onProgress)
+		apply(st, err)
+		return
+	}
+	go func() {
+		st, err := svc.DownloadVersion(ctx, patch, onProgress)
+		a.dispatchUI(func() {
+			apply(st, err)
+		})
+	}()
+}
+
+func (a *App) cancelSnapshotDownload() {
+	if a.snapDownCancel != nil {
+		a.snapDownCancel()
+		a.snapDownCancel = nil
+	}
+	a.snapDownID = ""
+	a.snapDownName = ""
+	a.snapDownBytes = 0
+	a.snapDownTotal = 0
+}
+
+func (a *App) deleteLocalSnapshot(patch, displayName string) {
+	if a.backupSvc == nil || patch == "" || patch == backup.LiveVersionID {
+		return
+	}
+	st, err := a.backupSvc.DeleteVersion(patch)
+	if err != nil {
+		a.snapMgrError = a.tf("diff.snap_err_delete", "err", err.Error())
+		return
+	}
+	a.snapMgrError = ""
+	a.snapMgrNotice = a.tf("diff.snap_notice_deleted", "name", displayName)
+	a.syncVersionStatus(st)
+	a.diffPage = 1
+	a.refreshDiff()
+}
+
+func (a *App) selectSnapshotAsFrom(patch string) {
+	if patch == "" {
+		return
+	}
+	if a.versionStatus != nil {
+		inRegion := func(reg string) bool {
+			for _, b := range a.versionStatus.BackupsForRegion(reg) {
+				if b.ID == patch {
+					return true
+				}
+			}
+			return false
+		}
+		if !inRegion(a.diffRegion) {
+			other := snapshot.RegionGlobal
+			if a.diffRegion == snapshot.RegionGlobal {
+				other = snapshot.RegionCN
+			}
+			if inRegion(other) {
+				a.diffRegion = other
+			}
+		}
+		_, defTo := a.versionStatus.DefaultPairForRegion(a.diffRegion)
+		if a.diffToVer == "" {
+			a.diffToVer = defTo
+		}
+	}
+	a.diffFromVer = patch
+	a.diffPage = 1
+	a.snapMgrOpen = false
+	a.refreshDiff()
 }
 
 func (a *App) openMap(marker MapMarkerData) {

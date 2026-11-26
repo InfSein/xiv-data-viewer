@@ -83,8 +83,8 @@ func TestFirstRunSetupAndSettingsFlow(t *testing.T) {
 		t.Fatalf("期望加载完成后进入 modeReady，实际: %v (err=%q)", app.mode, app.draftError)
 	}
 
-	// 验证左侧菜单精简结构：【数据】成就、物品；【对比】版本对比；【设置】
-	for _, want := range []string{"数据", "成就", "物品", "对比", "版本对比", "设置"} {
+	// 验证左侧菜单精简结构：【数据】成就、物品；【工具】版本对比、文本检索；【设置】
+	for _, want := range []string{"数据", "成就", "物品", "工具", "版本对比", "文本检索", "设置"} {
 		if !tt.HasText(want) {
 			t.Fatalf("左侧精简导航缺少预期文案 %q", want)
 		}
@@ -398,25 +398,23 @@ func TestQuestLeveAndCollectablesViews(t *testing.T) {
 	}
 
 	// 验证版本 Diff 体现任务、理符与收藏品变更及详情跳转
-	backupDir := filepath.Join(dataDir, "backups")
+	snapDir := filepath.Join(dataDir, "snapshots")
 	oldStore := &gamedata.Store{
 		PrimaryVersion: "2026.10.01",
 		ItemSummaries: []gamedata.ItemSummary{
 			{ID: 44099, NameCn: "收藏用图拉尔菠萝蛋糕", CategoryName: "食品", ItemLevel: 690},
 		},
 	}
-	if _, err := backup.NewService(oldStore, backupDir).InitializeOnStartup(); err != nil {
-		t.Fatalf("构建旧版本快照失败: %v", err)
-	}
-	bSvc := backup.NewService(store, backupDir)
-	vst, err := bSvc.InitializeOnStartup()
-	if err != nil {
-		t.Fatalf("构建当前版本快照失败: %v", err)
-	}
+	bSvc := backup.NewService(store, snapDir)
+	bSvc.RegisterMemorySnapshot(backup.MemorySnapshot{
+		Region: "cn", Patch: "7.55", Version: "2026.10.01",
+		Store: oldStore,
+	})
+	vst := bSvc.GetVersionStatus()
 	app.backupSvc = bSvc
 	app.versionStatus = &vst
-	app.diffFromVer = vst.PreviousVersion
-	app.diffToVer = vst.CurrentVersion
+	app.diffRegion = vst.DefaultRegion
+	app.diffFromVer, app.diffToVer = vst.DefaultPairForRegion(app.diffRegion)
 	app.refreshDiff()
 
 	if err := tt.Click("版本对比"); err != nil {
@@ -759,7 +757,7 @@ func TestSetupModesDiagnosisAndLoadingView(t *testing.T) {
 		t.Fatalf("双引号路径规范化失败")
 	}
 
-	// 7. 验证加载页三阶段展示
+	// 7. 验证加载页两阶段展示（不再在启动时执行本地版本快照校验）
 	app.mode = modeLoading
 	app.loadingCNVer = "2026.11.01.0000.0000"
 	app.loadingGlobalVer = "2026.11.02.0000.0000"
@@ -769,10 +767,13 @@ func TestSetupModesDiagnosisAndLoadingView(t *testing.T) {
 	app.loadSheetsTotal = 92
 	app.loadingStatusTxt = "正在读取游戏数据表..."
 	tt.Frame()
-	for _, want := range []string{"正在读取本地游戏数据", "只读模式", "读取游戏原始数据表", "46 / 92 张表", "构建物品、配方与任务索引", "校验本地版本快照"} {
+	for _, want := range []string{"正在读取本地游戏数据", "只读模式", "读取游戏原始数据表", "46 / 92 张表", "构建物品、配方与任务索引"} {
 		if !tt.HasText(want) {
 			t.Fatalf("加载页缺少预期文案 %q: %v", want, tt.Texts())
 		}
+	}
+	if tt.HasText("校验本地版本快照") {
+		t.Fatalf("加载页不应再展示本地版本快照阶段: %v", tt.Texts())
 	}
 }
 
@@ -1340,15 +1341,18 @@ func TestWelcomeAndSettingsLanguageSwitchAndPersistence(t *testing.T) {
 		t.Fatalf("设置页切换英语状态异常: lang=%q mode=%v tab=%v texts=%v", app.Language(), app.mode, app.tab, tt.Texts())
 	}
 
-	// 3. 验证国际服日语 / 英语与中文版本快照目录隔离
-	if got := app.backupDirForStore(&gamedata.Store{PrimaryLang: sqpack.LangChineseSimplified}); got != filepath.Join(dataDir, "backups") {
-		t.Fatalf("中文快照目录异常: %q", got)
+	// 3. 验证统一在线快照目录与不同语言主数据区服识别
+	if got := app.snapshotDir(); got != filepath.Join(dataDir, "snapshots") {
+		t.Fatalf("在线快照目录异常: %q", got)
 	}
-	if got := app.backupDirForStore(&gamedata.Store{PrimaryLang: sqpack.LangJapanese}); got != filepath.Join(dataDir, "backups", "ja") {
-		t.Fatalf("日语快照目录应独立隔离: %q", got)
+	if got := (&gamedata.Store{PrimaryLang: sqpack.LangChineseSimplified, HasCN: true}).DataRegion(); got != "cn" {
+		t.Fatalf("中文主数据区服应识别为 cn，实际: %q", got)
 	}
-	if got := app.backupDirForStore(&gamedata.Store{PrimaryLang: sqpack.LangEnglish}); got != filepath.Join(dataDir, "backups", "en") {
-		t.Fatalf("英语模式下国际服快照目录应独立隔离: %q", got)
+	if got := (&gamedata.Store{PrimaryLang: sqpack.LangJapanese, HasGlobal: true}).DataRegion(); got != "global" {
+		t.Fatalf("日语主数据区服应识别为 global，实际: %q", got)
+	}
+	if got := (&gamedata.Store{PrimaryLang: sqpack.LangEnglish, HasGlobal: true}).DataRegion(); got != "global" {
+		t.Fatalf("英语主数据区服应识别为 global，实际: %q", got)
 	}
 }
 
@@ -1788,16 +1792,14 @@ func TestGlobalSearchAndBuiltInPageSearchBars(t *testing.T) {
 		AchievementCategoryList: cats,
 	}
 
-	backupDir := filepath.Join(dataDir, "backups")
+	snapDir := filepath.Join(dataDir, "snapshots")
 	oldStore := &gamedata.Store{PrimaryVersion: "2026.10.01"}
-	if _, err := backup.NewService(oldStore, backupDir).InitializeOnStartup(); err != nil {
-		t.Fatal(err)
-	}
-	bSvc := backup.NewService(store, backupDir)
-	vst, err := bSvc.InitializeOnStartup()
-	if err != nil {
-		t.Fatal(err)
-	}
+	bSvc := backup.NewService(store, snapDir)
+	bSvc.RegisterMemorySnapshot(backup.MemorySnapshot{
+		Region: "cn", Patch: "7.55", Version: "2026.10.01",
+		Store: oldStore,
+	})
+	vst := bSvc.GetVersionStatus()
 
 	svc := gamedata.NewService(store)
 	st := svc.GetSystemStatus()
@@ -1805,8 +1807,8 @@ func TestGlobalSearchAndBuiltInPageSearchBars(t *testing.T) {
 	app.status = &st
 	app.backupSvc = bSvc
 	app.versionStatus = &vst
-	app.diffFromVer = vst.PreviousVersion
-	app.diffToVer = vst.CurrentVersion
+	app.diffRegion = vst.DefaultRegion
+	app.diffFromVer, app.diffToVer = vst.DefaultPairForRegion(app.diffRegion)
 	app.mode = modeReady
 	app.tab = tabWorkbench
 	app.refreshItemList()
@@ -2785,12 +2787,12 @@ func TestHistoryRecentAndFavoritesWorkflow(t *testing.T) {
 
 	tt := ui.NewTester(app.View, 1366, 768)
 
-	// 1. 验证侧栏存在「历史」分组及下属「最近」「收藏」两个菜单，且位于「成就」之下、「对比」之上
+	// 1. 验证侧栏存在「历史」分组及下属「最近」「收藏」两个菜单，且位于「成就」之下、「工具」之上
 	histHdr, okHist := tt.Find("历史")
 	recentNav, okRec := tt.Find("最近")
 	favNav, okFav := tt.Find("收藏")
 	achNav, okAch := tt.Find("成就")
-	cmpHdr, okCmp := tt.Find("对比")
+	cmpHdr, okCmp := tt.Find("工具")
 	if !okHist || !okRec || !okFav || !okAch || !okCmp {
 		t.Fatalf("侧栏缺少历史菜单组或最近/收藏菜单: hist=%v rec=%v fav=%v ach=%v cmp=%v", okHist, okRec, okFav, okAch, okCmp)
 	}

@@ -41,18 +41,31 @@ description: >-
    - 在三份文件顶部均保留空的 `## [Unreleased]` 区块，供后续任务继续自动记录。
 3. 若本次 diff 新增或删除了功能模块且尚未同步到 `ARCHITECTURE.md`，一并补充完整。
 
-## 5. 发版前全量校验
+## 5. 发版前全量校验（与 CI/Release 对齐）
 
-版本号与文档同步完成后，在项目根目录执行以下命令（Windows 下设置 `$env:GOFLAGS = "-tags=mygo_nowebview"`，任一步失败则先修复再重跑）：
+版本号与文档同步完成后，推送 `master` 前必须在项目根目录完成以下全部校验（Windows 下设置 `$env:GOFLAGS = "-tags=mygo_nowebview"`，任一步失败则立即修复并重跑）：
 
-1. 格式检查与自动修复：`gofmt -w main.go schemas_embed.go internal` 后确认 `gofmt -l main.go schemas_embed.go internal` 输出为空；
-2. 静态检查：`go vet . ./internal/...` 与 `go tool mygo vet .`；
-3. 自动化测试：`go test -count=1 . ./internal/...`（确保最终提交前的代码、版本号改动与内嵌资源全量通过）。
+1. **版本与清单一致性校验**：
+   - 验证 `mygo.json` 包含非空 `name`、`slug`、`identifier`、`version`，且 `version` 匹配 `^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$`；
+   - 验证 `package.json`（`version`）、`mygo.json`（`version`）与 `main.go`（`appVersion`）三处版本号完全一致为 `x.y.z`；
+   - 验证 `CHANGELOG.md`、`docs/CHANGELOG.en.md` 与 `docs/CHANGELOG.ja.md` 顶部均保留空的 `## [Unreleased]` 且包含 `## [x.y.z] - YYYY-MM-DD`。
+2. **格式与模块依赖校验**：
+   - 执行 `gofmt -w main.go schemas_embed.go resources internal cmd` 后确认 `gofmt -l main.go schemas_embed.go resources internal cmd` 输出为空；
+   - 执行 `go mod verify` 确认模块校验通过。
+3. **静态分析与生产编译预检**：
+   - 执行 `go vet ./...` 与 `go tool mygo vet .`；
+   - 执行无安装包生产构建预检：`MYGO_LDFLAGS="-X main.appVersion=x.y.z"` 环境下运行 `go tool mygo build -skip-installer -platform windows/amd64`，确认可执行文件能正常编译通过，随后清理临时生成的 `build/` 目录（严禁将构建产物提交进仓库）。
+4. **全量测试与 `-race` 竞态检测（强制过门）**：
+   - **优先本机 `-race`**：若本机具备 CGO 编译环境（有 `gcc`/`clang`）或可用的 WSL/Docker Linux Go 环境，必须运行 `go test -race -count=1 . ./internal/...`；
+   - **本机无 `-race` 环境时的 CI 预检兜底**（例如 Windows 未安装 C 编译器）：
+     1. 先在本地运行 `go test -count=1 ./...` 确认全部通过，并重点排查本次涉及 goroutine / 并发 worker / 测试回调的代码是否存在未同步共享状态；
+     2. 创建或保留提交后，**先推送到临时验证分支**（例如 `git push origin HEAD:refs/heads/ci-check-vx.y.z`）以触发 `.github/workflows/ci.yml`（在 Ubuntu 上执行 `go test -race` 及 Windows 双架构打包构建）；
+     3. 使用 `gh run watch` 等待该 CI 运行全部通过后，立即删除远端临时分支（`git push origin --delete ci-check-vx.y.z`）；若失败则修复问题并 `git commit --amend` 后重新预检，**严禁在 `-race` 未通过前将提交推入 `master`**。
 
 ## 6. 提交并推送至远程仓库
 
-1. 执行 `git add -A` 暂存全部变更（含已更新的 Submodule 指针），用 `git status` 确认无误且未混入 `.env`、构建产物或临时文件。
-2. 创建 Commit：
+1. 执行 `git add -A` 暂存全部变更（含已更新的 Submodule 指针），用 `git status` 确认无误且未混入 `.env`、`build/` 构建产物或临时文件。
+2. 创建 Commit（若已通过临时验证分支预检且工作区无新修改，直接复用已验证的 Commit 即可）：
    - **标题**：严格为 `Version x.y.z`（例如 `Version 2.0.1`）
    - **正文**：使用**极简英文**，每条更改以 `* `（星号加空格）开头，一行一条概括核心改动，不要中文或长句。示例：
      ```text
@@ -64,6 +77,8 @@ description: >-
    - Windows PowerShell 下建议将 UTF-8（无 BOM）提交信息写入 `.git/RELEASE_COMMIT_MSG`，执行 `git commit -F .git/RELEASE_COMMIT_MSG` 后删除 `.git/RELEASE_COMMIT_MSG`。
 3. 推送至当前分支对应的远端分支（如 `git push origin master`）：
    - 注意：`.github/workflows/release.yml` 会在 `master` 收到推送时自动构建 Windows 安装包、便携包并创建/更新 `vx.y.z` GitHub Release；**切勿**同时手动执行 `git push origin vx.y.z`，避免触发两次并发 Release 工作流。
+4. **推送后流水线确认**：
+   - 若本机已安装并登录 `gh` CLI，推送 `master` 后执行 `gh run list --limit 3` / `gh run watch` 确认对应的 `Release Windows Client` 工作流成功启动并通过（如遇异常及时定位汇报）。
 
 ## 7. 结果汇报
 

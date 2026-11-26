@@ -100,7 +100,9 @@ type Store struct {
 	CNReader      *sqpack.GameReader
 	GlobalReader  *sqpack.GameReader
 	PrimaryReader *sqpack.GameReader
+	EXDReader     sqpack.FileReader
 	TextureCache  *sqpack.TextureCache
+	SchemasFS     fs.FS
 
 	HasCN          bool
 	HasGlobal      bool
@@ -381,6 +383,20 @@ type StoreLoadOptions struct {
 	OnProgress    func(LoadProgress)
 }
 
+// DataRegion 返回当前主数据源所属区服（"cn" 或 "global"），用于匹配 GitHub 版本快照。
+func (s *Store) DataRegion() string {
+	if s == nil {
+		return "cn"
+	}
+	if s.PrimaryLang == sqpack.LangJapanese || s.PrimaryLang == sqpack.LangEnglish {
+		return "global"
+	}
+	if !s.HasCN && s.HasGlobal {
+		return "global"
+	}
+	return "cn"
+}
+
 // DataVersion 返回当前主数据语言对应客户端的版本号，用于版本快照目录与对比隔离。
 func (s *Store) DataVersion() string {
 	if s == nil {
@@ -458,6 +474,91 @@ func LoadGameDataStoreForLang(resolved *config.ResolvedPaths, schemasFS fs.FS, a
 	})
 }
 
+// SnapshotStoreOptions 控制从历史 .xivsnap 快照构建只读 Store 的选项。
+type SnapshotStoreOptions struct {
+	AppLang          i18n.Lang
+	Region           string // "cn" | "global"
+	Version          string
+	BGMDigests       map[int]BGMDigest
+	PresetFileExists map[string]bool
+	OnProgress       func(LoadProgress)
+}
+
+// LoadGameDataStoreFromSnapshot 直接使用与本地客户端相同的解析引擎，从 .xivsnap 快照构建只读内存 Store。
+func LoadGameDataStoreFromSnapshot(snapReader sqpack.FileReader, schemasFS fs.FS, opts SnapshotStoreOptions) (*Store, error) {
+	if snapReader == nil {
+		return nil, fmt.Errorf("未提供有效的快照读取器")
+	}
+	appLang := i18n.NormalizeLang(string(opts.AppLang))
+	region := strings.ToLower(strings.TrimSpace(opts.Region))
+	var cnEXD, globalEXD sqpack.FileReader
+	var primaryLang sqpack.Language
+	var hasCN, hasGlobal bool
+	var cnVer, globalVer string
+
+	if region == "global" {
+		hasGlobal = true
+		globalVer = opts.Version
+		globalEXD = snapReader
+		if appLang == i18n.LangJA {
+			primaryLang = sqpack.LangJapanese
+		} else {
+			primaryLang = sqpack.LangEnglish
+		}
+	} else {
+		hasCN = true
+		cnVer = opts.Version
+		cnEXD = snapReader
+		primaryLang = sqpack.LangChineseSimplified
+	}
+
+	return loadGameDataStoreCore(coreStoreLoadInput{
+		appLang:          appLang,
+		schemasFS:        schemasFS,
+		primaryEXD:       snapReader,
+		cnEXD:            cnEXD,
+		globalEXD:        globalEXD,
+		primaryLang:      primaryLang,
+		hasCN:            hasCN,
+		hasGlobal:        hasGlobal,
+		cnVer:            cnVer,
+		globalVer:        globalVer,
+		primaryVer:       opts.Version,
+		presetBGMDigests: opts.BGMDigests,
+		presetFileExists: opts.PresetFileExists,
+		skipIcons:        true,
+		onProgress:       opts.OnProgress,
+	})
+}
+
+type coreStoreLoadInput struct {
+	appLang          i18n.Lang
+	schemasFS        fs.FS
+	cnReader         *sqpack.GameReader
+	globalReader     *sqpack.GameReader
+	primaryReader    *sqpack.GameReader
+	openedCN         bool
+	openedGlobal     bool
+	sharedReaders    bool
+	primaryEXD       sqpack.FileReader
+	cnEXD            sqpack.FileReader
+	globalEXD        sqpack.FileReader
+	primaryLang      sqpack.Language
+	hasCN            bool
+	hasGlobal        bool
+	cnVer            string
+	globalVer        string
+	primaryVer       string
+	cnPath           string
+	globalPath       string
+	base             *Store
+	texCache         *sqpack.TextureCache
+	presetBGMDigests map[int]BGMDigest
+	presetFileExists map[string]bool
+	skipIcons        bool
+	onProgress       func(LoadProgress)
+}
+
 // LoadGameDataStoreWithOptions 按给定选项加载客户端数据，支持在切换语言时复用只读档案句柄与语言无关表。
 func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.FS, opts StoreLoadOptions) (*Store, error) {
 	if resolved == nil || (!resolved.HasCN() && !resolved.HasGlobal()) {
@@ -465,9 +566,7 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 	}
 
 	appLang := i18n.NormalizeLang(string(opts.AppLang))
-	onProgress := opts.OnProgress
 	base := opts.BaseStore
-	startTime := time.Now()
 
 	var cnReader, globalReader *sqpack.GameReader
 	var openedCN, openedGlobal bool
@@ -530,7 +629,54 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		}
 	}
 
-	reuseNone := base != nil && base.PrimaryReader == primaryReader && base.langNone != nil
+	var cnEXD, globalEXD sqpack.FileReader
+	if cnReader != nil {
+		cnEXD = cnReader
+	}
+	if globalReader != nil {
+		globalEXD = globalReader
+	}
+	return loadGameDataStoreCore(coreStoreLoadInput{
+		appLang:       appLang,
+		schemasFS:     schemasFS,
+		cnReader:      cnReader,
+		globalReader:  globalReader,
+		primaryReader: primaryReader,
+		openedCN:      openedCN,
+		openedGlobal:  openedGlobal,
+		sharedReaders: opts.SharedReaders,
+		primaryEXD:    primaryReader,
+		cnEXD:         cnEXD,
+		globalEXD:     globalEXD,
+		primaryLang:   primaryLang,
+		hasCN:         resolved.HasCN(),
+		hasGlobal:     resolved.HasGlobal(),
+		cnVer:         cnVer,
+		globalVer:     globalVer,
+		primaryVer:    resolved.VersionForClient(primaryReader == globalReader),
+		cnPath:        cnPath,
+		globalPath:    globalPath,
+		base:          base,
+		texCache:      texCache,
+		onProgress:    opts.OnProgress,
+	})
+}
+
+func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
+	appLang := in.appLang
+	schemasFS := in.schemasFS
+	cnReader := in.cnReader
+	globalReader := in.globalReader
+	primaryReader := in.primaryReader
+	primaryEXD := in.primaryEXD
+	cnEXD := in.cnEXD
+	globalEXD := in.globalEXD
+	primaryLang := in.primaryLang
+	base := in.base
+	onProgress := in.onProgress
+	startTime := time.Now()
+
+	reuseNone := base != nil && primaryReader != nil && base.PrimaryReader == primaryReader && base.langNone != nil
 	reusePrim := reuseNone && base.PrimaryLang == primaryLang && base.langPrimary != nil &&
 		base.CNReader == cnReader && base.GlobalReader == globalReader
 
@@ -605,7 +751,7 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		errMu.Unlock()
 	}
 
-	loadSheet := func(reader *sqpack.GameReader, sheet string, lang sqpack.Language, cols []int, dst *map[int]sqpack.Row) {
+	loadSheet := func(reader sqpack.FileReader, sheet string, lang sqpack.Language, cols []int, dst *map[int]sqpack.Row) {
 		if reader == nil {
 			*dst = make(map[int]sqpack.Row)
 			return
@@ -620,7 +766,7 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		})
 	}
 
-	loadSub := func(reader *sqpack.GameReader, sheet string, lang sqpack.Language, dst *map[int][]sqpack.SubRow) {
+	loadSub := func(reader sqpack.FileReader, sheet string, lang sqpack.Language, dst *map[int][]sqpack.SubRow) {
 		if reader == nil {
 			*dst = make(map[int][]sqpack.SubRow)
 			return
@@ -635,7 +781,7 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		})
 	}
 
-	loadSchema := func(reader *sqpack.GameReader, sheet string, lang sqpack.Language, fields []string, dst **sqpack.SchemaSheet) {
+	loadSchema := func(reader sqpack.FileReader, sheet string, lang sqpack.Language, fields []string, dst **sqpack.SchemaSheet) {
 		if reader == nil || schemasFS == nil {
 			return
 		}
@@ -649,7 +795,7 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		})
 	}
 
-	loadSchemaSub := func(reader *sqpack.GameReader, sheet string, lang sqpack.Language, dst **sqpack.SchemaSubrowSheet) {
+	loadSchemaSub := func(reader sqpack.FileReader, sheet string, lang sqpack.Language, dst **sqpack.SchemaSubrowSheet) {
 		if reader == nil || schemasFS == nil {
 			return
 		}
@@ -728,68 +874,68 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		cutscenes = bn.cutscenes
 		eventSystemDefines = bn.eventSystemDefines
 	} else {
-		loadSheet(primaryReader, "EquipSlotCategory", sqpack.LangNone, nil, &rawEquipSlots)
-		loadSheet(primaryReader, "ItemRepairResource", sqpack.LangNone, nil, &rawRepairResources)
-		loadSheet(primaryReader, "ItemAction", sqpack.LangNone, nil, &itemActions)
-		loadSheet(primaryReader, "ItemFood", sqpack.LangNone, nil, &itemFoods)
-		loadSheet(primaryReader, "Recipe", sqpack.LangNone, nil, &recipes)
-		loadSheet(primaryReader, "RecipeLevelTable", sqpack.LangNone, nil, &recipeLevelTables)
-		loadSheet(primaryReader, "GatheringItem", sqpack.LangNone, nil, &gatheringItems)
-		loadSub(primaryReader, "GatheringItemPoint", sqpack.LangNone, &gatheringItemPointSubrows)
-		loadSheet(primaryReader, "GatheringPoint", sqpack.LangNone, nil, &gatheringPoints)
-		loadSheet(primaryReader, "GatheringPointBase", sqpack.LangNone, nil, &gatheringPointBases)
-		loadSheet(primaryReader, "ExportedGatheringPoint", sqpack.LangNone, nil, &exportedGatheringPoints)
-		loadSheet(primaryReader, "GatheringPointTransient", sqpack.LangNone, nil, &gatheringPointTransients)
-		loadSheet(primaryReader, "GatheringRarePopTimeTable", sqpack.LangNone, nil, &gatheringRarePopTimeTables)
-		loadSheet(primaryReader, "GatheringItemLevelConvertTable", sqpack.LangNone, nil, &rawGatheringItemLevels)
-		loadSheet(primaryReader, "TerritoryType", sqpack.LangNone, nil, &territoryTypes)
-		loadSheet(primaryReader, "Map", sqpack.LangNone, nil, &maps)
-		loadSheet(primaryReader, "SpearfishingNotebook", sqpack.LangNone, nil, &spearfishingNotebooks)
-		loadSub(primaryReader, "GilShopItem", sqpack.LangNone, &gilShopItems)
-		loadSub(primaryReader, "GCScripShopItem", sqpack.LangNone, &gcScripShopItems)
-		loadSheet(primaryReader, "TomestonesItem", sqpack.LangNone, nil, &tomestonesItems)
-		loadSheet(primaryReader, "ENpcBase", sqpack.LangNone, nil, &enpcBases)
-		loadSheet(primaryReader, "PreHandler", sqpack.LangNone, nil, &preHandlers)
-		loadSheet(primaryReader, "InclusionShop", sqpack.LangNone, nil, &inclusionShops)
-		loadSub(primaryReader, "InclusionShopSeries", sqpack.LangNone, &inclusionSeries)
-		loadSheet(primaryReader, "CustomTalk", sqpack.LangNone, nil, &customTalks)
-		loadSheet(primaryReader, "Level", sqpack.LangNone, nil, &levels)
-		loadSheet(primaryReader, "Cabinet", sqpack.LangNone, nil, &rawCabinets)
-		loadSheet(primaryReader, "RetainerTask", sqpack.LangNone, nil, &retainerTasks)
-		loadSheet(primaryReader, "RetainerTaskNormal", sqpack.LangNone, nil, &retainerTaskNormals)
-		loadSheet(primaryReader, "RetainerTaskParameter", sqpack.LangNone, nil, &retainerTaskParameters)
+		loadSheet(primaryEXD, "EquipSlotCategory", sqpack.LangNone, nil, &rawEquipSlots)
+		loadSheet(primaryEXD, "ItemRepairResource", sqpack.LangNone, nil, &rawRepairResources)
+		loadSheet(primaryEXD, "ItemAction", sqpack.LangNone, nil, &itemActions)
+		loadSheet(primaryEXD, "ItemFood", sqpack.LangNone, nil, &itemFoods)
+		loadSheet(primaryEXD, "Recipe", sqpack.LangNone, nil, &recipes)
+		loadSheet(primaryEXD, "RecipeLevelTable", sqpack.LangNone, nil, &recipeLevelTables)
+		loadSheet(primaryEXD, "GatheringItem", sqpack.LangNone, nil, &gatheringItems)
+		loadSub(primaryEXD, "GatheringItemPoint", sqpack.LangNone, &gatheringItemPointSubrows)
+		loadSheet(primaryEXD, "GatheringPoint", sqpack.LangNone, nil, &gatheringPoints)
+		loadSheet(primaryEXD, "GatheringPointBase", sqpack.LangNone, nil, &gatheringPointBases)
+		loadSheet(primaryEXD, "ExportedGatheringPoint", sqpack.LangNone, nil, &exportedGatheringPoints)
+		loadSheet(primaryEXD, "GatheringPointTransient", sqpack.LangNone, nil, &gatheringPointTransients)
+		loadSheet(primaryEXD, "GatheringRarePopTimeTable", sqpack.LangNone, nil, &gatheringRarePopTimeTables)
+		loadSheet(primaryEXD, "GatheringItemLevelConvertTable", sqpack.LangNone, nil, &rawGatheringItemLevels)
+		loadSheet(primaryEXD, "TerritoryType", sqpack.LangNone, nil, &territoryTypes)
+		loadSheet(primaryEXD, "Map", sqpack.LangNone, nil, &maps)
+		loadSheet(primaryEXD, "SpearfishingNotebook", sqpack.LangNone, nil, &spearfishingNotebooks)
+		loadSub(primaryEXD, "GilShopItem", sqpack.LangNone, &gilShopItems)
+		loadSub(primaryEXD, "GCScripShopItem", sqpack.LangNone, &gcScripShopItems)
+		loadSheet(primaryEXD, "TomestonesItem", sqpack.LangNone, nil, &tomestonesItems)
+		loadSheet(primaryEXD, "ENpcBase", sqpack.LangNone, nil, &enpcBases)
+		loadSheet(primaryEXD, "PreHandler", sqpack.LangNone, nil, &preHandlers)
+		loadSheet(primaryEXD, "InclusionShop", sqpack.LangNone, nil, &inclusionShops)
+		loadSub(primaryEXD, "InclusionShopSeries", sqpack.LangNone, &inclusionSeries)
+		loadSheet(primaryEXD, "CustomTalk", sqpack.LangNone, nil, &customTalks)
+		loadSheet(primaryEXD, "Level", sqpack.LangNone, nil, &levels)
+		loadSheet(primaryEXD, "Cabinet", sqpack.LangNone, nil, &rawCabinets)
+		loadSheet(primaryEXD, "RetainerTask", sqpack.LangNone, nil, &retainerTasks)
+		loadSheet(primaryEXD, "RetainerTaskNormal", sqpack.LangNone, nil, &retainerTaskNormals)
+		loadSheet(primaryEXD, "RetainerTaskParameter", sqpack.LangNone, nil, &retainerTaskParameters)
 		if schemasFS != nil {
-			loadSchemaSub(primaryReader, "QuestClassJobReward", sqpack.LangNone, &questClassJobRewards)
-			loadSchema(primaryReader, "EventIconType", sqpack.LangNone, []string{"NpcIconAvailable"}, &eventIconTypes)
-			loadSchema(primaryReader, "ParamGrow", sqpack.LangNone, []string{"ExpToNext", "ScaledQuestXP"}, &paramGrows)
-			loadSchema(primaryReader, "BeastRankBonus", sqpack.LangNone, nil, &beastRankBonuses)
-			loadSchema(primaryReader, "InstanceContent", sqpack.LangNone, []string{"ContentFinderCondition", "BGM", "WinBGM"}, &instanceContents)
-			loadSchema(primaryReader, "CraftLeve", sqpack.LangNone, nil, &craftLeves)
-			loadSchema(primaryReader, "GatheringLeve", sqpack.LangNone, nil, &gatheringLeves)
-			loadSchema(primaryReader, "GatheringLeveRoute", sqpack.LangNone, nil, &gatheringLeveRoutes)
-			loadSchema(primaryReader, "BattleLeve", sqpack.LangNone, nil, &battleLeves)
-			loadSchema(primaryReader, "CompanyLeve", sqpack.LangNone, nil, &companyLeves)
-			loadSchema(primaryReader, "LeveRewardItem", sqpack.LangNone, nil, &leveRewardItems)
-			loadSchema(primaryReader, "LeveRewardItemGroup", sqpack.LangNone, nil, &leveRewardItemGroups)
-			loadSchemaSub(primaryReader, "CollectablesShopItem", sqpack.LangNone, &collectablesShopItems)
-			loadSchema(primaryReader, "CollectablesShopRefine", sqpack.LangNone, nil, &collectablesShopRefines)
-			loadSchema(primaryReader, "CollectablesShopRewardItem", sqpack.LangNone, nil, &collectablesShopRewardItems)
-			loadSchema(primaryReader, "CollectablesShopRewardScrip", sqpack.LangNone, nil, &collectablesShopRewardScrips)
-			loadSchema(primaryReader, "SatisfactionNpc", sqpack.LangNone, nil, &satisfactionNpcs)
-			loadSchemaSub(primaryReader, "SatisfactionSupply", sqpack.LangNone, &satisfactionSupplies)
-			loadSchema(primaryReader, "SatisfactionSupplyReward", sqpack.LangNone, nil, &satisfactionRewards)
-			loadSchema(primaryReader, "HWDCrafterSupply", sqpack.LangNone, nil, &hwdSupplies)
-			loadSchema(primaryReader, "HWDCrafterSupplyReward", sqpack.LangNone, nil, &hwdRewards)
-			loadSchema(primaryReader, "BGM", sqpack.LangNone, nil, &bgmSheet)
-			loadSchema(primaryReader, "BGMSituation", sqpack.LangNone, nil, &bgmSituations)
-			loadSchema(primaryReader, "BGMSwitch", sqpack.LangNone, nil, &bgmSwitches)
-			loadSchema(primaryReader, "BGMSystemDefine", sqpack.LangNone, nil, &bgmSystemDefines)
-			loadSchema(primaryReader, "OrchestrionPath", sqpack.LangNone, nil, &orchPaths)
-			loadSchema(primaryReader, "OrchestrionUiparam", sqpack.LangNone, nil, &orchUiparams)
-			loadSchema(primaryReader, "GFATE", sqpack.LangNone, []string{"BGM", "Type"}, &gfates)
-			loadSchema(primaryReader, "GFateType", sqpack.LangNone, []string{"Name"}, &gfateTypes)
-			loadSchema(primaryReader, "Cutscene", sqpack.LangNone, []string{"Path"}, &cutscenes)
-			loadSchema(primaryReader, "EventSystemDefine", sqpack.LangNone, []string{"Text", "DefineValue"}, &eventSystemDefines)
+			loadSchemaSub(primaryEXD, "QuestClassJobReward", sqpack.LangNone, &questClassJobRewards)
+			loadSchema(primaryEXD, "EventIconType", sqpack.LangNone, []string{"NpcIconAvailable"}, &eventIconTypes)
+			loadSchema(primaryEXD, "ParamGrow", sqpack.LangNone, []string{"ExpToNext", "ScaledQuestXP"}, &paramGrows)
+			loadSchema(primaryEXD, "BeastRankBonus", sqpack.LangNone, nil, &beastRankBonuses)
+			loadSchema(primaryEXD, "InstanceContent", sqpack.LangNone, []string{"ContentFinderCondition", "BGM", "WinBGM"}, &instanceContents)
+			loadSchema(primaryEXD, "CraftLeve", sqpack.LangNone, nil, &craftLeves)
+			loadSchema(primaryEXD, "GatheringLeve", sqpack.LangNone, nil, &gatheringLeves)
+			loadSchema(primaryEXD, "GatheringLeveRoute", sqpack.LangNone, nil, &gatheringLeveRoutes)
+			loadSchema(primaryEXD, "BattleLeve", sqpack.LangNone, nil, &battleLeves)
+			loadSchema(primaryEXD, "CompanyLeve", sqpack.LangNone, nil, &companyLeves)
+			loadSchema(primaryEXD, "LeveRewardItem", sqpack.LangNone, nil, &leveRewardItems)
+			loadSchema(primaryEXD, "LeveRewardItemGroup", sqpack.LangNone, nil, &leveRewardItemGroups)
+			loadSchemaSub(primaryEXD, "CollectablesShopItem", sqpack.LangNone, &collectablesShopItems)
+			loadSchema(primaryEXD, "CollectablesShopRefine", sqpack.LangNone, nil, &collectablesShopRefines)
+			loadSchema(primaryEXD, "CollectablesShopRewardItem", sqpack.LangNone, nil, &collectablesShopRewardItems)
+			loadSchema(primaryEXD, "CollectablesShopRewardScrip", sqpack.LangNone, nil, &collectablesShopRewardScrips)
+			loadSchema(primaryEXD, "SatisfactionNpc", sqpack.LangNone, nil, &satisfactionNpcs)
+			loadSchemaSub(primaryEXD, "SatisfactionSupply", sqpack.LangNone, &satisfactionSupplies)
+			loadSchema(primaryEXD, "SatisfactionSupplyReward", sqpack.LangNone, nil, &satisfactionRewards)
+			loadSchema(primaryEXD, "HWDCrafterSupply", sqpack.LangNone, nil, &hwdSupplies)
+			loadSchema(primaryEXD, "HWDCrafterSupplyReward", sqpack.LangNone, nil, &hwdRewards)
+			loadSchema(primaryEXD, "BGM", sqpack.LangNone, nil, &bgmSheet)
+			loadSchema(primaryEXD, "BGMSituation", sqpack.LangNone, nil, &bgmSituations)
+			loadSchema(primaryEXD, "BGMSwitch", sqpack.LangNone, nil, &bgmSwitches)
+			loadSchema(primaryEXD, "BGMSystemDefine", sqpack.LangNone, nil, &bgmSystemDefines)
+			loadSchema(primaryEXD, "OrchestrionPath", sqpack.LangNone, nil, &orchPaths)
+			loadSchema(primaryEXD, "OrchestrionUiparam", sqpack.LangNone, nil, &orchUiparams)
+			loadSchema(primaryEXD, "GFATE", sqpack.LangNone, []string{"BGM", "Type"}, &gfates)
+			loadSchema(primaryEXD, "GFateType", sqpack.LangNone, []string{"Name"}, &gfateTypes)
+			loadSchema(primaryEXD, "Cutscene", sqpack.LangNone, []string{"Path"}, &cutscenes)
+			loadSchema(primaryEXD, "EventSystemDefine", sqpack.LangNone, []string{"Text", "DefineValue"}, &eventSystemDefines)
 		}
 	}
 
@@ -873,65 +1019,65 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		fates = bp.fates
 		goldSaucerTexts = bp.goldSaucerTexts
 	} else {
-		loadSheet(primaryReader, "Item", primaryLang, nil, &itemsPrimary)
-		if cnReader != nil && primaryLang != sqpack.LangChineseSimplified {
-			loadSheet(cnReader, "Item", sqpack.LangChineseSimplified, []int{8, 9}, &itemsCn)
+		loadSheet(primaryEXD, "Item", primaryLang, nil, &itemsPrimary)
+		if cnEXD != nil && primaryLang != sqpack.LangChineseSimplified {
+			loadSheet(cnEXD, "Item", sqpack.LangChineseSimplified, []int{8, 9}, &itemsCn)
 		}
-		if globalReader != nil {
+		if globalEXD != nil {
 			if primaryLang != sqpack.LangEnglish {
-				loadSheet(globalReader, "Item", sqpack.LangEnglish, []int{8, 9}, &itemsEn)
+				loadSheet(globalEXD, "Item", sqpack.LangEnglish, []int{8, 9}, &itemsEn)
 			}
 			if primaryLang != sqpack.LangJapanese {
-				loadSheet(globalReader, "Item", sqpack.LangJapanese, []int{8, 9}, &itemsJa)
+				loadSheet(globalEXD, "Item", sqpack.LangJapanese, []int{8, 9}, &itemsJa)
 			}
 		} else {
 			itemsEn = make(map[int]sqpack.Row)
 			itemsJa = make(map[int]sqpack.Row)
 		}
 
-		loadSheet(primaryReader, "ItemUICategory", primaryLang, nil, &rawCategories)
-		loadSheet(primaryReader, "ClassJob", primaryLang, nil, &rawClassJobs)
-		loadSheet(primaryReader, "ClassJobCategory", primaryLang, nil, &rawClassJobCategories)
-		loadSheet(primaryReader, "BaseParam", primaryLang, nil, &rawBaseParams)
-		loadSheet(primaryReader, "CraftType", primaryLang, nil, &rawCraftTypes)
-		loadSheet(primaryReader, "SecretRecipeBook", primaryLang, nil, &rawSecretBooks)
-		loadSheet(primaryReader, "GatheringType", primaryLang, nil, &rawGatheringTypes)
-		loadSheet(primaryReader, "GatheringSubCategory", primaryLang, nil, &rawGatheringSubCategories)
-		loadSheet(primaryReader, "PlaceName", primaryLang, nil, &rawPlaceNames)
-		loadSheet(primaryReader, "FishingSpot", primaryLang, nil, &fishingSpots)
-		loadSheet(primaryReader, "FishParameter", primaryLang, nil, &fishParameters)
-		loadSheet(primaryReader, "SpearfishingItem", primaryLang, nil, &spearfishingItems)
-		loadSheet(primaryReader, "GilShop", primaryLang, nil, &gilShops)
-		loadSheet(primaryReader, "SpecialShop", primaryLang, nil, &specialShops)
-		loadSheet(primaryReader, "FccShop", primaryLang, nil, &fccShops)
-		loadSheet(primaryReader, "ENpcResident", primaryLang, nil, &enpcResidents)
-		loadSheet(primaryReader, "TopicSelect", primaryLang, nil, &topicSelects)
-		loadSheet(primaryReader, "InclusionShopCategory", primaryLang, nil, &inclusionCategories)
+		loadSheet(primaryEXD, "ItemUICategory", primaryLang, nil, &rawCategories)
+		loadSheet(primaryEXD, "ClassJob", primaryLang, nil, &rawClassJobs)
+		loadSheet(primaryEXD, "ClassJobCategory", primaryLang, nil, &rawClassJobCategories)
+		loadSheet(primaryEXD, "BaseParam", primaryLang, nil, &rawBaseParams)
+		loadSheet(primaryEXD, "CraftType", primaryLang, nil, &rawCraftTypes)
+		loadSheet(primaryEXD, "SecretRecipeBook", primaryLang, nil, &rawSecretBooks)
+		loadSheet(primaryEXD, "GatheringType", primaryLang, nil, &rawGatheringTypes)
+		loadSheet(primaryEXD, "GatheringSubCategory", primaryLang, nil, &rawGatheringSubCategories)
+		loadSheet(primaryEXD, "PlaceName", primaryLang, nil, &rawPlaceNames)
+		loadSheet(primaryEXD, "FishingSpot", primaryLang, nil, &fishingSpots)
+		loadSheet(primaryEXD, "FishParameter", primaryLang, nil, &fishParameters)
+		loadSheet(primaryEXD, "SpearfishingItem", primaryLang, nil, &spearfishingItems)
+		loadSheet(primaryEXD, "GilShop", primaryLang, nil, &gilShops)
+		loadSheet(primaryEXD, "SpecialShop", primaryLang, nil, &specialShops)
+		loadSheet(primaryEXD, "FccShop", primaryLang, nil, &fccShops)
+		loadSheet(primaryEXD, "ENpcResident", primaryLang, nil, &enpcResidents)
+		loadSheet(primaryEXD, "TopicSelect", primaryLang, nil, &topicSelects)
+		loadSheet(primaryEXD, "InclusionShopCategory", primaryLang, nil, &inclusionCategories)
 
-		loadSheet(primaryReader, "Achievement", primaryLang, nil, &achievementsPrimary)
-		if cnReader != nil && primaryLang != sqpack.LangChineseSimplified {
-			loadSheet(cnReader, "Achievement", sqpack.LangChineseSimplified, []int{1, 2}, &achievementsCn)
+		loadSheet(primaryEXD, "Achievement", primaryLang, nil, &achievementsPrimary)
+		if cnEXD != nil && primaryLang != sqpack.LangChineseSimplified {
+			loadSheet(cnEXD, "Achievement", sqpack.LangChineseSimplified, []int{1, 2}, &achievementsCn)
 		}
-		if globalReader != nil {
+		if globalEXD != nil {
 			if primaryLang != sqpack.LangEnglish {
-				loadSheet(globalReader, "Achievement", sqpack.LangEnglish, []int{1, 2}, &achievementsEn)
+				loadSheet(globalEXD, "Achievement", sqpack.LangEnglish, []int{1, 2}, &achievementsEn)
 			}
 			if primaryLang != sqpack.LangJapanese {
-				loadSheet(globalReader, "Achievement", sqpack.LangJapanese, []int{1, 2}, &achievementsJa)
+				loadSheet(globalEXD, "Achievement", sqpack.LangJapanese, []int{1, 2}, &achievementsJa)
 			}
 		} else {
 			achievementsEn = make(map[int]sqpack.Row)
 			achievementsJa = make(map[int]sqpack.Row)
 		}
-		loadSheet(primaryReader, "AchievementCategory", primaryLang, nil, &rawAchievementCategories)
-		loadSheet(primaryReader, "AchievementKind", primaryLang, nil, &rawAchievementKinds)
-		loadSheet(primaryReader, "Title", primaryLang, nil, &titlesPrimary)
-		if globalReader != nil {
+		loadSheet(primaryEXD, "AchievementCategory", primaryLang, nil, &rawAchievementCategories)
+		loadSheet(primaryEXD, "AchievementKind", primaryLang, nil, &rawAchievementKinds)
+		loadSheet(primaryEXD, "Title", primaryLang, nil, &titlesPrimary)
+		if globalEXD != nil {
 			if primaryLang != sqpack.LangEnglish {
-				loadSheet(globalReader, "Title", sqpack.LangEnglish, []int{0, 1}, &titlesEn)
+				loadSheet(globalEXD, "Title", sqpack.LangEnglish, []int{0, 1}, &titlesEn)
 			}
 			if primaryLang != sqpack.LangJapanese {
-				loadSheet(globalReader, "Title", sqpack.LangJapanese, []int{0, 1}, &titlesJa)
+				loadSheet(globalEXD, "Title", sqpack.LangJapanese, []int{0, 1}, &titlesJa)
 			}
 		} else {
 			titlesEn = make(map[int]sqpack.Row)
@@ -939,67 +1085,67 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		}
 
 		if schemasFS != nil {
-			loadSchema(primaryReader, "Quest", primaryLang, questNeededFields, &questsPrimary)
-			if cnReader != nil && primaryLang != sqpack.LangChineseSimplified {
-				loadSchema(cnReader, "Quest", sqpack.LangChineseSimplified, []string{"Name"}, &questsCn)
-				loadSchema(cnReader, "Leve", sqpack.LangChineseSimplified, []string{"Name"}, &levesCn)
-				loadSchema(cnReader, "Orchestrion", sqpack.LangChineseSimplified, []string{"Name"}, &orchCn)
+			loadSchema(primaryEXD, "Quest", primaryLang, questNeededFields, &questsPrimary)
+			if cnEXD != nil && primaryLang != sqpack.LangChineseSimplified {
+				loadSchema(cnEXD, "Quest", sqpack.LangChineseSimplified, []string{"Name"}, &questsCn)
+				loadSchema(cnEXD, "Leve", sqpack.LangChineseSimplified, []string{"Name"}, &levesCn)
+				loadSchema(cnEXD, "Orchestrion", sqpack.LangChineseSimplified, []string{"Name"}, &orchCn)
 			}
-			if globalReader != nil {
+			if globalEXD != nil {
 				if primaryLang != sqpack.LangEnglish {
-					loadSchema(globalReader, "Quest", sqpack.LangEnglish, []string{"Name"}, &questsEn)
-					loadSchema(globalReader, "Leve", sqpack.LangEnglish, []string{"Name"}, &levesEn)
-					loadSchema(globalReader, "Orchestrion", sqpack.LangEnglish, []string{"Name", "Description"}, &orchEn)
-					loadSchema(globalReader, "WeddingBGM", sqpack.LangEnglish, []string{"SongName"}, &weddingBGMsEn)
+					loadSchema(globalEXD, "Quest", sqpack.LangEnglish, []string{"Name"}, &questsEn)
+					loadSchema(globalEXD, "Leve", sqpack.LangEnglish, []string{"Name"}, &levesEn)
+					loadSchema(globalEXD, "Orchestrion", sqpack.LangEnglish, []string{"Name", "Description"}, &orchEn)
+					loadSchema(globalEXD, "WeddingBGM", sqpack.LangEnglish, []string{"SongName"}, &weddingBGMsEn)
 				}
 				if primaryLang != sqpack.LangJapanese {
-					loadSchema(globalReader, "Quest", sqpack.LangJapanese, []string{"Name"}, &questsJa)
-					loadSchema(globalReader, "Leve", sqpack.LangJapanese, []string{"Name"}, &levesJa)
-					loadSchema(globalReader, "Orchestrion", sqpack.LangJapanese, []string{"Name", "Description"}, &orchJa)
-					loadSchema(globalReader, "WeddingBGM", sqpack.LangJapanese, []string{"SongName"}, &weddingBGMsJa)
+					loadSchema(globalEXD, "Quest", sqpack.LangJapanese, []string{"Name"}, &questsJa)
+					loadSchema(globalEXD, "Leve", sqpack.LangJapanese, []string{"Name"}, &levesJa)
+					loadSchema(globalEXD, "Orchestrion", sqpack.LangJapanese, []string{"Name", "Description"}, &orchJa)
+					loadSchema(globalEXD, "WeddingBGM", sqpack.LangJapanese, []string{"SongName"}, &weddingBGMsJa)
 				}
 			}
-			loadSchema(primaryReader, "JournalGenre", primaryLang, []string{"Name", "Icon", "JournalCategory"}, &journalGenres)
-			loadSchema(primaryReader, "JournalCategory", primaryLang, []string{"Name", "JournalSection"}, &journalCategories)
-			loadSchema(primaryReader, "JournalSection", primaryLang, []string{"Name"}, &journalSections)
-			loadSchema(primaryReader, "CompleteJournal", primaryLang, completeJournalNeededFields, &completeJournals)
-			loadSchema(primaryReader, "QuestRewardOther", primaryLang, []string{"Name", "Icon"}, &questRewardOthers)
-			loadSchema(primaryReader, "BeastTribe", primaryLang, []string{"Name", "CurrencyItem", "BeastRankBonus"}, &beastTribes)
-			loadSchema(primaryReader, "BeastReputationRank", primaryLang, []string{"Name"}, &beastReputationRanks)
-			loadSchema(primaryReader, "GrandCompany", primaryLang, []string{"Singular"}, &grandCompanies)
-			loadSchema(primaryReader, "ExVersion", primaryLang, []string{"Name"}, &exVersions)
-			loadSchema(primaryReader, "Mount", primaryLang, []string{"Singular", "Icon", "RideBGM"}, &mounts)
-			loadSchema(primaryReader, "Action", primaryLang, []string{"Name", "Icon"}, &actions)
-			loadSchema(primaryReader, "Emote", primaryLang, []string{"Name", "Icon"}, &emotes)
-			loadSchema(primaryReader, "GeneralAction", primaryLang, []string{"Name", "Icon"}, &generalActions)
-			loadSchema(primaryReader, "ContentFinderCondition", primaryLang, []string{"Name", "Icon"}, &contentFinderConditions)
-			loadSchema(primaryReader, "EObjName", primaryLang, []string{"Singular"}, &eobjNames)
+			loadSchema(primaryEXD, "JournalGenre", primaryLang, []string{"Name", "Icon", "JournalCategory"}, &journalGenres)
+			loadSchema(primaryEXD, "JournalCategory", primaryLang, []string{"Name", "JournalSection"}, &journalCategories)
+			loadSchema(primaryEXD, "JournalSection", primaryLang, []string{"Name"}, &journalSections)
+			loadSchema(primaryEXD, "CompleteJournal", primaryLang, completeJournalNeededFields, &completeJournals)
+			loadSchema(primaryEXD, "QuestRewardOther", primaryLang, []string{"Name", "Icon"}, &questRewardOthers)
+			loadSchema(primaryEXD, "BeastTribe", primaryLang, []string{"Name", "CurrencyItem", "BeastRankBonus"}, &beastTribes)
+			loadSchema(primaryEXD, "BeastReputationRank", primaryLang, []string{"Name"}, &beastReputationRanks)
+			loadSchema(primaryEXD, "GrandCompany", primaryLang, []string{"Singular"}, &grandCompanies)
+			loadSchema(primaryEXD, "ExVersion", primaryLang, []string{"Name"}, &exVersions)
+			loadSchema(primaryEXD, "Mount", primaryLang, []string{"Singular", "Icon", "RideBGM"}, &mounts)
+			loadSchema(primaryEXD, "Action", primaryLang, []string{"Name", "Icon"}, &actions)
+			loadSchema(primaryEXD, "Emote", primaryLang, []string{"Name", "Icon"}, &emotes)
+			loadSchema(primaryEXD, "GeneralAction", primaryLang, []string{"Name", "Icon"}, &generalActions)
+			loadSchema(primaryEXD, "ContentFinderCondition", primaryLang, []string{"Name", "Icon"}, &contentFinderConditions)
+			loadSchema(primaryEXD, "EObjName", primaryLang, []string{"Singular"}, &eobjNames)
 
-			loadSchema(primaryReader, "Leve", primaryLang, nil, &levesPrimary)
-			loadSchema(primaryReader, "LeveAssignmentType", primaryLang, []string{"Name", "Icon"}, &leveAssignmentTypes)
-			loadSchema(primaryReader, "LeveClient", primaryLang, []string{"Name"}, &leveClients)
-			loadSchema(primaryReader, "Town", primaryLang, []string{"Name", "Icon"}, &towns)
-			loadSchema(primaryReader, "LeveString", primaryLang, []string{"Objective"}, &leveStrings)
-			loadSchema(primaryReader, "GatheringLeveRule", primaryLang, []string{"Rule"}, &gatheringLeveRules)
-			loadSchema(primaryReader, "BattleLeveRule", primaryLang, []string{"Rule"}, &battleLeveRules)
-			loadSchema(primaryReader, "CompanyLeveRule", primaryLang, nil, &companyLeveRules)
-			loadSchema(primaryReader, "EventItem", primaryLang, []string{"Singular", "Name", "Icon"}, &eventItems)
-			loadSchema(primaryReader, "BNpcName", primaryLang, []string{"Singular"}, &bnpcNames)
+			loadSchema(primaryEXD, "Leve", primaryLang, nil, &levesPrimary)
+			loadSchema(primaryEXD, "LeveAssignmentType", primaryLang, []string{"Name", "Icon"}, &leveAssignmentTypes)
+			loadSchema(primaryEXD, "LeveClient", primaryLang, []string{"Name"}, &leveClients)
+			loadSchema(primaryEXD, "Town", primaryLang, []string{"Name", "Icon"}, &towns)
+			loadSchema(primaryEXD, "LeveString", primaryLang, []string{"Objective"}, &leveStrings)
+			loadSchema(primaryEXD, "GatheringLeveRule", primaryLang, []string{"Rule"}, &gatheringLeveRules)
+			loadSchema(primaryEXD, "BattleLeveRule", primaryLang, []string{"Rule"}, &battleLeveRules)
+			loadSchema(primaryEXD, "CompanyLeveRule", primaryLang, nil, &companyLeveRules)
+			loadSchema(primaryEXD, "EventItem", primaryLang, []string{"Singular", "Name", "Icon"}, &eventItems)
+			loadSchema(primaryEXD, "BNpcName", primaryLang, []string{"Singular"}, &bnpcNames)
 
-			loadSchema(primaryReader, "CollectablesShop", primaryLang, nil, &collectablesShops)
-			loadSchema(primaryReader, "CollectablesShopItemGroup", primaryLang, []string{"Name"}, &collectablesShopItemGroups)
-			loadSchema(primaryReader, "HWDCrafterSupplyTerm", primaryLang, []string{"Name"}, &hwdTerms)
-			loadSchema(primaryReader, "WeddingBGM", primaryLang, nil, &weddingBGMs)
-			loadSchema(primaryReader, "Orchestrion", primaryLang, nil, &orchPrimary)
-			loadSchema(primaryReader, "OrchestrionCategory", primaryLang, nil, &orchCategories)
-			loadSchema(primaryReader, "Fate", primaryLang, []string{"Name", "Music", "Icon"}, &fates)
-			loadSchema(primaryReader, "GoldSaucerTextData", primaryLang, []string{"Text"}, &goldSaucerTexts)
+			loadSchema(primaryEXD, "CollectablesShop", primaryLang, nil, &collectablesShops)
+			loadSchema(primaryEXD, "CollectablesShopItemGroup", primaryLang, []string{"Name"}, &collectablesShopItemGroups)
+			loadSchema(primaryEXD, "HWDCrafterSupplyTerm", primaryLang, []string{"Name"}, &hwdTerms)
+			loadSchema(primaryEXD, "WeddingBGM", primaryLang, nil, &weddingBGMs)
+			loadSchema(primaryEXD, "Orchestrion", primaryLang, nil, &orchPrimary)
+			loadSchema(primaryEXD, "OrchestrionCategory", primaryLang, nil, &orchCategories)
+			loadSchema(primaryEXD, "Fate", primaryLang, []string{"Name", "Music", "Icon"}, &fates)
+			loadSchema(primaryEXD, "GoldSaucerTextData", primaryLang, []string{"Text"}, &goldSaucerTexts)
 		}
 	}
 
-	// 3. 并发扫描客户端图标资源（语言无关，切换界面语言时直接按只读读取器复用）
+	// 3. 并发扫描客户端图标资源（语言无关，切换界面语言时直接按只读读取器复用；历史快照跳过）
 	var cnIconFiles, globalIconFiles []sqpack.IconFileEntry
-	if cnReader != nil {
+	if !in.skipIcons && cnReader != nil {
 		if base != nil && base.CNReader == cnReader && base.cnIconFiles != nil {
 			cnIconFiles = base.cnIconFiles
 		} else {
@@ -1013,7 +1159,7 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 			})
 		}
 	}
-	if globalReader != nil {
+	if !in.skipIcons && globalReader != nil {
 		if base != nil && base.GlobalReader == globalReader && base.globalIconFiles != nil {
 			globalIconFiles = base.globalIconFiles
 		} else {
@@ -1084,11 +1230,11 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		wg.Wait()
 	}
 	if firstErr != nil {
-		if !opts.SharedReaders {
-			if openedCN && cnReader != nil {
+		if !in.sharedReaders {
+			if in.openedCN && cnReader != nil {
 				_ = cnReader.Close()
 			}
-			if openedGlobal && globalReader != nil {
+			if in.openedGlobal && globalReader != nil {
 				_ = globalReader.Close()
 			}
 		}
@@ -1846,7 +1992,9 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 
 	musicIdx := buildMusicData(musicLoaderInput{
 		appLang:                 appLang,
-		primaryReader:           primaryReader,
+		primaryReader:           primaryEXD,
+		hasFileReader:           primaryReader,
+		presetFileExists:        in.presetFileExists,
 		schemasFS:               schemasFS,
 		bgmSheet:                bgmSheet,
 		bgmSituations:           bgmSituations,
@@ -1880,20 +2028,28 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 	eventSystemBGMs := buildEventSystemBGMMap(eventSystemDefines, bgmSheet)
 	bgmByFile, orchByFile := buildMusicFileLookup(musicIdx)
 
-	iconIdx := buildIconIndex(iconBuildInput{
-		primaryReader:   primaryReader,
-		cnReader:        cnReader,
-		globalReader:    globalReader,
-		cnIconFiles:     cnIconFiles,
-		globalIconFiles: globalIconFiles,
-		itemSummaries:   itemSummaries,
-		achievements:    achievements,
-		quests:          questIdx.quests,
-		leves:           leveIdx.leves,
-	})
+	var iconIdx iconIndices
+	if !in.skipIcons {
+		iconIdx = buildIconIndex(iconBuildInput{
+			primaryReader:   primaryReader,
+			cnReader:        cnReader,
+			globalReader:    globalReader,
+			cnIconFiles:     cnIconFiles,
+			globalIconFiles: globalIconFiles,
+			itemSummaries:   itemSummaries,
+			achievements:    achievements,
+			quests:          questIdx.quests,
+			leves:           leveIdx.leves,
+		})
+	}
 
 	var reusedDigests map[int]BGMDigest
-	if base != nil && base.PrimaryReader == primaryReader {
+	if len(in.presetBGMDigests) > 0 {
+		reusedDigests = make(map[int]BGMDigest, len(in.presetBGMDigests))
+		for k, v := range in.presetBGMDigests {
+			reusedDigests[k] = v
+		}
+	} else if base != nil && primaryReader != nil && base.PrimaryReader == primaryReader {
 		base.bgmDigestMu.Lock()
 		if len(base.bgmDigests) > 0 {
 			reusedDigests = make(map[int]BGMDigest, len(base.bgmDigests))
@@ -1907,6 +2063,7 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		for i := range musicIdx.bgms {
 			b := &musicIdx.bgms[i]
 			if d, ok := reusedDigests[b.ID]; ok && d.File == b.File {
+				b.FileExists = d.FileExists
 				b.FileSize = d.FileSize
 				b.ContentMD5 = d.ContentMD5
 				musicIdx.bgmByID[b.ID] = *b
@@ -1916,6 +2073,7 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		for i := range musicIdx.music {
 			if musicIdx.music[i].Kind == MusicKindBGM {
 				if d, ok := reusedDigests[musicIdx.music[i].ID]; ok && d.File == musicIdx.music[i].File {
+					musicIdx.music[i].FileExists = d.FileExists
 					musicIdx.music[i].FileSize = d.FileSize
 					musicIdx.music[i].ContentMD5 = d.ContentMD5
 				}
@@ -2080,18 +2238,20 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		CNReader:                       cnReader,
 		GlobalReader:                   globalReader,
 		PrimaryReader:                  primaryReader,
-		TextureCache:                   texCache,
-		HasCN:                          resolved.HasCN(),
-		HasGlobal:                      resolved.HasGlobal(),
-		CNVersion:                      cnVer,
-		GlobalVersion:                  globalVer,
-		PrimaryVersion:                 resolved.VersionForClient(primaryReader == globalReader),
-		CNPath:                         cnPath,
-		GlobalPath:                     globalPath,
+		EXDReader:                      primaryEXD,
+		TextureCache:                   in.texCache,
+		SchemasFS:                      schemasFS,
+		HasCN:                          in.hasCN,
+		HasGlobal:                      in.hasGlobal,
+		CNVersion:                      in.cnVer,
+		GlobalVersion:                  in.globalVer,
+		PrimaryVersion:                 in.primaryVer,
+		CNPath:                         in.cnPath,
+		GlobalPath:                     in.globalPath,
 		LoadTimeMs:                     time.Since(startTime).Milliseconds(),
 		AppLang:                        appLang,
 		PrimaryLang:                    primaryLang,
-		sharedReaders:                  opts.SharedReaders,
+		sharedReaders:                  in.sharedReaders,
 		langNone:                       savedNone,
 		langPrimary:                    savedPrim,
 		ItemsPrimary:                   itemsPrimary,

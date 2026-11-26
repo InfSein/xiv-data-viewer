@@ -19,7 +19,9 @@ var musicExpansionRe = regexp.MustCompile(`^music/ex(\d+)/`)
 
 type musicLoaderInput struct {
 	appLang                 i18n.Lang
-	primaryReader           *sqpack.GameReader
+	primaryReader           sqpack.FileReader
+	hasFileReader           *sqpack.GameReader
+	presetFileExists        map[string]bool
 	schemasFS               fs.FS
 	bgmSheet                *sqpack.SchemaSheet
 	bgmSituations           *sqpack.SchemaSheet
@@ -66,7 +68,7 @@ type musicIndices struct {
 	bgmItemOrchMap map[int]int
 }
 
-func resolveSchemaColumnIndexes(reader *sqpack.GameReader, schemasFS fs.FS, sheetName string, fields ...string) map[string]int {
+func resolveSchemaColumnIndexes(reader sqpack.FileReader, schemasFS fs.FS, sheetName string, fields ...string) map[string]int {
 	if reader == nil || schemasFS == nil || len(fields) == 0 {
 		return nil
 	}
@@ -445,7 +447,16 @@ func buildMusicData(in musicLoaderInput) musicIndices {
 	}
 
 	existsMap := make(map[string]bool, len(uniquePaths))
-	if in.primaryReader != nil && len(uniquePaths) > 0 {
+	hasExistsSource := false
+	if in.presetFileExists != nil {
+		hasExistsSource = true
+		for p, ok := range in.presetFileExists {
+			if ok {
+				existsMap[p] = true
+			}
+		}
+	} else if in.hasFileReader != nil && len(uniquePaths) > 0 {
+		hasExistsSource = true
 		paths := make([]string, 0, len(uniquePaths))
 		for p := range uniquePaths {
 			paths = append(paths, p)
@@ -463,7 +474,7 @@ func buildMusicData(in musicLoaderInput) musicIndices {
 			go func() {
 				defer wg.Done()
 				for p := range ch {
-					ok, _ := in.primaryReader.HasFile(p)
+					ok, _ := in.hasFileReader.HasFile(p)
 					if ok {
 						mu.Lock()
 						existsMap[p] = true
@@ -538,7 +549,7 @@ func buildMusicData(in musicLoaderInput) musicIndices {
 
 			usageSummary := summarizeMusicUsages(in.appLang, usages)
 			fileExists := true
-			if in.primaryReader != nil {
+			if hasExistsSource {
 				fileExists = existsMap[filePath]
 			}
 			entry := MusicEntry{
@@ -696,7 +707,7 @@ func buildMusicData(in musicLoaderInput) musicIndices {
 			}
 
 			fileExists := filePath != ""
-			if filePath != "" && in.primaryReader != nil {
+			if filePath != "" && hasExistsSource {
 				fileExists = existsMap[filePath]
 			}
 			expID, expName := inferMusicExpansion(filePath, in.exVersions, in.appLang)

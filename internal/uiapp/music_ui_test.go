@@ -43,10 +43,6 @@ func TestMusicSidebarNavigationGlobalSearchAndDiff(t *testing.T) {
 			},
 		},
 	}
-	bSvcV1 := backup.NewService(storeV1, dataDir+"/backups")
-	if _, err := bSvcV1.InitializeOnStartup(); err != nil {
-		t.Fatalf("v1 备份初始化失败: %v", err)
-	}
 
 	bgm10 := gamedata.MusicEntry{
 		Key:           "bgm:10",
@@ -131,11 +127,12 @@ func TestMusicSidebarNavigationGlobalSearchAndDiff(t *testing.T) {
 	}
 
 	svc := gamedata.NewService(storeV2)
-	bSvcV2 := backup.NewService(storeV2, dataDir+"/backups")
-	vst, err := bSvcV2.InitializeOnStartup()
-	if err != nil {
-		t.Fatalf("v2 备份初始化失败: %v", err)
-	}
+	bSvcV2 := backup.NewService(storeV2, dataDir+"/snapshots")
+	bSvcV2.RegisterMemorySnapshot(backup.MemorySnapshot{
+		Region: "cn", Patch: "7.55", Version: "2026.10.01",
+		Store: storeV1,
+	})
+	vst := bSvcV2.GetVersionStatus()
 	app.activateLangState(&langSessionCache{
 		service:       svc,
 		backupSvc:     bSvcV2,
@@ -149,13 +146,13 @@ func TestMusicSidebarNavigationGlobalSearchAndDiff(t *testing.T) {
 
 	tt := ui.NewTester(app.View, 1366, 768)
 
-	// 1. 验证侧边栏菜单顺序：【数据】 -> 成就 -> 【资源】 -> 音乐 -> 【历史】 -> 【对比】
+	// 1. 验证侧边栏菜单顺序：【数据】 -> 成就 -> 【资源】 -> 音乐 -> 【历史】 -> 【工具】
 	dataHdr, okD := tt.Find(app.t("nav.section.data"))
 	achNav, okA := tt.Find(app.t("nav.achievements"))
 	resHdr, okR := tt.Find(app.t("nav.section.resources"))
 	musicNav, okM := tt.Find(app.t("nav.music"))
 	histHdr, okH := tt.Find(app.t("nav.section.history"))
-	cmpHdr, okC := tt.Find(app.t("nav.section.compare"))
+	cmpHdr, okC := tt.Find(app.t("nav.section.tools"))
 	if !okD || !okA || !okR || !okM || !okH || !okC {
 		t.Fatalf("侧边栏菜单项缺失: %v", tt.Texts())
 	}

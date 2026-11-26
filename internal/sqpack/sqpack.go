@@ -589,6 +589,21 @@ type archiveCandidate struct {
 	useIndex2 bool
 }
 
+// FileReader 抽象只读虚拟路径文件访问能力（可由本地客户端 GameReader 或历史快照 .xivsnap 实现）。
+type FileReader interface {
+	ReadFile(resourcePath string) ([]byte, error)
+}
+
+func isNilFileReader(r FileReader) bool {
+	if r == nil {
+		return true
+	}
+	if gr, ok := r.(*GameReader); ok && gr == nil {
+		return true
+	}
+	return false
+}
+
 // GameReader 为本地 FF14 game 目录提供全仓库并发安全的只读 SqPack 文件访问能力。
 type GameReader struct {
 	gamePath string

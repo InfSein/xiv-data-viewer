@@ -4,7 +4,7 @@
 
 - **严格只读**：对 FF14 国服/国际服客户端目录仅允许只读解析，严禁写入、修改或删除任何游戏文件。
 - **路径配置**：首次启动通过引导页要求用户配置国服或国际服路径（至少其一），持久化于系统应用数据目录（`mygo.PathUserData`）的 `config.json`，禁止在源码硬编码默认客户端路径；本地集成测试可通过根目录 `.env`（参考 `.env.example`）提供 `FFXIV_CN_PATH` / `FFXIV_GLOBAL_PATH`。
-- **快照目录**：启动版本检查与快照统一保存在应用数据目录的 `backups/` 下（测试用临时目录）。
+- **快照目录**：从 GitHub 快照仓库（`InfSein/xiv-data-snapshots`）下载的 `.xivsnap` 历史快照与目录缓存统一保存在应用数据目录的 `snapshots/` 下（测试用临时目录）；客户端不再在本地自建或写入游戏数据快照。
 - **提交前校验**：须通过 `gofmt`、`go vet ./...`、`go tool mygo vet .` 与 `go test ./...`。
 - **Git 提交与推送限制**：仅在用户触发发版指令（`发版：x.y.z`）或明确同意时，才允许执行 `git commit` 或 `git push`；常规开发、修复或修改完成后严禁擅自提交或推送。
 
@@ -33,8 +33,8 @@
 
 当用户要求新增游戏数据解析项目（如任务、理符、收藏品、宠物、坐骑、副本等任何**具有稳定主键、且可能随游戏版本更新产生增删或数值改动**的数据集）时，**只要适合加入版本对比，须同步接入版本 Diff**（纯 UI 辅助映射或无独立变更对比价值的底层资源除外）：
 
-1. **快照结构与兼容性**：在 `internal/backup/backup.go` 的 `VersionBackupMeta` 与 `snapshotPayload` 中补充紧凑快照字段（独立实体使用专属切片，附属于物品或成就的子能力则以可选 `*bool` / 摘要字段挂载于原有紧凑记录上），并在启动快照检查中兼容历史快照平滑升级，避免把老版本已有数据误报为新增。
-2. **字段级对比与汇总**：在 `CompareVersions` 与 `DiffSummary` 中实现新增、变更与移除检测及清晰的中文 `ItemFieldChange` 明细；若某功能集成在现有视图（如收藏品交易集成在物品内），Diff 中也归入对应主实体记录并高亮标签，不单独拆出独立菜单。
+1. **复用原始 EXD 快照解析**：由于 `.xivsnap` 历史快照封存了全量 EXD 原始表与配套 `EXDSchema`，新增解析直接通过 `internal/gamedata/loader.go` 的共享加载流程对当前客户端和历史 `.xivsnap` 自动生效，并在 `internal/backup/backup.go` 的内存 `snapshotPayload`（`buildPayloadFromStore`）中补充对比字段即可立即支持全历史版本回溯，无需维护向后兼容的旧 JSON 升级逻辑。
+2. **字段级对比与汇总**：在 `CompareVersions` 与 `DiffSummary` 中实现新增、变更与移除检测及清晰的多语言 `ItemFieldChange` 明细；若某功能集成在现有视图（如收藏品交易集成在物品内），Diff 中也归入对应主实体记录并高亮标签，不单独拆出独立菜单。
 3. **界面与测试同步**：更新 `internal/uiapp/view_diff.go`（变更摘要统计、筛选开关、详情直跳按钮）与顶部差异检索，补充 `internal/backup/` 及 `internal/uiapp/` 单元测试，并同步更新 `ARCHITECTURE.md`。
 
 ## 5. UI 设计规范 (`framed-sheet`)
@@ -63,3 +63,5 @@
      3. 同步更新 `package.json`（`version`）、`mygo.json`（`version`）与 `main.go`（`appVersion`）为 `x.y.z`，并将 `CHANGELOG.md`、`docs/CHANGELOG.en.md` 与 `docs/CHANGELOG.ja.md` 同步归档为 `## [x.y.z] - YYYY-MM-DD`（三份文件顶部均保留空的 `## [Unreleased]`，内容同样保持面向普通用户的简练表述）；
      4. 通过 `gofmt`、`go vet`、`go tool mygo vet .` 与 `go test` 全量校验（Windows 传入 `GOFLAGS=-tags=mygo_nowebview`）；
      5. 暂存全部变更，提交标题为 `Version x.y.z`、正文为极简英文且每条以 `* ` 开头的 Commit，并推送至当前远端分支（由 `.github/workflows/release.yml` 自动根据 `mygo.json` 发布 GitHub Release，切勿同时手动推送 `vx.y.z` 标签）。
+4. **建立快照指令自动执行（`建立快照：x.y`）**：
+   - 当用户发送 `建立快照：x.y`（或 `建立快照: x.y`，例如 `建立快照：7.58` 或 `建立快照：7.58 国服`）时，自动读取并执行项目内置技能 [snapshot](.agents/skills/snapshot/SKILL.md)：严格只读地使用 `cmd/pack-snapshot` 打包 `.xivsnap` 快照，上传至独立快照仓库 `InfSein/xiv-data-snapshots` 的 GitHub Release，并更新推送其 `catalog.json`（切勿顺带提交或推送主代码仓库）。

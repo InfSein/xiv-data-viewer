@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-11-26
+
+### Added
+- **Version Diff Export**: Added an "Export" feature in Version Diff to export all entries matching the current filters (across all pages). In the "Icons" partition, batch-export icons as PNGs preferring HD assets when available (named `<IconID>.png`, e.g., `026290.png`, with an option to include previous images for modified icons); in the "Items" category, batch-export filtered item icons named `<ItemID>_<ItemName>.png` (also supported for quests, leves, achievements, and All); in "BGM", batch-export `.ogg` / `.scd` audio files; and across every category, export full filtered results as CSV spreadsheets, JSON files, or formatted Markdown reports, with both local folder and `.zip` archive options for batch resource exports.
+- **Full-Text Search & Side-by-Side Translations**: Added a new "Text Search" page under the "Tools" sidebar group to search across all game data sheets, UI strings, and story dialogue. Supports ordered fuzzy matching by default (e.g., `AD` matches `ABCD`) and contiguous exact matching when wrapped in double quotes (e.g., `"AB"`), with relevance ranking, side-by-side multilingual translations in the table whenever available, pagination, match highlighting, scope and sheet filtering, one-click text copy, and direct jumps to linked items, quests, leves, achievements, and music.
+- **Text Partition in Version Diff**: Added a dedicated "Texts" comparison partition in Version Diff (kept separate from the "All" view) focused exclusively on modified and removed game texts (excluding newly added entries), featuring inline character-level diff highlights, search and filters, pagination, and direct links to related entries.
+
+### Changed
+- **Online Version Snapshots from GitHub**: Version Diff no longer generates automatic local backups on startup; instead, it downloads historical snapshots directly from GitHub by patch version (such as `7.58` or `7.55`), automatically fetching data matching your configured CN and/or Global client(s), recognizing both clients in dual-server setups, and switching seamlessly between CN-to-CN and Global-to-Global comparisons. Added a Snapshot Manager dialog for browsing, downloading with progress, and deleting local snapshots, making app startup faster and reducing disk usage.
+- **Sidebar Group Renamed**: Renamed the "Compare" sidebar group to "Tools" to house both "Version Diff" and "Text Search".
+
 ## [2.4.0] - 2026-11-26
 
 ### Added

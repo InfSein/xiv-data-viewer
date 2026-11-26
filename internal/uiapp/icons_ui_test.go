@@ -14,6 +14,7 @@ import (
 	"github.com/InfSein/xiv-data-viewer/internal/exporter"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/InfSein/xiv-data-viewer/internal/i18n"
+	"github.com/InfSein/xiv-data-viewer/internal/snapshot"
 )
 
 func buildSyntheticIconTestStore() *gamedata.Store {
@@ -447,10 +448,6 @@ func TestIconsVersionDiffSeparatePartitionAndVisualCards(t *testing.T) {
 			},
 		},
 	}
-	if _, err := backup.NewService(storeV1, backupDir).InitializeOnStartup(); err != nil {
-		t.Fatalf("V1 快照初始化失败: %v", err)
-	}
-
 	// V2 客户端：37618 新增高清变体（变更）、新增 65001、移除 99999，新增对比道具 #200
 	storeV2 := buildSyntheticIconTestStore()
 	storeV2.PrimaryVersion = "2026.11.01.0000.0000"
@@ -459,10 +456,16 @@ func TestIconsVersionDiffSeparatePartitionAndVisualCards(t *testing.T) {
 	})
 	svcV2 := gamedata.NewService(storeV2)
 	bSvcV2 := backup.NewService(storeV2, backupDir)
-	vst, err := bSvcV2.InitializeOnStartup()
-	if err != nil {
-		t.Fatalf("V2 快照初始化失败: %v", err)
-	}
+	bSvcV2.RegisterMemorySnapshot(backup.MemorySnapshot{
+		Region: "cn", Patch: "7.55", Version: "2026.10.01.0000.0000",
+		Store: storeV1,
+		Icons: []snapshot.IconDigestRecord{
+			{ID: 37618, Digest: "v1_37618", Variants: "default:std"},
+			{ID: 37619, Digest: "mem_037619_default:std", Variants: "default:std"},
+			{ID: 99999, Digest: "v1_99999", Variants: "default:std"},
+		},
+	})
+	vst := bSvcV2.GetVersionStatus()
 
 	app := newZHApp(t, dataDir)
 	app.activateLangState(&langSessionCache{

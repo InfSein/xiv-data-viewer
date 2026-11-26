@@ -529,7 +529,10 @@ func ReadEXLFile(raw []byte) *EXLFile {
 }
 
 // LoadSheetRows 读取普通表（Variant=1）的全部行数据，按分页并发解码。
-func LoadSheetRows(reader *GameReader, sheetName string, preferredLang Language, columnIndexes []int) (map[int]Row, error) {
+func LoadSheetRows(reader FileReader, sheetName string, preferredLang Language, columnIndexes []int) (map[int]Row, error) {
+	if isNilFileReader(reader) {
+		return make(map[int]Row), nil
+	}
 	lower := strings.ToLower(sheetName)
 	exhBuf, err := reader.ReadFile("exd/" + lower + ".exh")
 	if err != nil {
@@ -595,7 +598,10 @@ func LoadSheetRows(reader *GameReader, sheetName string, preferredLang Language,
 }
 
 // LoadSubrowSheet 读取子行表（Variant=2）的全部父行及子行数据。
-func LoadSubrowSheet(reader *GameReader, sheetName string, preferredLang Language) (map[int][]SubRow, error) {
+func LoadSubrowSheet(reader FileReader, sheetName string, preferredLang Language) (map[int][]SubRow, error) {
+	if isNilFileReader(reader) {
+		return make(map[int][]SubRow), nil
+	}
 	lower := strings.ToLower(sheetName)
 	exhBuf, err := reader.ReadFile("exd/" + lower + ".exh")
 	if err != nil {

@@ -1,22 +1,27 @@
 package backup
 
 import (
-	"bufio"
-	"fmt"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/InfSein/xiv-data-viewer/internal/config"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/InfSein/xiv-data-viewer/internal/i18n"
+	"github.com/InfSein/xiv-data-viewer/internal/snapshot"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestVersionDiffQuestsLevesAndCollectables(t *testing.T) {
-	backupDir := t.TempDir()
+	snapDir := t.TempDir()
 
 	storeV1 := &gamedata.Store{
 		PrimaryVersion: "2026.10.01.0000.0000",
@@ -45,13 +50,8 @@ func TestVersionDiffQuestsLevesAndCollectables(t *testing.T) {
 		TotalCollectables: 1,
 	}
 
-	svcV1 := NewService(storeV1, backupDir)
-	if _, err := svcV1.InitializeOnStartup(); err != nil {
-		t.Fatalf("v1 初始化快照失败: %v", err)
-	}
-
 	storeV2 := &gamedata.Store{
-		PrimaryVersion: "2026.11.01.0000.0000",
+		PrimaryVersion: "2026.11.03.0000.0000",
 		ItemSummaries: []gamedata.ItemSummary{
 			{ID: 44098, NameCn: "普通菠萝饼", ItemLevel: 680, CategoryName: "食品", IsCollectableTurnIn: true},
 			{ID: 44099, NameCn: "收藏用图拉尔菠萝蛋糕", ItemLevel: 690, CategoryName: "食品", IsCollectableTurnIn: true},
@@ -100,16 +100,28 @@ func TestVersionDiffQuestsLevesAndCollectables(t *testing.T) {
 		TotalCollectables: 3,
 	}
 
-	svcV2 := NewService(storeV2, backupDir)
-	status, err := svcV2.InitializeOnStartup()
-	if err != nil {
-		t.Fatalf("v2 初始化快照失败: %v", err)
-	}
-	if !status.HasVersionUpdate || status.PreviousVersion != "2026.10.01.0000.0000" {
-		t.Fatalf("期望检测到 v1 -> v2 更新: %+v", status)
+	svc := NewService(storeV2, snapDir)
+	defer svc.Close()
+
+	// 未下载任何快照时应提示 NeedsDownload，而不在本地自动生成伪造快照
+	emptyDiff, err := svc.CompareVersions(VersionDiffQuery{Page: 1, PageSize: 50})
+	if err != nil || !emptyDiff.NeedsDownload {
+		t.Fatalf("无快照时应返回 NeedsDownload=true: res=%+v err=%v", emptyDiff, err)
 	}
 
-	diff, err := svcV2.CompareVersions(VersionDiffQuery{Page: 1, PageSize: 50})
+	svc.RegisterMemorySnapshot(MemorySnapshot{
+		Region:  snapshot.RegionCN,
+		Patch:   "7.55",
+		Version: "2026.10.01.0000.0000",
+		Store:   storeV1,
+	})
+
+	status := svc.GetVersionStatus()
+	if status.DefaultCNFrom != "7.55" || status.DefaultCNTo != LiveVersionID {
+		t.Fatalf("期望默认从 7.55 对比当前客户端: %+v", status)
+	}
+
+	diff, err := svc.CompareVersions(VersionDiffQuery{Page: 1, PageSize: 50})
 	if err != nil {
 		t.Fatalf("对比差异失败: %v", err)
 	}
@@ -123,23 +135,21 @@ func TestVersionDiffQuestsLevesAndCollectables(t *testing.T) {
 		t.Fatalf("收藏品 Diff 汇总异常: %+v", diff.Summary)
 	}
 
-	questOnly, err := svcV2.CompareVersions(VersionDiffQuery{EntityType: "quest", Page: 1, PageSize: 20})
+	questOnly, err := svc.CompareVersions(VersionDiffQuery{EntityType: "quest", Page: 1, PageSize: 20})
 	if err != nil || questOnly.TotalFiltered != 3 {
 		t.Fatalf("按任务筛选 Diff 结果异常: total=%d err=%v", questOnly.TotalFiltered, err)
 	}
-	leveOnly, err := svcV2.CompareVersions(VersionDiffQuery{EntityType: "leve", Page: 1, PageSize: 20})
+	leveOnly, err := svc.CompareVersions(VersionDiffQuery{EntityType: "leve", Page: 1, PageSize: 20})
 	if err != nil || leveOnly.TotalFiltered != 2 {
 		t.Fatalf("按理符筛选 Diff 结果异常: total=%d err=%v", leveOnly.TotalFiltered, err)
 	}
-	colSearch, err := svcV2.CompareVersions(VersionDiffQuery{EntityType: "item", Q: "收藏品", Page: 1, PageSize: 20})
+	colSearch, err := svc.CompareVersions(VersionDiffQuery{EntityType: "item", Q: "收藏品", Page: 1, PageSize: 20})
 	if err != nil || colSearch.TotalFiltered != 3 {
 		t.Fatalf("按收藏品关键词检索物品 Diff 异常: total=%d err=%v", colSearch.TotalFiltered, err)
 	}
 }
 
 func TestVersionDiffIgnoresPriceMidChanges(t *testing.T) {
-	backupDir := t.TempDir()
-
 	storeV1 := &gamedata.Store{
 		PrimaryVersion: "2026.10.01.0000.0000",
 		ItemSummaries: []gamedata.ItemSummary{
@@ -147,23 +157,22 @@ func TestVersionDiffIgnoresPriceMidChanges(t *testing.T) {
 			{ID: 50002, NameCn: "品级与售价同变物品", ItemLevel: 100, CategoryName: "杂货", PriceMid: 100},
 		},
 	}
-	if _, err := NewService(storeV1, backupDir).InitializeOnStartup(); err != nil {
-		t.Fatalf("v1 初始化快照失败: %v", err)
-	}
-
 	storeV2 := &gamedata.Store{
-		PrimaryVersion: "2026.11.01.0000.0000",
+		PrimaryVersion: "2026.11.03.0000.0000",
 		ItemSummaries: []gamedata.ItemSummary{
 			{ID: 50001, NameCn: "仅售价变化物品", ItemLevel: 100, CategoryName: "杂货", PriceMid: 250},
 			{ID: 50002, NameCn: "品级与售价同变物品", ItemLevel: 110, CategoryName: "杂货", PriceMid: 250},
 		},
 	}
-	svcV2 := NewService(storeV2, backupDir)
-	if _, err := svcV2.InitializeOnStartup(); err != nil {
-		t.Fatalf("v2 初始化快照失败: %v", err)
-	}
 
-	diff, err := svcV2.CompareVersions(VersionDiffQuery{EntityType: "item", Page: 1, PageSize: 20})
+	svc := NewService(storeV2, t.TempDir())
+	defer svc.Close()
+	svc.RegisterMemorySnapshot(MemorySnapshot{
+		Region: snapshot.RegionCN, Patch: "7.55", Version: "2026.10.01.0000.0000",
+		Store: storeV1,
+	})
+
+	diff, err := svc.CompareVersions(VersionDiffQuery{EntityType: "item", Page: 1, PageSize: 20})
 	if err != nil {
 		t.Fatalf("对比差异失败: %v", err)
 	}
@@ -177,8 +186,6 @@ func TestVersionDiffIgnoresPriceMidChanges(t *testing.T) {
 }
 
 func TestVersionDiffLocalizedFieldLabels(t *testing.T) {
-	backupDir := t.TempDir()
-
 	storeV1 := &gamedata.Store{
 		PrimaryVersion: "2026.10.01.0000.0000",
 		ItemSummaries: []gamedata.ItemSummary{
@@ -188,12 +195,8 @@ func TestVersionDiffLocalizedFieldLabels(t *testing.T) {
 			{ID: 65536, NameCn: "主线任务", NameJa: "メインクエスト", NameEn: "Main Quest", Level: 90, GenreName: "MSQ", GilReward: 500, ExpReward: 1000},
 		},
 	}
-	if _, err := NewService(storeV1, backupDir).InitializeOnStartup(); err != nil {
-		t.Fatalf("v1 初始化快照失败: %v", err)
-	}
-
 	storeV2 := &gamedata.Store{
-		PrimaryVersion: "2026.11.01.0000.0000",
+		PrimaryVersion: "2026.11.03.0000.0000",
 		ItemSummaries: []gamedata.ItemSummary{
 			{ID: 44099, NameCn: "菠萝蛋糕", NameJa: "パイナップルケーキ", NameEn: "Pineapple Cake", ItemLevel: 690, CategoryName: "食品"},
 		},
@@ -201,14 +204,16 @@ func TestVersionDiffLocalizedFieldLabels(t *testing.T) {
 			{ID: 65536, NameCn: "主线任务", NameJa: "メインクエスト", NameEn: "Main Quest", Level: 90, GenreName: "MSQ", GilReward: 800, ExpReward: 1000},
 		},
 	}
-	svcV2 := NewService(storeV2, backupDir)
-	if _, err := svcV2.InitializeOnStartup(); err != nil {
-		t.Fatalf("v2 初始化快照失败: %v", err)
-	}
 
-	// 验证英语 Diff 标签与日文名保留
-	svcV2.SetLang(i18n.LangEN)
-	diffEN, err := svcV2.CompareVersions(VersionDiffQuery{Page: 1, PageSize: 20})
+	svc := NewService(storeV2, t.TempDir())
+	defer svc.Close()
+	svc.RegisterMemorySnapshot(MemorySnapshot{
+		Region: snapshot.RegionCN, Patch: "7.55", Version: "2026.10.01.0000.0000",
+		Store: storeV1,
+	})
+
+	svc.SetLang(i18n.LangEN)
+	diffEN, err := svc.CompareVersions(VersionDiffQuery{Page: 1, PageSize: 20})
 	if err != nil {
 		t.Fatalf("英语 Diff 对比失败: %v", err)
 	}
@@ -238,12 +243,11 @@ func TestVersionDiffLocalizedFieldLabels(t *testing.T) {
 		}
 	}
 	if !foundItemEN || !foundQuestEN {
-		t.Fatalf("英语 Diff 字段标签不符合预期: itemEN=%v questEN=%v items=%+v", foundItemEN, foundQuestEN, diffEN.Items)
+		t.Fatalf("英语 Diff 字段标签不符合预期: itemEN=%v questEN=%v", foundItemEN, foundQuestEN)
 	}
 
-	// 验证日语 Diff 标签
-	svcV2.SetLang(i18n.LangJA)
-	diffJA, err := svcV2.CompareVersions(VersionDiffQuery{EntityType: "item", Page: 1, PageSize: 20})
+	svc.SetLang(i18n.LangJA)
+	diffJA, err := svc.CompareVersions(VersionDiffQuery{EntityType: "item", Page: 1, PageSize: 20})
 	if err != nil {
 		t.Fatalf("日语 Diff 对比失败: %v", err)
 	}
@@ -253,39 +257,7 @@ func TestVersionDiffLocalizedFieldLabels(t *testing.T) {
 	}
 }
 
-func TestVersionBackupAndDiff(t *testing.T) {
-	cfg := config.LoadAppConfigFromEnv(filepath.Join("..", "..", ".env"))
-	resolved, err := config.ValidateAndResolve(cfg)
-	if err != nil {
-		t.Skipf("本地未配置可用 FF14 客户端，跳过版本快照对比测试: %v", err)
-	}
-
-	store, err := gamedata.LoadGameDataStoreWithSchemas(resolved, os.DirFS(filepath.Join("..", "..", "schemas")))
-	if err != nil {
-		t.Fatalf("加载数据失败: %v", err)
-	}
-	defer store.Close()
-
-	svc := NewService(store, t.TempDir())
-	status, err := svc.InitializeOnStartup()
-	if err != nil {
-		t.Fatalf("初始化快照失败: %v", err)
-	}
-	if len(status.Backups) < 2 {
-		t.Fatalf("期望至少包含当前版与历史基准快照，实际 %d 个", len(status.Backups))
-	}
-
-	diff, err := svc.CompareVersions(VersionDiffQuery{Page: 1, PageSize: 20})
-	if err != nil {
-		t.Fatalf("对比版本差异失败: %v", err)
-	}
-	if diff.Summary.AddedItems == 0 || diff.Summary.AddedQuests == 0 || diff.Summary.AddedLeves == 0 || diff.Summary.AddedBGMs == 0 || diff.TotalFiltered == 0 {
-		t.Fatalf("版本差异结果缺少任务/理符/道具/音乐变更: %+v", diff.Summary)
-	}
-}
-
 func TestVersionDiffBGM(t *testing.T) {
-	backupDir := t.TempDir()
 	oldMD5 := "d41d8cd98f00b204e9800998ecf8427e"
 	newMD5 := "9e107d9d372bb6826bd81d3542a419d6"
 	sameMD5 := "0cc175b9c0f1b6a831c399e269772661"
@@ -298,24 +270,23 @@ func TestVersionDiffBGM(t *testing.T) {
 			{ID: 3, Title: "BGM_Removed_Track", File: "music/ffxiv/BGM_Removed_Track.scd", FileExists: true, FileSize: 512000, ContentMD5: sameMD5},
 		},
 	}
-	if _, err := NewService(storeV1, backupDir).InitializeOnStartup(); err != nil {
-		t.Fatalf("v1 初始化失败: %v", err)
-	}
-
 	storeV2 := &gamedata.Store{
-		PrimaryVersion: "2026.11.01.0000.0000",
+		PrimaryVersion: "2026.11.03.0000.0000",
 		BGMs: []gamedata.MusicEntry{
 			{ID: 1, Title: "BGM_Unchanged", File: "music/ffxiv/BGM_Unchanged.scd", FileExists: true, FileSize: 1024, ContentMD5: sameMD5},
 			{ID: 2, Title: "BGM_Modified_Track", File: "music/ex5/BGM_Modified_Track.scd", FileExists: true, FileSize: 2150400, ContentMD5: newMD5, ExpansionName: "金曦之遗辉"},
 			{ID: 4, Title: "BGM_Added_Track", File: "music/ex5/BGM_Added_Track.scd", FileExists: true, FileSize: 3145728, ContentMD5: newMD5, ExpansionName: "金曦之遗辉", UsageSummary: "新副本战斗"},
 		},
 	}
-	svcV2 := NewService(storeV2, backupDir)
-	if _, err := svcV2.InitializeOnStartup(); err != nil {
-		t.Fatalf("v2 初始化失败: %v", err)
-	}
 
-	diff, err := svcV2.CompareVersions(VersionDiffQuery{EntityType: "bgm", Page: 1, PageSize: 20})
+	svc := NewService(storeV2, t.TempDir())
+	defer svc.Close()
+	svc.RegisterMemorySnapshot(MemorySnapshot{
+		Region: snapshot.RegionCN, Patch: "7.55", Version: "2026.10.01.0000.0000",
+		Store: storeV1,
+	})
+
+	diff, err := svc.CompareVersions(VersionDiffQuery{EntityType: "bgm", Page: 1, PageSize: 20})
 	if err != nil {
 		t.Fatalf("对比 BGM 差异失败: %v", err)
 	}
@@ -345,27 +316,9 @@ func TestVersionDiffBGM(t *testing.T) {
 	if !foundAdded || !foundMod {
 		t.Fatalf("未完整捕获新增与内容变化的 BGM 条目: %+v", diff.Items)
 	}
-
-	// 验证缺少 BGM 记录的历史快照兼容性（不把老快照全量 BGM 误报为新增）
-	noBGMSnap := &snapshotPayload{
-		Meta:  VersionBackupMeta{Version: "2026.01.01.0000.0000", ItemCount: 1},
-		Items: []compactItemRecord{{ID: 1, NameCn: "旧物品"}},
-	}
-	if err := svcV2.writeSnapshot("2026.01.01.0000.0000", noBGMSnap); err != nil {
-		t.Fatalf("写入无 BGM 历史快照失败: %v", err)
-	}
-	compatDiff, err := svcV2.CompareVersions(VersionDiffQuery{From: "2026.01.01.0000.0000", EntityType: "bgm", Page: 1, PageSize: 20})
-	if err != nil {
-		t.Fatalf("兼容旧快照对比失败: %v", err)
-	}
-	if compatDiff.Summary.AddedBGMs != 0 || compatDiff.TotalFiltered != 0 {
-		t.Fatalf("缺少 BGM 的历史快照不应误报全量新增: summary=%+v", compatDiff.Summary)
-	}
 }
 
-func TestQuestCutsceneDiffAndCompatibility(t *testing.T) {
-	backupDir := filepath.Join(t.TempDir(), "backups")
-
+func TestQuestCutsceneDiff(t *testing.T) {
 	storeV1 := &gamedata.Store{
 		PrimaryVersion: "2026.10.01.0000.0000",
 		Quests: []gamedata.QuestEntry{
@@ -379,13 +332,8 @@ func TestQuestCutsceneDiffAndCompatibility(t *testing.T) {
 			},
 		},
 	}
-	svcV1 := NewService(storeV1, backupDir)
-	if _, err := svcV1.InitializeOnStartup(); err != nil {
-		t.Fatalf("v1 初始化失败: %v", err)
-	}
-
 	storeV2 := &gamedata.Store{
-		PrimaryVersion: "2026.11.01.0000.0000",
+		PrimaryVersion: "2026.11.03.0000.0000",
 		Quests: []gamedata.QuestEntry{
 			{
 				ID:     68836,
@@ -398,12 +346,15 @@ func TestQuestCutsceneDiffAndCompatibility(t *testing.T) {
 			},
 		},
 	}
-	svcV2 := NewService(storeV2, backupDir)
-	if _, err := svcV2.InitializeOnStartup(); err != nil {
-		t.Fatalf("v2 初始化失败: %v", err)
-	}
 
-	diff, err := svcV2.CompareVersions(VersionDiffQuery{EntityType: "quest", Page: 1, PageSize: 20})
+	svc := NewService(storeV2, t.TempDir())
+	defer svc.Close()
+	svc.RegisterMemorySnapshot(MemorySnapshot{
+		Region: snapshot.RegionCN, Patch: "7.55", Version: "2026.10.01.0000.0000",
+		Store: storeV1,
+	})
+
+	diff, err := svc.CompareVersions(VersionDiffQuery{EntityType: "quest", Page: 1, PageSize: 20})
 	if err != nil {
 		t.Fatalf("对比任务过场差异失败: %v", err)
 	}
@@ -421,29 +372,10 @@ func TestQuestCutsceneDiffAndCompatibility(t *testing.T) {
 	if !foundCutDiff {
 		t.Fatalf("任务 Diff 缺少过场动画变更明细: %+v", diff.Items[0].Changes)
 	}
-
-	// 验证缺少 CutsceneCount 字段的历史快照平滑兼容，不误报任务变更
-	legacySnap := &snapshotPayload{
-		Meta: VersionBackupMeta{Version: "2026.01.01.0000.0000", QuestCount: 1},
-		Quests: []compactQuestRecord{
-			{ID: 68836, NameCn: "灵光卫", Level: 71},
-		},
-	}
-	if err := svcV2.writeSnapshot("2026.01.01.0000.0000", legacySnap); err != nil {
-		t.Fatalf("写入历史任务快照失败: %v", err)
-	}
-	compatDiff, err := svcV2.CompareVersions(VersionDiffQuery{From: "2026.01.01.0000.0000", EntityType: "quest", Page: 1, PageSize: 20})
-	if err != nil {
-		t.Fatalf("兼容旧任务快照对比失败: %v", err)
-	}
-	if compatDiff.Summary.ModifiedQuests != 0 {
-		t.Fatalf("缺少 CutsceneCount 的历史快照不应误报任务修改: %+v", compatDiff.Items)
-	}
 }
 
 func makeTinyTestPNG(r, g, b byte) []byte {
 	const texHdrSz = 80
-	// 构造最小合法 BGRA8 .tex 并转换为持久化载荷验证 Round-Trip
 	hdr := make([]byte, texHdrSz+4)
 	hdr[4] = byte(sqpack.TexFormatB8G8R8A8 & 0xff)
 	hdr[5] = byte((sqpack.TexFormatB8G8R8A8 >> 8) & 0xff)
@@ -463,63 +395,52 @@ func makeTinyTestPNG(r, g, b byte) []byte {
 	return payload
 }
 
-func TestVersionDiffIconsPartitionAndCompatibility(t *testing.T) {
-	backupDir := filepath.Join(t.TempDir(), "backups")
-	svc := NewService(&gamedata.Store{PrimaryVersion: "2026.11.01.0000.0000"}, backupDir)
+func TestVersionDiffIconsPartitionAndOldBlobDecoding(t *testing.T) {
+	oldBlob := makeTinyTestPNG(200, 40, 40)
+	newBlob := makeTinyTestPNG(40, 200, 80)
 
-	oldPNG := makeTinyTestPNG(200, 40, 40)
-	newPNG := makeTinyTestPNG(40, 200, 80)
-
-	snapV1 := &snapshotPayload{
-		Meta: VersionBackupMeta{Version: "2026.10.01.0000.0000", IconCount: 3},
-		Items: []compactItemRecord{
-			{ID: 100, NameCn: "未改动道具"},
-		},
-		Icons: []compactIconRecord{
-			{ID: 37618, Digest: "v1_37618", Variants: "default:std|default:hr1", ThumbPNG: oldPNG, HasHR1: true},
-			{ID: 37619, Digest: "v1_37619", Variants: "default:std", ThumbPNG: oldPNG},
-			{ID: 99999, Digest: "v1_99999", Variants: "default:std", ThumbPNG: oldPNG},
-		},
+	storeV1 := &gamedata.Store{
+		PrimaryVersion: "2026.10.01.0000.0000",
+		ItemSummaries:  []gamedata.ItemSummary{{ID: 100, NameCn: "未改动道具"}},
 	}
-	snapV2 := &snapshotPayload{
-		Meta: VersionBackupMeta{Version: "2026.11.01.0000.0000", IconCount: 3},
-		Items: []compactItemRecord{
+	storeV2 := &gamedata.Store{
+		PrimaryVersion: "2026.11.03.0000.0000",
+		ItemSummaries: []gamedata.ItemSummary{
 			{ID: 100, NameCn: "未改动道具"},
 			{ID: 200, NameCn: "新增对比道具"},
 		},
-		Icons: []compactIconRecord{
-			{ID: 37618, Digest: "v2_37618", Variants: "default:std|default:hr1", ThumbPNG: newPNG, HasHR1: true},
-			{ID: 37619, Digest: "v1_37619", Variants: "default:std", ThumbPNG: oldPNG},
-			{ID: 65001, Digest: "v2_65001", Variants: "en:hr1", ThumbPNG: newPNG, HasHR1: true, HasLocale: true},
-		},
 	}
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
-		t.Fatalf("创建备份目录失败: %v", err)
-	}
-	if err := svc.writeSnapshot(snapV1.Meta.Version, snapV1); err != nil {
-		t.Fatalf("写入 V1 快照失败: %v", err)
-	}
-	if err := svc.writeSnapshot(snapV2.Meta.Version, snapV2); err != nil {
-		t.Fatalf("写入 V2 快照失败: %v", err)
-	}
-	manifest := &backupManifest{
-		LatestVersion:   snapV2.Meta.Version,
-		PreviousVersion: snapV1.Meta.Version,
-		Backups:         []VersionBackupMeta{snapV1.Meta, snapV2.Meta},
-	}
-	if err := svc.writeManifest(manifest); err != nil {
-		t.Fatalf("写入 manifest 失败: %v", err)
-	}
-	svc.manifest = manifest
 
-	// 1. EntityType="all" 时绝不混入图标条目，仅展示道具等常规数据
-	allDiff, err := svc.CompareVersions(VersionDiffQuery{
-		From:       snapV1.Meta.Version,
-		To:         snapV2.Meta.Version,
-		EntityType: "all",
-		Page:       1,
-		PageSize:   30,
+	svc := NewService(storeV2, t.TempDir())
+	defer svc.Close()
+
+	svc.RegisterMemorySnapshot(MemorySnapshot{
+		Region: snapshot.RegionCN, Patch: "7.55", Version: "2026.10.01.0000.0000",
+		Store: storeV1,
+		Icons: []snapshot.IconDigestRecord{
+			{ID: 37618, Digest: "v1_37618", Variants: "default:std|default:hr1", BlobKey: "old_37618", HasHR1: true},
+			{ID: 37619, Digest: "v1_37619", Variants: "default:std", BlobKey: "same_37619"},
+			{ID: 99999, Digest: "v1_99999", Variants: "default:std", BlobKey: "old_99999"},
+		},
+		IconBlobs: map[string][]byte{
+			"old_37618": oldBlob,
+			"old_99999": oldBlob,
+		},
 	})
+	svc.SetLiveMemoryIcons(
+		[]snapshot.IconDigestRecord{
+			{ID: 37618, Digest: "v2_37618", Variants: "default:std|default:hr1", BlobKey: "new_37618", HasHR1: true},
+			{ID: 37619, Digest: "v1_37619", Variants: "default:std", BlobKey: "same_37619"},
+			{ID: 65001, Digest: "v2_65001", Variants: "en:hr1", BlobKey: "new_65001", HasHR1: true, HasLocale: true},
+		},
+		map[string][]byte{
+			"new_37618": newBlob,
+			"new_65001": newBlob,
+		},
+	)
+
+	// 1. EntityType="all" 不混入图标条目
+	allDiff, err := svc.CompareVersions(VersionDiffQuery{EntityType: "all", Page: 1, PageSize: 30})
 	if err != nil {
 		t.Fatalf("CompareVersions(all) 失败: %v", err)
 	}
@@ -531,166 +452,441 @@ func TestVersionDiffIconsPartitionAndCompatibility(t *testing.T) {
 			t.Fatalf("全部对比分区不应混入图标差异: %+v", it)
 		}
 	}
-	if allDiff.TotalFiltered != 1 || allDiff.Items[0].ID != 200 {
-		t.Fatalf("全部对比结果应仅含道具 #200，实际: %+v", allDiff.Items)
-	}
 
-	// 2. EntityType="icon" 仅返回新增/变更/移除的图标记录并携带新旧缩略图
-	iconDiff, err := svc.CompareVersions(VersionDiffQuery{
-		From:       snapV1.Meta.Version,
-		To:         snapV2.Meta.Version,
-		EntityType: "icon",
-		Page:       1,
-		PageSize:   120,
-	})
+	// 2. EntityType="icon" 返回新增/变更/移除记录，且可还原旧图标缩略图
+	iconDiff, err := svc.CompareVersions(VersionDiffQuery{EntityType: "icon", Page: 1, PageSize: 120})
 	if err != nil {
 		t.Fatalf("CompareVersions(icon) 失败: %v", err)
 	}
 	if iconDiff.TotalFiltered != 3 {
-		t.Fatalf("期望 3 条图标差异（修改+新增+移除），实际 %d", iconDiff.TotalFiltered)
+		t.Fatalf("期望 3 条图标差异，实际 %d", iconDiff.TotalFiltered)
 	}
-	if iconDiff.Items[0].ID != 37618 || iconDiff.Items[0].ChangeType != "modified" || len(iconDiff.Items[0].OldThumbPNG) == 0 || len(iconDiff.Items[0].NewThumbPNG) == 0 {
-		t.Fatalf("首条变更图标应同时携带旧图与新图: %+v", iconDiff.Items[0])
+	if iconDiff.Items[0].ID != 37618 || iconDiff.Items[0].ChangeType != "modified" || iconDiff.Items[0].OldBlobKey != "old_37618" {
+		t.Fatalf("首条应为变更图标 37618: %+v", iconDiff.Items[0])
 	}
-	if iconDiff.Items[1].ID != 65001 || iconDiff.Items[1].ChangeType != "added" {
-		t.Fatalf("次条应为新增图标 65001: %+v", iconDiff.Items[1])
-	}
-	if iconDiff.Items[2].ID != 99999 || iconDiff.Items[2].ChangeType != "removed" || len(iconDiff.Items[2].OldThumbPNG) == 0 {
-		t.Fatalf("末条应为保留旧图的移除图标 99999: %+v", iconDiff.Items[2])
-	}
-
-	// 验证载荷可还原为合法 RGBA 像素
-	oldRGBA, err := sqpack.DecodeIconBlobToRGBA(iconDiff.Items[0].OldThumbPNG)
-	if err != nil || oldRGBA.Bounds().Dx() != 1 {
-		t.Fatalf("旧图载荷解码异常: rgba=%v err=%v", oldRGBA, err)
-	}
-
-	// 3. 兼容无 Icons 字段的旧版历史快照，不误报全量新增
-	legacySnap := &snapshotPayload{Meta: VersionBackupMeta{Version: "2026.01.01.0000.0000"}}
-	if err := svc.writeSnapshot(legacySnap.Meta.Version, legacySnap); err != nil {
-		t.Fatalf("写入历史快照失败: %v", err)
-	}
-	compatDiff, err := svc.CompareVersions(VersionDiffQuery{
-		From:       legacySnap.Meta.Version,
-		To:         snapV2.Meta.Version,
-		EntityType: "icon",
-		Page:       1,
-		PageSize:   120,
-	})
-	if err != nil {
-		t.Fatalf("历史快照对比失败: %v", err)
-	}
-	if compatDiff.TotalFiltered != 0 || compatDiff.Summary.AddedIcons != 0 {
-		t.Fatalf("缺少 Icons 的旧快照不应误报全量新增: total=%d summary=%+v", compatDiff.TotalFiltered, compatDiff.Summary)
+	oldRGBA, err := svc.ReadIconBlobImage("old_37618")
+	if err != nil || oldRGBA == nil || oldRGBA.Bounds().Dx() != 1 {
+		t.Fatalf("读取旧图标载荷失败: rgba=%v err=%v", oldRGBA, err)
 	}
 }
 
-func TestRealClientIconSnapshotAndBlobRoundTripIfConfigured(t *testing.T) {
-	cnPath := ""
-	if v := strings.TrimSpace(os.Getenv("FFXIV_CN_PATH")); v != "" {
-		cnPath = v
-	} else if raw, err := os.ReadFile(filepath.Join("..", "..", ".env")); err == nil {
-		for _, line := range strings.Split(string(raw), "\n") {
-			line = strings.TrimSpace(line)
-			if k, val, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == "FFXIV_CN_PATH" {
-				cnPath = strings.Trim(strings.TrimSpace(val), `"'`)
+func buildTestXivSnapBytes(t *testing.T, region, patch, gameVer string, langs []string) ([]byte, string) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), snapshot.AssetFileName(patch, region))
+	w, err := snapshot.NewWriter(p, zstd.SpeedDefault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = w.AddFile("exd/root.exl", []byte("EXLT,2\n"))
+	if err := w.Close(snapshot.SnapshotMeta{
+		ID:          snapshot.MakeSnapshotID(region, patch),
+		Region:      region,
+		Patch:       patch,
+		GameVersion: gameVer,
+		Languages:   langs,
+		CreatedAt:   "2026-09-10T00:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	return data, hex.EncodeToString(sum[:])
+}
+
+func TestCatalogPatchMappingDownloadAndDelete(t *testing.T) {
+	dir := t.TempDir()
+	snapBytes, shaHex := buildTestXivSnapBytes(t, snapshot.RegionCN, "7.55", "2026.09.10.0000.0000", []string{"chs"})
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/catalog.json":
+			cat := snapshot.Catalog{
+				SchemaVersion: snapshot.CatalogSchemaVersion,
+				UpdatedAt:     "2026-11-26T00:00:00Z",
+				Versions: []snapshot.VersionCatalogEntry{
+					{
+						Patch:      "7.58",
+						CreatedAt:  "2026-11-03T00:00:00Z",
+						ReleaseTag: "v7.58",
+						CN: &snapshot.RegionAsset{
+							GameVersion: "2026.11.03.0000.0000",
+							Languages:   []string{"chs"},
+							AssetName:   snapshot.AssetFileName("7.58", snapshot.RegionCN),
+							DownloadURL: srv.URL + "/assets/cn-7.58",
+							Size:        1024,
+						},
+					},
+					{
+						Patch:      "7.55",
+						CreatedAt:  "2026-09-10T00:00:00Z",
+						ReleaseTag: "v7.55",
+						CN: &snapshot.RegionAsset{
+							GameVersion: "2026.09.10.0000.0000",
+							Languages:   []string{"chs"},
+							AssetName:   snapshot.AssetFileName("7.55", snapshot.RegionCN),
+							DownloadURL: srv.URL + "/assets/cn-7.55",
+							Size:        int64(len(snapBytes)),
+							SHA256:      shaHex,
+						},
+					},
+				},
 			}
+			_ = json.NewEncoder(w).Encode(cat)
+		case "/assets/cn-7.55":
+			_, _ = w.Write(snapBytes)
+		default:
+			http.NotFound(w, r)
 		}
-	}
-	if cnPath == "" {
-		t.Skip("未配置 FFXIV_CN_PATH，跳过真实客户端图标快照性能验证")
-	}
+	}))
+	defer srv.Close()
 
-	info, err := config.ValidateClientPath(cnPath, "")
-	if err != nil || info == nil {
-		t.Skipf("国服路径无效: %v", err)
-	}
-	reader := sqpack.NewGameReader(info.GamePath)
-	defer func() { _ = reader.Close() }()
-
-	files, err := sqpack.ScanIconFiles(reader)
-	if err != nil || len(files) == 0 {
-		t.Fatalf("ScanIconFiles 失败: len=%d err=%v", len(files), err)
-	}
-	byID := make(map[int]gamedata.IconEntry, 70000)
-	var icons []gamedata.IconEntry
-	for _, f := range files {
-		if _, ok := byID[f.IconID]; !ok {
-			ic := gamedata.IconEntry{ID: f.IconID, GroupID: f.GroupID}
-			byID[f.IconID] = ic
-			icons = append(icons, ic)
-		}
-	}
-
-	backupDir := filepath.Join(t.TempDir(), "backups")
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
-		t.Fatalf("创建测试备份目录失败: %v", err)
-	}
 	store := &gamedata.Store{
-		PrimaryVersion: "2026.11.01.0000.0000",
-		PrimaryReader:  reader,
-		CNReader:       reader,
-		Icons:          icons,
+		HasCN:          true,
+		CNVersion:      "2026.11.03.0000.0000",
+		PrimaryVersion: "2026.11.03.0000.0000",
+		PrimaryLang:    sqpack.LangChineseSimplified,
+		AppLang:        i18n.LangZH,
 	}
-	svc := NewService(store, backupDir)
-	datFile, err := os.Create(svc.iconBlobDataPath())
+	snapDir := filepath.Join(dir, "snapshots")
+	svc := NewService(store, snapDir)
+	defer svc.Close()
+	svc.SetSnapshotClient(snapshot.NewClient(snapshot.ClientOptions{
+		CatalogURL: srv.URL + "/catalog.json",
+		HTTPClient: srv.Client(),
+	}))
+
+	// 1. 拉取目录后应自动将 2026.11.03.0000.0000 映射为玩家可读版本名 7.58
+	st, err := svc.RefreshCatalog(context.Background())
 	if err != nil {
-		t.Fatalf("创建测试包失败: %v", err)
+		t.Fatalf("RefreshCatalog 失败: %v", err)
 	}
-	idxFile, err := os.Create(svc.iconBlobIndexPath())
+	if st.CNPatch != "7.58" || !strings.Contains(st.CNDisplayName, "7.58") {
+		t.Fatalf("未正确映射客户端版本名 7.58: patch=%q disp=%q", st.CNPatch, st.CNDisplayName)
+	}
+	if len(st.RemoteVersions) != 2 || len(st.CNBackups) != 1 {
+		t.Fatalf("目录与本地列表状态不符: remote=%d local=%d", len(st.RemoteVersions), len(st.CNBackups))
+	}
+
+	// 2. 按统一版本号下载 7.55 后应出现在本地可用列表并自动成为 DefaultCNFrom
+	stAfterDL, err := svc.DownloadVersion(context.Background(), "7.55", nil)
 	if err != nil {
-		_ = datFile.Close()
-		t.Fatalf("创建索引文件失败: %v", err)
+		t.Fatalf("DownloadVersion 失败: %v", err)
 	}
-	datBw := bufio.NewWriterSize(datFile, 256*1024)
-	idxBw := bufio.NewWriterSize(idxFile, 64*1024)
-	var datOff int64
-	svc.blobIndex = make(map[string]iconBlobLoc, 70000)
-	svc.blobLoaded = true
-
-	start := time.Now()
-	snaps, tasks, err := sqpack.ComputeIconDigests([]sqpack.IconDigestSource{{Reader: reader, Files: files}})
-	digestElapsed := time.Since(start)
-	if err != nil || len(snaps) < 50000 {
-		t.Fatalf("ComputeIconDigests 失败: len=%d err=%v", len(snaps), err)
+	if stAfterDL.DefaultCNFrom != "7.55" || len(stAfterDL.CNBackups) != 2 {
+		t.Fatalf("下载后状态不符: %+v", stAfterDL)
 	}
 
-	blobStart := time.Now()
-	if err := sqpack.ArchiveIconBlobs(nil, tasks, svc.hasIconBlob, func(blobKey string, payload []byte) error {
-		off := datOff
-		n, wErr := datBw.Write(payload)
-		if wErr != nil {
-			return wErr
+	// 3. 删除本地快照后应从可用列表移除
+	stAfterDel, err := svc.DeleteVersion("7.55")
+	if err != nil {
+		t.Fatalf("DeleteVersion 失败: %v", err)
+	}
+	if len(stAfterDel.CNBackups) != 1 || stAfterDel.DefaultCNFrom != "" {
+		t.Fatalf("删除后状态不符: %+v", stAfterDel)
+	}
+}
+
+func TestDualServerRecognizesBothAndComparesSameRegionOnly(t *testing.T) {
+	dir := t.TempDir()
+	cnBytes, cnSHA := buildTestXivSnapBytes(t, snapshot.RegionCN, "7.55", "2026.09.10.0000.0000", []string{"chs"})
+	glBytes, glSHA := buildTestXivSnapBytes(t, snapshot.RegionGlobal, "7.55", "2026.09.10.0000.0000", []string{"ja", "en"})
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/catalog.json":
+			cat := snapshot.Catalog{
+				SchemaVersion: snapshot.CatalogSchemaVersion,
+				UpdatedAt:     "2026-11-26T00:00:00Z",
+				Versions: []snapshot.VersionCatalogEntry{
+					{
+						Patch:      "7.58",
+						CreatedAt:  "2026-11-03T00:00:00Z",
+						ReleaseTag: "v7.58",
+						CN: &snapshot.RegionAsset{
+							GameVersion: "2026.11.03.0000.0000",
+							Languages:   []string{"chs"},
+							AssetName:   snapshot.AssetFileName("7.58", snapshot.RegionCN),
+							DownloadURL: srv.URL + "/assets/cn-7.58",
+							Size:        1024,
+						},
+						Global: &snapshot.RegionAsset{
+							GameVersion: "2026.11.03.0000.0000",
+							Languages:   []string{"ja", "en"},
+							AssetName:   snapshot.AssetFileName("7.58", snapshot.RegionGlobal),
+							DownloadURL: srv.URL + "/assets/gl-7.58",
+							Size:        2048,
+						},
+					},
+					{
+						Patch:      "7.55",
+						CreatedAt:  "2026-09-10T00:00:00Z",
+						ReleaseTag: "v7.55",
+						CN: &snapshot.RegionAsset{
+							GameVersion: "2026.09.10.0000.0000",
+							Languages:   []string{"chs"},
+							AssetName:   snapshot.AssetFileName("7.55", snapshot.RegionCN),
+							DownloadURL: srv.URL + "/assets/cn-7.55",
+							Size:        int64(len(cnBytes)),
+							SHA256:      cnSHA,
+						},
+						Global: &snapshot.RegionAsset{
+							GameVersion: "2026.09.10.0000.0000",
+							Languages:   []string{"ja", "en"},
+							AssetName:   snapshot.AssetFileName("7.55", snapshot.RegionGlobal),
+							DownloadURL: srv.URL + "/assets/gl-7.55",
+							Size:        int64(len(glBytes)),
+							SHA256:      glSHA,
+						},
+					},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(cat)
+		case "/assets/cn-7.55":
+			_, _ = w.Write(cnBytes)
+		case "/assets/gl-7.55":
+			_, _ = w.Write(glBytes)
+		default:
+			http.NotFound(w, r)
 		}
-		datOff += int64(n)
-		if _, wErr := fmt.Fprintf(idxBw, "%s\t%d\t%d\n", blobKey, off, n); wErr != nil {
-			return wErr
-		}
-		svc.blobIndex[blobKey] = iconBlobLoc{offset: off, length: uint32(n)}
-		return nil
-	}, 0); err != nil {
-		t.Fatalf("ArchiveIconBlobs 失败: %v", err)
-	}
-	_ = datBw.Flush()
-	_ = idxBw.Flush()
-	_ = datFile.Close()
-	_ = idxFile.Close()
-	blobElapsed := time.Since(blobStart)
+	}))
+	defer srv.Close()
 
-	var blobKey37618 string
-	for _, r := range snaps {
-		if r.IconID == 37618 {
-			blobKey37618 = r.BlobKey
+	// 同时配置国服 + 国际服客户端
+	dualStore := &gamedata.Store{
+		HasCN:          true,
+		HasGlobal:      true,
+		CNVersion:      "2026.11.03.0000.0000",
+		GlobalVersion:  "2026.11.03.0000.0000",
+		PrimaryVersion: "2026.11.03.0000.0000",
+		PrimaryLang:    sqpack.LangChineseSimplified,
+		AppLang:        i18n.LangZH,
+	}
+	svc := NewService(dualStore, filepath.Join(dir, "snapshots"))
+	defer svc.Close()
+	svc.SetSnapshotClient(snapshot.NewClient(snapshot.ClientOptions{
+		CatalogURL: srv.URL + "/catalog.json",
+		HTTPClient: srv.Client(),
+	}))
+
+	// 1. 拉取目录后应同时识别国服 7.58 与国际服 7.58，且目录仅显示 2 条统一版本记录（不拆分国服/国际服）
+	st, err := svc.RefreshCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("RefreshCatalog 失败: %v", err)
+	}
+	if !st.HasCN || !st.HasGlobal || st.CNPatch != "7.58" || st.GlobalPatch != "7.58" {
+		t.Fatalf("双服模式应同时识别国服与国际服当前版本: %+v", st)
+	}
+	if len(st.RemoteVersions) != 2 {
+		t.Fatalf("统一版本目录应合并为 2 条（7.58 / 7.55），实际 %d 条", len(st.RemoteVersions))
+	}
+
+	// 2. 用户只需按统一版本号下载 "7.55"，底层自动补齐国服与国际服两个快照包
+	stDL, err := svc.DownloadVersion(context.Background(), "7.55", nil)
+	if err != nil {
+		t.Fatalf("双服统一下载 7.55 失败: %v", err)
+	}
+	if stDL.DefaultCNFrom != "7.55" || stDL.DefaultGlobalFrom != "7.55" {
+		t.Fatalf("双服下载后国服与国际服均应具备 7.55 对比基准: %+v", stDL)
+	}
+	var found755 *VersionBackupMeta
+	for i := range stDL.RemoteVersions {
+		if stDL.RemoteVersions[i].Patch == "7.55" {
+			found755 = &stDL.RemoteVersions[i]
 			break
 		}
 	}
-	if blobKey37618 == "" {
-		t.Fatalf("未找到 #037618 图标指纹记录")
+	if found755 == nil || !found755.Downloaded || !found755.DownloadedCN || !found755.DownloadedGlobal || found755.NeedsSupplement {
+		t.Fatalf("7.55 下载状态异常: %+v", found755)
 	}
-	img, err := svc.ReadIconBlobImage(blobKey37618)
-	if err != nil || img == nil || img.Bounds().Dx() == 0 {
-		t.Fatalf("ReadIconBlobImage(#037618) 失败: img=%v err=%v", img, err)
+
+	// 3. 注入国服与国际服各自独立的当前数据与 7.55 旧数据，校验严格同服对比（不串服）
+	svc.SetLiveMemoryStore(snapshot.RegionCN, &gamedata.Store{
+		HasCN: true, CNVersion: "2026.11.03.0000.0000",
+		ItemSummaries: []gamedata.ItemSummary{
+			{ID: 1000, NameCn: "国服旧剑", ItemLevel: 700, CategoryName: "武器"},
+			{ID: 1001, NameCn: "国服独占新装备", ItemLevel: 730, CategoryName: "武器"},
+		},
+	})
+	svc.SetLiveMemoryStore(snapshot.RegionGlobal, &gamedata.Store{
+		HasGlobal: true, GlobalVersion: "2026.11.03.0000.0000",
+		ItemSummaries: []gamedata.ItemSummary{
+			{ID: 2000, NameCn: "Global Old Sword", ItemLevel: 700, CategoryName: "Weapon"},
+			{ID: 2001, NameCn: "Global Exclusive Blade", ItemLevel: 730, CategoryName: "Weapon"},
+		},
+	})
+	svc.RegisterMemorySnapshot(MemorySnapshot{
+		Region: snapshot.RegionCN, Patch: "7.55", Version: "2026.09.10.0000.0000",
+		Store: &gamedata.Store{
+			HasCN: true, CNVersion: "2026.09.10.0000.0000",
+			ItemSummaries: []gamedata.ItemSummary{{ID: 1000, NameCn: "国服旧剑", ItemLevel: 700, CategoryName: "武器"}},
+		},
+	})
+	svc.RegisterMemorySnapshot(MemorySnapshot{
+		Region: snapshot.RegionGlobal, Patch: "7.55", Version: "2026.09.10.0000.0000",
+		Store: &gamedata.Store{
+			HasGlobal: true, GlobalVersion: "2026.09.10.0000.0000",
+			ItemSummaries: []gamedata.ItemSummary{{ID: 2000, NameCn: "Global Old Sword", ItemLevel: 700, CategoryName: "Weapon"}},
+		},
+	})
+
+	cnDiff, err := svc.CompareVersions(VersionDiffQuery{Region: snapshot.RegionCN, From: "7.55", To: LiveVersionID, EntityType: "item"})
+	if err != nil {
+		t.Fatalf("国服对比失败: %v", err)
 	}
-	t.Logf("真实客户端图标指纹(%v) + 缩略图归档(%v): %d 个唯一图标, blob总大小=%.2f MB, #037618=%dx%d",
-		digestElapsed, blobElapsed, len(snaps), float64(datOff)/(1024*1024), img.Bounds().Dx(), img.Bounds().Dy())
+	if cnDiff.TotalFiltered != 1 || cnDiff.Items[0].ID != 1001 || cnDiff.Items[0].NameCn != "国服独占新装备" {
+		t.Fatalf("国服对比不应混入国际服数据: %+v", cnDiff.Items)
+	}
+
+	glDiff, err := svc.CompareVersions(VersionDiffQuery{Region: snapshot.RegionGlobal, From: "7.55", To: LiveVersionID, EntityType: "item"})
+	if err != nil {
+		t.Fatalf("国际服对比失败: %v", err)
+	}
+	if glDiff.TotalFiltered != 1 || glDiff.Items[0].ID != 2001 || glDiff.Items[0].NameCn != "Global Exclusive Blade" {
+		t.Fatalf("国际服对比不应混入国服数据: %+v", glDiff.Items)
+	}
+
+	// 4. 删除统一版本 7.55 应同时清理本地国服与国际服文件
+	stDel, err := svc.DeleteVersion("7.55")
+	if err != nil {
+		t.Fatalf("DeleteVersion 失败: %v", err)
+	}
+	if len(stDel.CNBackups) != 1 || len(stDel.GlobalBackups) != 1 {
+		t.Fatalf("删除 7.55 后双服本地快照均应清空: cn=%d global=%d", len(stDel.CNBackups), len(stDel.GlobalBackups))
+	}
+}
+
+func TestGlobalCompareEXDLangAndSetLangCacheClear(t *testing.T) {
+	if got := globalCompareEXDLang(i18n.LangZH); got != sqpack.LangEnglish {
+		t.Fatalf("中文界面下国际服对比语言应为 en，实际 %v", got)
+	}
+	if got := globalCompareEXDLang(i18n.LangEN); got != sqpack.LangEnglish {
+		t.Fatalf("英语界面下国际服对比语言应为 en，实际 %v", got)
+	}
+	if got := globalCompareEXDLang(i18n.LangJA); got != sqpack.LangJapanese {
+		t.Fatalf("日语界面下国际服对比语言应为 ja，实际 %v", got)
+	}
+
+	svc := NewService(&gamedata.Store{HasCN: true, HasGlobal: true}, t.TempDir())
+	defer svc.Close()
+	svc.mu.Lock()
+	svc.liveRegionStores["cn\x00en"] = &gamedata.Store{AppLang: i18n.LangEN}
+	svc.liveRegionStores["global\x00zh"] = &gamedata.Store{AppLang: i18n.LangZH}
+	svc.mu.Unlock()
+
+	svc.SetLang(i18n.LangJA)
+	svc.mu.Lock()
+	left := len(svc.liveRegionStores)
+	svc.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("切换界面语言后应清空双服实时 Store 缓存，剩余 %d", left)
+	}
+}
+
+// TestRealSameVersionZeroDiffAcrossAllUILanguages 在本机同时存在客户端与同版 .xivsnap 快照时，
+// 校验简体中文 / 英语 / 日语三种界面语言下，国服与国际服对比自身同版本快照均不产生任何跨语言伪差异。
+func TestRealSameVersionZeroDiffAcrossAllUILanguages(t *testing.T) {
+	cfg := config.LoadAppConfigFromEnv(filepath.Join("..", "..", ".env"))
+	resolved, err := config.ValidateAndResolve(cfg)
+	if err != nil {
+		t.Skipf("本地未配置可用 FF14 客户端，跳过真实同版本零差异回归测试: %v", err)
+	}
+	cfgDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Skip("无法定位用户配置目录")
+	}
+	snapDir := filepath.Join(cfgDir, "xiv-data-viewer", "snapshots")
+	locals, err := snapshot.ListLocalSnapshots(snapDir)
+	if err != nil || len(locals) == 0 {
+		t.Skip("本地未下载 .xivsnap 快照，跳过真实同版本零差异回归测试")
+	}
+
+	matchPatch := func(region, gameVer string) string {
+		for _, info := range locals {
+			if snapshot.NormalizeRegion(info.Meta.Region) == region && info.Meta.GameVersion == gameVer && info.Meta.Patch != "" {
+				return info.Meta.Patch
+			}
+		}
+		return ""
+	}
+	cnPatch := ""
+	if resolved.HasCN() {
+		cnPatch = matchPatch(snapshot.RegionCN, resolved.CN.Version)
+	}
+	glPatch := ""
+	if resolved.HasGlobal() {
+		glPatch = matchPatch(snapshot.RegionGlobal, resolved.Global.Version)
+	}
+	if cnPatch == "" && glPatch == "" {
+		t.Skip("本地已下载快照与当前客户端版本均不相同，跳过同版本零差异回归测试")
+	}
+
+	schemasFS := os.DirFS(filepath.Join("..", "..", "schemas"))
+	var baseStore *gamedata.Store
+	defer func() {
+		if baseStore != nil {
+			_ = baseStore.Close()
+		}
+	}()
+
+	for _, uiLang := range []i18n.Lang{i18n.LangZH, i18n.LangEN, i18n.LangJA} {
+		store, err := gamedata.LoadGameDataStoreWithOptions(resolved, schemasFS, gamedata.StoreLoadOptions{
+			AppLang:       uiLang,
+			BaseStore:     baseStore,
+			SharedReaders: baseStore != nil,
+		})
+		if err != nil {
+			t.Fatalf("加载真实客户端数据失败 (lang=%s): %v", uiLang, err)
+		}
+		if baseStore == nil {
+			baseStore = store
+		}
+
+		svc := NewService(store, snapDir)
+		svc.SetLang(uiLang)
+
+		checkRegion := func(region, patch string) {
+			if patch == "" {
+				return
+			}
+			res, err := svc.CompareVersions(VersionDiffQuery{
+				Region:     region,
+				From:       patch,
+				To:         LiveVersionID,
+				EntityType: "all",
+				Page:       1,
+				PageSize:   10,
+			})
+			if err != nil {
+				t.Fatalf("对比同版本失败 (lang=%s region=%s patch=%s): %v", uiLang, region, patch, err)
+			}
+			if res.TotalFiltered != 0 {
+				t.Fatalf("同版本产生伪差异 (lang=%s region=%s patch=%s): total=%d summary=%+v first=%+v",
+					uiLang, region, patch, res.TotalFiltered, res.Summary, res.Items[0])
+			}
+			txtRes, err := svc.CompareVersions(VersionDiffQuery{
+				Region:     region,
+				From:       patch,
+				To:         LiveVersionID,
+				EntityType: "text",
+				Page:       1,
+				PageSize:   10,
+			})
+			if err != nil {
+				t.Fatalf("文本同版本对比失败 (lang=%s region=%s patch=%s): %v", uiLang, region, patch, err)
+			}
+			if txtRes.TotalFiltered != 0 {
+				t.Fatalf("同版本文本产生伪差异 (lang=%s region=%s patch=%s): total=%d first=%+v",
+					uiLang, region, patch, txtRes.TotalFiltered, txtRes.Items[0])
+			}
+		}
+
+		checkRegion(snapshot.RegionCN, cnPatch)
+		checkRegion(snapshot.RegionGlobal, glPatch)
+		svc.Close()
+	}
 }

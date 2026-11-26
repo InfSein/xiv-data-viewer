@@ -106,6 +106,12 @@ type Service struct {
 
 	actorEnOnce  sync.Once
 	actorEnNames map[int]string
+
+	textIndexMu       sync.RWMutex
+	textIndices       map[string]*TextSearchIndex
+	textParallel      *textParallelCache
+	questInternalOnce sync.Once
+	questByInternalID map[string]int
 }
 
 // NewService 基于已加载的 Store 创建核心游戏数据查询服务。

@@ -2,52 +2,97 @@ package backup
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"math"
-	"os"
-	"path/filepath"
-	"regexp"
+	"io/fs"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
+	"github.com/InfSein/xiv-data-viewer/internal/config"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/InfSein/xiv-data-viewer/internal/i18n"
+	"github.com/InfSein/xiv-data-viewer/internal/snapshot"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
-// VersionBackupMeta 保存单个本地版本快照的元信息。
+// LiveVersionID 表示当前已加载的本地 FF14 客户端（不落盘生成本地快照，直接以内存实时数据参与对比）。
+const LiveVersionID = "__live__"
+
+// ErrSnapshotNotDownloaded 表示请求的对比目标快照尚未从 GitHub 下载到本地。
+var ErrSnapshotNotDownloaded = errors.New("所选历史版本在该区服下的快照尚未下载到本地")
+
+// VersionBackupMeta 描述面向用户的统一版本条目（如 "7.58" 或当前客户端），内部自动涵盖国服/国际服下载状态。
 type VersionBackupMeta struct {
-	Version              string `json:"version"`
-	GlobalVersion        string `json:"globalVersion"`
-	CreatedAt            string `json:"createdAt"`
-	ItemCount            int    `json:"itemCount"`
-	RecipeCount          int    `json:"recipeCount"`
-	GatherableCount      int    `json:"gatherableCount"`
-	PurchasableCount     int    `json:"purchasableCount"`
-	AchievementCount     int    `json:"achievementCount"`
-	TitleCount           int    `json:"titleCount"`
-	QuestCount           int    `json:"questCount,omitempty"`
-	LeveCount            int    `json:"leveCount,omitempty"`
-	CollectableCount     int    `json:"collectableCount,omitempty"`
-	CollectableItemCount int    `json:"collectableItemCount,omitempty"`
-	BGMCount             int    `json:"bgmCount,omitempty"`
-	IconCount            int    `json:"iconCount,omitempty"`
-	IsBaseline           bool   `json:"isBaseline"`
+	ID               string `json:"id"` // "__live__" 或统一版本号（如 "7.58"）
+	Patch            string `json:"patch,omitempty"`
+	Version          string `json:"version,omitempty"` // 当前对比区服对应的内部构建号
+	CNVersion        string `json:"cnVersion,omitempty"`
+	GlobalVersion    string `json:"globalVersion,omitempty"`
+	DisplayName      string `json:"displayName"`
+	CreatedAt        string `json:"createdAt,omitempty"`
+	IsLive           bool   `json:"isLive,omitempty"`
+	HasRemoteCN      bool   `json:"hasRemoteCn,omitempty"`
+	HasRemoteGlobal  bool   `json:"hasRemoteGlobal,omitempty"`
+	DownloadedCN     bool   `json:"downloadedCn,omitempty"`
+	DownloadedGlobal bool   `json:"downloadedGlobal,omitempty"`
+	Downloaded       bool   `json:"downloaded,omitempty"`
+	NeedsSupplement  bool   `json:"needsSupplement,omitempty"`
+	Size             int64  `json:"size,omitempty"`
+	DownloadSize     int64  `json:"downloadSize,omitempty"`
 }
 
-// VersionStatusResponse 汇总当前客户端版本与已备份快照清单。
+// VersionStatusResponse 汇总双服当前客户端识别状态、各区服可用对比目标与统一版本目录。
 type VersionStatusResponse struct {
-	CurrentVersion   string              `json:"currentVersion"`
-	GlobalVersion    string              `json:"globalVersion"`
-	PreviousVersion  string              `json:"previousVersion"`
-	HasVersionUpdate bool                `json:"hasVersionUpdate"`
-	LastBackupAt     string              `json:"lastBackupAt"`
-	BackupDir        string              `json:"backupDir"`
-	Backups          []VersionBackupMeta `json:"backups"`
+	HasCN              bool                `json:"hasCn"`
+	HasGlobal          bool                `json:"hasGlobal"`
+	ConfiguredRegions  []string            `json:"configuredRegions"`
+	DefaultRegion      string              `json:"defaultRegion"`
+	CNVersion          string              `json:"cnVersion,omitempty"`
+	CNPatch            string              `json:"cnPatch,omitempty"`
+	CNDisplayName      string              `json:"cnDisplayName,omitempty"`
+	GlobalVersion      string              `json:"globalVersion,omitempty"`
+	GlobalPatch        string              `json:"globalPatch,omitempty"`
+	GlobalDisplayName  string              `json:"globalDisplayName,omitempty"`
+	CurrentVersion     string              `json:"currentVersion,omitempty"`
+	CurrentPatch       string              `json:"currentPatch,omitempty"`
+	CurrentDisplayName string              `json:"currentDisplayName,omitempty"`
+	CNBackups          []VersionBackupMeta `json:"cnBackups"`
+	GlobalBackups      []VersionBackupMeta `json:"globalBackups"`
+	DefaultCNFrom      string              `json:"defaultCnFrom,omitempty"`
+	DefaultCNTo        string              `json:"defaultCnTo,omitempty"`
+	DefaultGlobalFrom  string              `json:"defaultGlobalFrom,omitempty"`
+	DefaultGlobalTo    string              `json:"defaultGlobalTo,omitempty"`
+	RemoteVersions     []VersionBackupMeta `json:"remoteVersions"` // 快照管理弹窗展示的统一版本清单（不区分国服/国际服）
+	SnapshotDir        string              `json:"snapshotDir"`
+	CatalogLoaded      bool                `json:"catalogLoaded"`
+	CatalogUpdatedAt   string              `json:"catalogUpdatedAt,omitempty"`
+	CatalogError       string              `json:"catalogError,omitempty"`
+}
+
+// BackupsForRegion 返回指定区服（"cn" / "global"）可供版本对比下拉选择的版本列表。
+func (r VersionStatusResponse) BackupsForRegion(region string) []VersionBackupMeta {
+	if snapshot.NormalizeRegion(region) == snapshot.RegionGlobal {
+		return r.GlobalBackups
+	}
+	return r.CNBackups
+}
+
+// DefaultPairForRegion 返回指定区服默认的（旧版本、新版本）对比组合。
+func (r VersionStatusResponse) DefaultPairForRegion(region string) (from, to string) {
+	if snapshot.NormalizeRegion(region) == snapshot.RegionGlobal {
+		return r.DefaultGlobalFrom, r.DefaultGlobalTo
+	}
+	return r.DefaultCNFrom, r.DefaultCNTo
+}
+
+// CurrentClientLabelForRegion 返回指定区服当前本地客户端的人类可读名称。
+func (r VersionStatusResponse) CurrentClientLabelForRegion(region string) string {
+	if snapshot.NormalizeRegion(region) == snapshot.RegionGlobal {
+		return r.GlobalDisplayName
+	}
+	return r.CNDisplayName
 }
 
 // ItemFieldChange 描述版本对比中单个字段的变更前后对比。
@@ -58,10 +103,10 @@ type ItemFieldChange struct {
 	After  string `json:"after"`
 }
 
-// DiffItemEntry 描述版本对比结果中的单条道具、任务、理符、成就或音乐差异记录。
+// DiffItemEntry 描述版本对比结果中的单条道具、任务、理符、成就、音乐、图标或文本差异记录。
 type DiffItemEntry struct {
 	ID                   int               `json:"id"`
-	EntityType           string            `json:"entityType"` // item|quest|leve|achievement|bgm
+	EntityType           string            `json:"entityType"` // item|quest|leve|achievement|bgm|icon|text
 	ChangeType           string            `json:"changeType"` // added|modified|removed
 	NameCn               string            `json:"nameCn"`
 	NameEn               string            `json:"nameEn"`
@@ -85,44 +130,56 @@ type DiffItemEntry struct {
 	NewBlobKey           string            `json:"newBlobKey,omitempty"`
 	OldThumbPNG          []byte            `json:"oldThumbPng,omitempty"`
 	NewThumbPNG          []byte            `json:"newThumbPng,omitempty"`
+	TextSheet            string            `json:"textSheet,omitempty"`
+	TextSubRow           int               `json:"textSubRow,omitempty"`
+	TextColIdx           int               `json:"textColIdx,omitempty"`
+	TextColName          string            `json:"textColName,omitempty"`
+	TextBefore           string            `json:"textBefore,omitempty"`
+	TextAfter            string            `json:"textAfter,omitempty"`
+	TextJumpKind         string            `json:"textJumpKind,omitempty"`
+	TextJumpID           int               `json:"textJumpId,omitempty"`
 	Changes              []ItemFieldChange `json:"changes"`
 }
 
 // DiffSummary 汇总两个版本之间的变更统计数字。
 type DiffSummary struct {
-	AddedItems                int `json:"addedItems"`
-	ModifiedItems             int `json:"modifiedItems"`
-	RemovedItems              int `json:"removedItems"`
-	AddedRecipes              int `json:"addedRecipes"`
-	NewCraftableItems         int `json:"newCraftableItems"`
-	NewGatherableItems        int `json:"newGatherableItems"`
-	NewPurchasableItems       int `json:"newPurchasableItems"`
-	NewCollectableTurnInItems int `json:"newCollectableTurnInItems"`
-	ModifiedCollectableItems  int `json:"modifiedCollectableItems"`
-	AddedQuests               int `json:"addedQuests"`
-	ModifiedQuests            int `json:"modifiedQuests"`
-	RemovedQuests             int `json:"removedQuests"`
-	AddedLeves                int `json:"addedLeves"`
-	ModifiedLeves             int `json:"modifiedLeves"`
-	RemovedLeves              int `json:"removedLeves"`
-	AddedAchievements         int `json:"addedAchievements"`
-	ModifiedAchievements      int `json:"modifiedAchievements"`
-	RemovedAchievements       int `json:"removedAchievements"`
-	AddedTitles               int `json:"addedTitles"`
-	AddedBGMs                 int `json:"addedBgms"`
-	ModifiedBGMs              int `json:"modifiedBgms"`
-	RemovedBGMs               int `json:"removedBgms"`
-	AddedIcons                int `json:"addedIcons"`
-	ModifiedIcons             int `json:"modifiedIcons"`
-	RemovedIcons              int `json:"removedIcons"`
+	AddedItems                int  `json:"addedItems"`
+	ModifiedItems             int  `json:"modifiedItems"`
+	RemovedItems              int  `json:"removedItems"`
+	AddedRecipes              int  `json:"addedRecipes"`
+	NewCraftableItems         int  `json:"newCraftableItems"`
+	NewGatherableItems        int  `json:"newGatherableItems"`
+	NewPurchasableItems       int  `json:"newPurchasableItems"`
+	NewCollectableTurnInItems int  `json:"newCollectableTurnInItems"`
+	ModifiedCollectableItems  int  `json:"modifiedCollectableItems"`
+	AddedQuests               int  `json:"addedQuests"`
+	ModifiedQuests            int  `json:"modifiedQuests"`
+	RemovedQuests             int  `json:"removedQuests"`
+	AddedLeves                int  `json:"addedLeves"`
+	ModifiedLeves             int  `json:"modifiedLeves"`
+	RemovedLeves              int  `json:"removedLeves"`
+	AddedAchievements         int  `json:"addedAchievements"`
+	ModifiedAchievements      int  `json:"modifiedAchievements"`
+	RemovedAchievements       int  `json:"removedAchievements"`
+	AddedTitles               int  `json:"addedTitles"`
+	AddedBGMs                 int  `json:"addedBgms"`
+	ModifiedBGMs              int  `json:"modifiedBgms"`
+	RemovedBGMs               int  `json:"removedBgms"`
+	AddedIcons                int  `json:"addedIcons"`
+	ModifiedIcons             int  `json:"modifiedIcons"`
+	RemovedIcons              int  `json:"removedIcons"`
+	ModifiedTexts             int  `json:"modifiedTexts"`
+	RemovedTexts              int  `json:"removedTexts"`
+	TextDiffAvailable         bool `json:"textDiffAvailable"`
 }
 
 // VersionDiffQuery 版本差异检索条件。
 type VersionDiffQuery struct {
-	From       string
-	To         string
+	Region     string // "cn" | "global"（留空默认取当前主区服，保证国服对比国服、国际服对比国际服）
+	From       string // 统一版本号（如 "7.55"）或 LiveVersionID
+	To         string // 统一版本号（如 "7.58"）或 LiveVersionID
 	Filter     string // all|added|modified|removed
-	EntityType string // all|item|quest|leve|achievement|bgm
+	EntityType string // all|item|quest|leve|achievement|bgm|icon|text
 	Q          string
 	Page       int
 	PageSize   int
@@ -130,175 +187,339 @@ type VersionDiffQuery struct {
 
 // VersionDiffResponse 版本对比分页结果。
 type VersionDiffResponse struct {
-	FromVersion   string          `json:"fromVersion"`
-	ToVersion     string          `json:"toVersion"`
-	FromCreatedAt string          `json:"fromCreatedAt"`
-	ToCreatedAt   string          `json:"toCreatedAt"`
-	Summary       DiffSummary     `json:"summary"`
-	Items         []DiffItemEntry `json:"items"`
-	TotalFiltered int             `json:"totalFiltered"`
-	Page          int             `json:"page"`
-	PageSize      int             `json:"pageSize"`
-	TotalPages    int             `json:"totalPages"`
+	NeedsDownload   bool            `json:"needsDownload,omitempty"`
+	Region          string          `json:"region"`
+	FromID          string          `json:"fromId"`
+	ToID            string          `json:"toId"`
+	FromVersion     string          `json:"fromVersion"`
+	ToVersion       string          `json:"toVersion"`
+	FromDisplayName string          `json:"fromDisplayName"`
+	ToDisplayName   string          `json:"toDisplayName"`
+	FromCreatedAt   string          `json:"fromCreatedAt"`
+	ToCreatedAt     string          `json:"toCreatedAt"`
+	Summary         DiffSummary     `json:"summary"`
+	Items           []DiffItemEntry `json:"items"`
+	TotalFiltered   int             `json:"totalFiltered"`
+	Page            int             `json:"page"`
+	PageSize        int             `json:"pageSize"`
+	TotalPages      int             `json:"totalPages"`
+}
+
+// MemorySnapshot 允许单元测试注册内存虚拟快照（按 Region + Patch 注册），在不依赖真实客户端文件时验证全链路对比逻辑。
+type MemorySnapshot struct {
+	Region    string // "cn" | "global"
+	Patch     string // 如 "7.55"
+	Version   string // 内部构建号，如 "2026.10.01.0000.0000"
+	CreatedAt string
+	Store     *gamedata.Store
+	Icons     []snapshot.IconDigestRecord
+	IconBlobs map[string][]byte
+	Texts     []TextSnapshotRecord
 }
 
 type compactItemRecord struct {
-	ID                  int    `json:"id"`
-	NameCn              string `json:"nameCn"`
-	NameEn              string `json:"nameEn"`
-	NameJa              string `json:"nameJa,omitempty"`
-	IconID              int    `json:"iconId"`
-	ItemLevel           int    `json:"itemLevel"`
-	EquipLevel          int    `json:"equipLevel"`
-	CategoryID          int    `json:"categoryId"`
-	CategoryName        string `json:"categoryName"`
-	PriceMid            int    `json:"priceMid"`
-	IsCraftable         bool   `json:"isCraftable"`
-	IsGatherable        bool   `json:"isGatherable"`
-	IsPurchasable       bool   `json:"isPurchasable"`
-	IsRetainerVenture   *bool  `json:"isRetainerVenture,omitempty"`
-	IsCollectableTurnIn *bool  `json:"isCollectableTurnIn,omitempty"`
-	IsCollectableReward *bool  `json:"isCollectableReward,omitempty"`
-	CollectableSummary  string `json:"collectableSummary,omitempty"`
+	ID                  int
+	NameCn              string
+	NameEn              string
+	NameJa              string
+	IconID              int
+	ItemLevel           int
+	EquipLevel          int
+	CategoryID          int
+	CategoryName        string
+	PriceMid            int
+	IsCraftable         bool
+	IsGatherable        bool
+	IsPurchasable       bool
+	IsRetainerVenture   *bool
+	IsCollectableTurnIn *bool
+	IsCollectableReward *bool
+	CollectableSummary  string
 }
 
 type compactQuestRecord struct {
-	ID              int    `json:"id"`
-	NameCn          string `json:"nameCn"`
-	NameEn          string `json:"nameEn"`
-	NameJa          string `json:"nameJa,omitempty"`
-	IconID          int    `json:"iconId"`
-	Level           int    `json:"level"`
-	GenreName       string `json:"genreName"`
-	SectionName     string `json:"sectionName"`
-	ExpansionName   string `json:"expansionName"`
-	IssuerName      string `json:"issuerName"`
-	GilReward       int    `json:"gilReward"`
-	ExpReward       int    `json:"expReward"`
-	RewardSummary   string `json:"rewardSummary,omitempty"`
-	PrimaryItemID   int    `json:"primaryItemId,omitempty"`
-	IsMSQ           bool   `json:"isMsq"`
-	IsFeature       bool   `json:"isFeature"`
-	IsRepeatable    bool   `json:"isRepeatable"`
-	CutsceneCount   *int   `json:"cutsceneCount,omitempty"`
-	CutsceneSummary string `json:"cutsceneSummary,omitempty"`
+	ID              int
+	NameCn          string
+	NameEn          string
+	NameJa          string
+	IconID          int
+	Level           int
+	GenreName       string
+	SectionName     string
+	ExpansionName   string
+	IssuerName      string
+	GilReward       int
+	ExpReward       int
+	RewardSummary   string
+	PrimaryItemID   int
+	IsMSQ           bool
+	IsFeature       bool
+	IsRepeatable    bool
+	CutsceneCount   *int
+	CutsceneSummary string
 }
 
 type compactLeveRecord struct {
-	ID                 int    `json:"id"`
-	NameCn             string `json:"nameCn"`
-	NameEn             string `json:"nameEn"`
-	NameJa             string `json:"nameJa,omitempty"`
-	IconID             int    `json:"iconId"`
-	LeveKind           string `json:"leveKind"`
-	LeveKindLabel      string `json:"leveKindLabel"`
-	AssignmentTypeName string `json:"assignmentTypeName"`
-	ClassJobLevel      int    `json:"classJobLevel"`
-	ExpReward          int    `json:"expReward"`
-	GilReward          int    `json:"gilReward"`
-	CraftRepeats       int    `json:"craftRepeats"`
-	TurnInSummary      string `json:"turnInSummary,omitempty"`
-	RewardSummary      string `json:"rewardSummary,omitempty"`
+	ID                 int
+	NameCn             string
+	NameEn             string
+	NameJa             string
+	IconID             int
+	LeveKind           string
+	LeveKindLabel      string
+	AssignmentTypeName string
+	ClassJobLevel      int
+	ExpReward          int
+	GilReward          int
+	CraftRepeats       int
+	TurnInSummary      string
+	RewardSummary      string
 }
 
 type compactAchievementRecord struct {
-	ID               int    `json:"id"`
-	NameCn           string `json:"nameCn"`
-	NameEn           string `json:"nameEn"`
-	NameJa           string `json:"nameJa,omitempty"`
-	DescriptionCn    string `json:"descriptionCn"`
-	Points           int    `json:"points"`
-	IconID           int    `json:"iconId"`
-	KindName         string `json:"kindName"`
-	CategoryName     string `json:"categoryName"`
-	TitleID          int    `json:"titleId"`
-	TitleMasculineCn string `json:"titleMasculineCn"`
-	TitleFeminineCn  string `json:"titleFeminineCn"`
-	RewardItemID     int    `json:"rewardItemId"`
-	RewardItemNameCn string `json:"rewardItemNameCn"`
+	ID               int
+	NameCn           string
+	NameEn           string
+	NameJa           string
+	DescriptionCn    string
+	Points           int
+	IconID           int
+	KindName         string
+	CategoryName     string
+	TitleID          int
+	TitleMasculineCn string
+	TitleFeminineCn  string
+	RewardItemID     int
+	RewardItemNameCn string
 }
 
 type compactBGMRecord struct {
-	ID            int    `json:"id"`
-	File          string `json:"file"`
-	Title         string `json:"title"`
-	NameCn        string `json:"nameCn,omitempty"`
-	NameEn        string `json:"nameEn,omitempty"`
-	NameJa        string `json:"nameJa,omitempty"`
-	ExpansionID   int    `json:"expansionId"`
-	ExpansionName string `json:"expansionName"`
-	UsageSummary  string `json:"usageSummary,omitempty"`
-	IsPlaceholder bool   `json:"isPlaceholder,omitempty"`
-	FileExists    bool   `json:"fileExists"`
-	FileSize      uint32 `json:"fileSize,omitempty"`
-	ContentMD5    string `json:"contentMd5,omitempty"`
+	ID            int
+	File          string
+	Title         string
+	NameCn        string
+	NameEn        string
+	NameJa        string
+	ExpansionID   int
+	ExpansionName string
+	UsageSummary  string
+	IsPlaceholder bool
+	FileExists    bool
+	FileSize      uint32
+	ContentMD5    string
 }
 
 type snapshotPayload struct {
-	Meta         VersionBackupMeta          `json:"meta"`
-	Items        []compactItemRecord        `json:"items"`
-	Quests       []compactQuestRecord       `json:"quests,omitempty"`
-	Leves        []compactLeveRecord        `json:"leves,omitempty"`
-	Achievements []compactAchievementRecord `json:"achievements,omitempty"`
-	BGMs         []compactBGMRecord         `json:"bgms,omitempty"`
-	Icons        []compactIconRecord        `json:"icons,omitempty"`
+	Meta         VersionBackupMeta
+	RecipeCount  int
+	Items        []compactItemRecord
+	Quests       []compactQuestRecord
+	Leves        []compactLeveRecord
+	Achievements []compactAchievementRecord
+	BGMs         []compactBGMRecord
+	Icons        []compactIconRecord
 }
 
-type backupManifest struct {
-	LatestVersion    string              `json:"latestVersion"`
-	PreviousVersion  string              `json:"previousVersion"`
-	HasVersionUpdate bool                `json:"hasVersionUpdate"`
-	LastBackupAt     string              `json:"lastBackupAt"`
-	Backups          []VersionBackupMeta `json:"backups"`
+type parsedSnapCacheEntry struct {
+	payload *snapshotPayload
+	store   *gamedata.Store
+	seq     uint64
 }
 
-var unsafeFileCharsRe = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
-
-func sanitizeVersionFileName(version string) string {
-	return unsafeFileCharsRe.ReplaceAllString(version, "_")
-}
-
-// Service 管理本地客户端版本快照备份与跨版本字段级 Diff 计算。
+// Service 管理 GitHub 统一版本快照目录、按区服自动下载缓存以及严格同服（国服对国服、国际服对国际服）的版本对比计算。
 type Service struct {
-	store        *gamedata.Store
-	backupDir    string
-	manifestPath string
+	store          *gamedata.Store
+	snapshotDir    string
+	snapshotClient *snapshot.Client
 
-	mu            sync.Mutex
-	uiLang        i18n.Lang
-	manifest      *backupManifest
-	snapshotCache map[string]*snapshotPayload
+	mu                 sync.Mutex
+	uiLang             i18n.Lang
+	catalog            snapshot.Catalog
+	catalogLoaded      bool
+	catalogErr         string
+	localSnaps         map[string]snapshot.LocalSnapshotInfo // key: "cn-7.58" / "global-7.58"
+	memSnaps           map[string]*MemorySnapshot            // key: "cn-7.58" / "global-7.58"
+	memLiveStores      map[string]*gamedata.Store            // key: "cn" / "global"
+	memLiveTexts       map[string][]textSheetRows            // key: "cn" / "global"
+	memLiveIcons       map[string][]compactIconRecord        // key: "cn" / "global"
+	memBlobs           map[string][]byte
+	archives           map[string]*snapshot.Archive     // key: "cn-7.58" / "global-7.58"
+	liveRegionStores   map[string]*gamedata.Store       // 双服模式下按需加载的副区服实时 Store 缓存
+	parsedCache        map[string]*parsedSnapCacheEntry // key: region|target|uiLang
+	parsedSeq          uint64
+	liveIconCache      map[string][]compactIconRecord // key: region
+	liveIconComputedAt map[string]bool                // key: region
 
-	blobMu         sync.Mutex
-	blobLoaded     bool
-	blobIndex      map[string]iconBlobLoc
-	pendingBlobs   []sqpack.IconBlobTask
-	blobSyncCancel context.CancelFunc
-	blobSyncWg     sync.WaitGroup
+	textMu        sync.Mutex
+	textCache     map[string][]textSheetRows
+	textCacheSeq  map[string]uint64
+	textSeq       uint64
+	textDiffCache *cachedTextDiff
 }
 
-// NewService 创建版本快照备份服务，快照保存在 backupDir 下。
-func NewService(store *gamedata.Store, backupDir string) *Service {
+// NewService 创建基于 GitHub 统一版本快照的版本对比服务（不在本地自建任何游戏数据快照）。
+func NewService(store *gamedata.Store, snapshotDir string) *Service {
 	lang := i18n.LangZH
 	if store != nil && store.AppLang != "" {
 		lang = i18n.NormalizeLang(string(store.AppLang))
 	}
-	return &Service{
-		store:         store,
-		backupDir:     backupDir,
-		manifestPath:  filepath.Join(backupDir, "manifest.json"),
-		uiLang:        lang,
-		snapshotCache: make(map[string]*snapshotPayload),
+	s := &Service{
+		store:              store,
+		snapshotDir:        snapshotDir,
+		snapshotClient:     snapshot.NewClient(snapshot.ClientOptions{}),
+		uiLang:             lang,
+		localSnaps:         make(map[string]snapshot.LocalSnapshotInfo),
+		memSnaps:           make(map[string]*MemorySnapshot),
+		memLiveStores:      make(map[string]*gamedata.Store),
+		memLiveTexts:       make(map[string][]textSheetRows),
+		memLiveIcons:       make(map[string][]compactIconRecord),
+		memBlobs:           make(map[string][]byte),
+		archives:           make(map[string]*snapshot.Archive),
+		liveRegionStores:   make(map[string]*gamedata.Store),
+		parsedCache:        make(map[string]*parsedSnapCacheEntry),
+		liveIconCache:      make(map[string][]compactIconRecord),
+		liveIconComputedAt: make(map[string]bool),
+		textCache:          make(map[string][]textSheetRows),
+		textCacheSeq:       make(map[string]uint64),
 	}
+	if cachedCat, ok := snapshot.LoadCachedCatalog(snapshotDir); ok {
+		s.catalog = cachedCat
+		s.catalogLoaded = true
+	}
+	s.reloadLocalLocked()
+	return s
 }
 
-// SetLang 切换版本对比文案输出所使用的界面语言。
+// SetSnapshotClient 替换快照目录与下载客户端（供单元测试注入本地模拟服务）。
+func (s *Service) SetSnapshotClient(client *snapshot.Client) {
+	if s == nil || client == nil {
+		return
+	}
+	s.mu.Lock()
+	s.snapshotClient = client
+	s.mu.Unlock()
+}
+
+// SetLang 切换版本对比展示标签与字段变更文案使用的界面语言。
 func (s *Service) SetLang(lang i18n.Lang) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	s.uiLang = i18n.NormalizeLang(string(lang))
+	// 切换界面语言时，双服实时 Store 的合成文案语言（以及国际服主数据语言）可能变化，统一清空按需重建
+	clear(s.liveRegionStores)
+	s.mu.Unlock()
+}
+
+// Close 释放所有已打开的 .xivsnap 归档文件句柄与内存缓存。
+func (s *Service) Close() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	for id, arch := range s.archives {
+		_ = arch.Close()
+		delete(s.archives, id)
+	}
+	clear(s.parsedCache)
+	clear(s.liveRegionStores)
+	s.mu.Unlock()
+
+	s.textMu.Lock()
+	clear(s.textCache)
+	clear(s.textCacheSeq)
+	s.textDiffCache = nil
+	s.textMu.Unlock()
+}
+
+// RegisterMemorySnapshot 注册一个按区服+统一版本号索引的内存虚拟快照（供单元测试验证 Diff，不落盘）。
+func (s *Service) RegisterMemorySnapshot(ms MemorySnapshot) {
+	if s == nil || strings.TrimSpace(ms.Patch) == "" {
+		return
+	}
+	s.mu.Lock()
+	reg := snapshot.NormalizeRegion(ms.Region)
+	if strings.TrimSpace(ms.Region) == "" {
+		reg = s.defaultRegionLocked()
+	}
+	cp := ms
+	cp.Region = reg
+	cp.Patch = strings.TrimSpace(ms.Patch)
+	snapID := snapshot.MakeSnapshotID(reg, cp.Patch)
+	s.memSnaps[snapID] = &cp
+	for k, v := range cp.IconBlobs {
+		if k != "" && len(v) > 0 {
+			s.memBlobs[k] = append([]byte(nil), v...)
+		}
+	}
+	s.invalidatePatchCachesLocked(cp.Patch)
+	s.mu.Unlock()
+}
+
+// SetLiveMemoryStore 为双服单元测试注入指定区服的当前客户端内存 Store。
+func (s *Service) SetLiveMemoryStore(region string, store *gamedata.Store) {
+	if s == nil || store == nil {
+		return
+	}
+	reg := snapshot.NormalizeRegion(region)
+	s.mu.Lock()
+	s.memLiveStores[reg] = store
+	s.invalidateLiveRegionCacheLocked(reg)
+	s.mu.Unlock()
+}
+
+// SetLiveMemoryTexts 为内存单元测试中的当前客户端默认区服注入文本记录。
+func (s *Service) SetLiveMemoryTexts(records []TextSnapshotRecord) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	reg := s.defaultRegionLocked()
+	s.mu.Unlock()
+	s.SetLiveMemoryTextsForRegion(reg, records)
+}
+
+// SetLiveMemoryTextsForRegion 为内存单元测试中的指定区服当前客户端注入文本记录。
+func (s *Service) SetLiveMemoryTextsForRegion(region string, records []TextSnapshotRecord) {
+	if s == nil {
+		return
+	}
+	reg := snapshot.NormalizeRegion(region)
+	sheets := buildTextSheetRows(records)
+	s.mu.Lock()
+	s.memLiveTexts[reg] = sheets
+	s.mu.Unlock()
+	s.textMu.Lock()
+	s.textDiffCache = nil
+	s.textMu.Unlock()
+}
+
+// SetLiveMemoryIcons 为内存单元测试中的当前客户端默认区服注入图标指纹与缩略图载荷。
+func (s *Service) SetLiveMemoryIcons(records []snapshot.IconDigestRecord, blobs map[string][]byte) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	reg := s.defaultRegionLocked()
+	s.mu.Unlock()
+	s.SetLiveMemoryIconsForRegion(reg, records, blobs)
+}
+
+// SetLiveMemoryIconsForRegion 为内存单元测试中的指定区服当前客户端注入图标指纹与缩略图载荷。
+func (s *Service) SetLiveMemoryIconsForRegion(region string, records []snapshot.IconDigestRecord, blobs map[string][]byte) {
+	if s == nil {
+		return
+	}
+	reg := snapshot.NormalizeRegion(region)
+	s.mu.Lock()
+	s.memLiveIcons[reg] = convertIconDigests(records)
+	for k, v := range blobs {
+		if k != "" && len(v) > 0 {
+			s.memBlobs[k] = append([]byte(nil), v...)
+		}
+	}
+	s.invalidateLiveRegionCacheLocked(reg)
 	s.mu.Unlock()
 }
 
@@ -309,302 +530,851 @@ func (s *Service) langLocked() i18n.Lang {
 	return s.uiLang
 }
 
-func (s *Service) snapshotFilePath(version string) string {
-	return filepath.Join(s.backupDir, fmt.Sprintf("snapshot-%s.json", sanitizeVersionFileName(version)))
+func (s *Service) hasCNLocked() bool {
+	if s.store == nil {
+		return false
+	}
+	if s.store.HasCN || s.store.CNReader != nil || s.store.CNVersion != "" {
+		return true
+	}
+	if !s.store.HasGlobal && s.store.GlobalReader == nil && s.store.GlobalVersion == "" {
+		return true
+	}
+	return false
 }
 
-func (s *Service) snapshotExists(version string) bool {
-	_, err := os.Stat(s.snapshotFilePath(version))
-	return err == nil
+func (s *Service) hasGlobalLocked() bool {
+	if s.store == nil {
+		return false
+	}
+	return s.store.HasGlobal || s.store.GlobalReader != nil || s.store.GlobalVersion != "" || s.memLiveStores[snapshot.RegionGlobal] != nil
 }
 
-func (s *Service) readManifest() *backupManifest {
-	raw, err := os.ReadFile(s.manifestPath)
+func (s *Service) configuredRegionsLocked() []string {
+	var regs []string
+	if s.hasCNLocked() {
+		regs = append(regs, snapshot.RegionCN)
+	}
+	if s.hasGlobalLocked() {
+		regs = append(regs, snapshot.RegionGlobal)
+	}
+	if len(regs) == 0 {
+		return []string{snapshot.RegionCN}
+	}
+	return regs
+}
+
+func (s *Service) defaultRegionLocked() string {
+	hasCN := s.hasCNLocked()
+	hasGL := s.hasGlobalLocked()
+	if hasCN && !hasGL {
+		return snapshot.RegionCN
+	}
+	if hasGL && !hasCN {
+		return snapshot.RegionGlobal
+	}
+	if s.store != nil {
+		return snapshot.NormalizeRegion(s.store.DataRegion())
+	}
+	return snapshot.RegionCN
+}
+
+func (s *Service) cnVersionLocked() string {
+	if ms, ok := s.memLiveStores[snapshot.RegionCN]; ok && ms != nil {
+		if ms.CNVersion != "" {
+			return ms.CNVersion
+		}
+		return ms.PrimaryVersion
+	}
+	if s.store == nil {
+		return ""
+	}
+	if s.store.CNVersion != "" {
+		return s.store.CNVersion
+	}
+	if s.hasCNLocked() {
+		return s.store.PrimaryVersion
+	}
+	return ""
+}
+
+func (s *Service) globalVersionLocked() string {
+	if ms, ok := s.memLiveStores[snapshot.RegionGlobal]; ok && ms != nil {
+		if ms.GlobalVersion != "" {
+			return ms.GlobalVersion
+		}
+		return ms.PrimaryVersion
+	}
+	if s.store == nil {
+		return ""
+	}
+	if s.store.GlobalVersion != "" {
+		return s.store.GlobalVersion
+	}
+	if s.hasGlobalLocked() && !s.hasCNLocked() {
+		return s.store.PrimaryVersion
+	}
+	return ""
+}
+
+func (s *Service) reloadLocalLocked() {
+	locals, err := snapshot.ListLocalSnapshots(s.snapshotDir)
 	if err != nil {
-		return nil
+		return
 	}
-	var m backupManifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil
+	next := make(map[string]snapshot.LocalSnapshotInfo, len(locals))
+	for _, info := range locals {
+		next[info.Meta.ID] = info
 	}
-	return &m
+	s.localSnaps = next
 }
 
-func (s *Service) writeManifest(m *backupManifest) error {
-	raw, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
+func (s *Service) invalidateLiveRegionCacheLocked(region string) {
+	regPrefix := region + "\x00"
+	for k := range s.liveRegionStores {
+		if strings.HasPrefix(k, regPrefix) {
+			delete(s.liveRegionStores, k)
+		}
 	}
-	return os.WriteFile(s.manifestPath, raw, 0o644)
+	prefix := region + "\x00" + LiveVersionID + "\x00"
+	for k := range s.parsedCache {
+		if strings.HasPrefix(k, prefix) {
+			delete(s.parsedCache, k)
+		}
+	}
+	delete(s.liveIconCache, region)
+	delete(s.liveIconComputedAt, region)
+	s.textMu.Lock()
+	for k := range s.textCache {
+		if strings.HasPrefix(k, prefix) {
+			delete(s.textCache, k)
+			delete(s.textCacheSeq, k)
+		}
+	}
+	s.textDiffCache = nil
+	s.textMu.Unlock()
 }
 
-func (s *Service) writeSnapshot(version string, payload *snapshotPayload) error {
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return err
+func (s *Service) invalidatePatchCachesLocked(patch string) {
+	for _, reg := range []string{snapshot.RegionCN, snapshot.RegionGlobal} {
+		snapID := snapshot.MakeSnapshotID(reg, patch)
+		if arch, ok := s.archives[snapID]; ok {
+			_ = arch.Close()
+			delete(s.archives, snapID)
+		}
+		prefix := reg + "\x00" + patch + "\x00"
+		for k := range s.parsedCache {
+			if strings.HasPrefix(k, prefix) {
+				delete(s.parsedCache, k)
+			}
+		}
+		s.textMu.Lock()
+		for k := range s.textCache {
+			if strings.HasPrefix(k, prefix) {
+				delete(s.textCache, k)
+				delete(s.textCacheSeq, k)
+			}
+		}
+		s.textDiffCache = nil
+		s.textMu.Unlock()
 	}
-	if err := os.WriteFile(s.snapshotFilePath(version), raw, 0o644); err != nil {
-		return err
-	}
-	s.snapshotCache[version] = payload
-	return nil
 }
 
-func (s *Service) loadSnapshot(version string) *snapshotPayload {
-	if cached, ok := s.snapshotCache[version]; ok {
-		return cached
-	}
-	raw, err := os.ReadFile(s.snapshotFilePath(version))
-	if err != nil {
-		return nil
-	}
-	var payload snapshotPayload
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return nil
-	}
-	s.snapshotCache[version] = &payload
-	return &payload
-}
-
-func deriveBaselineVersionName(currentVersion string) string {
-	if currentVersion == "2026.09.01.0000.0000" {
-		return "2026.08.01.0000.0000"
-	}
-	return "2026.09.01.0000.0000"
-}
-
-// InitializeOnStartup 启动时校验客户端版本号、自动维护本地快照并检测是否发生版本更新。
-func (s *Service) InitializeOnStartup() (VersionStatusResponse, error) {
+// ReloadLocalSnapshots 重新扫描本地 snapshots 目录并返回最新状态。
+func (s *Service) ReloadLocalSnapshots() VersionStatusResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if err := os.MkdirAll(s.backupDir, 0o755); err != nil {
-		return VersionStatusResponse{}, fmt.Errorf("创建版本备份目录失败: %w", err)
-	}
-
-	currentVersion := s.store.DataVersion()
-	existing := s.readManifest()
-	var existingCurrent *snapshotPayload
-	if s.snapshotExists(currentVersion) {
-		existingCurrent = s.loadSnapshot(currentVersion)
-	}
-	currentSnap := s.buildLiveSnapshot(currentVersion, s.langLocked(), existingCurrent, false)
-
-	baselineVer := deriveBaselineVersionName(currentVersion)
-	var baselineMeta *VersionBackupMeta
-	if !s.snapshotExists(baselineVer) {
-		baseSnap := s.buildBaselineSnapshot(baselineVer, currentSnap)
-		if err := s.writeSnapshot(baselineVer, baseSnap); err != nil {
-			return VersionStatusResponse{}, err
-		}
-		metaCopy := baseSnap.Meta
-		baselineMeta = &metaCopy
-	} else {
-		loaded := s.loadSnapshot(baselineVer)
-		if !snapshotNeedsSchemaUpgrade(loaded, currentSnap) {
-			metaCopy := loaded.Meta
-			baselineMeta = &metaCopy
-		} else {
-			baseSnap := s.buildBaselineSnapshot(baselineVer, currentSnap)
-			if err := s.writeSnapshot(baselineVer, baseSnap); err != nil {
-				return VersionStatusResponse{}, err
-			}
-			metaCopy := baseSnap.Meta
-			baselineMeta = &metaCopy
-		}
-	}
-
-	currentExists := s.snapshotExists(currentVersion)
-	if err := s.writeSnapshot(currentVersion, currentSnap); err != nil {
-		return VersionStatusResponse{}, err
-	}
-
-	var prevVersion string
-	var hasUpdate bool
-	backupsMap := make(map[string]VersionBackupMeta)
-	if baselineMeta != nil {
-		backupsMap[baselineMeta.Version] = *baselineMeta
-	}
-
-	if existing != nil {
-		for _, b := range existing.Backups {
-			if s.snapshotExists(b.Version) {
-				backupsMap[b.Version] = b
-			}
-		}
-		if existing.LatestVersion != currentVersion {
-			prevVersion = existing.LatestVersion
-			hasUpdate = true
-		} else {
-			prevVersion = existing.PreviousVersion
-			if prevVersion == "" && baselineMeta != nil {
-				prevVersion = baselineMeta.Version
-			}
-			hasUpdate = existing.HasVersionUpdate && !currentExists
-		}
-	} else if baselineMeta != nil {
-		prevVersion = baselineMeta.Version
-	}
-
-	backupsMap[currentVersion] = currentSnap.Meta
-
-	backups := make([]VersionBackupMeta, 0, len(backupsMap))
-	for _, m := range backupsMap {
-		backups = append(backups, m)
-	}
-	sort.Slice(backups, func(i, j int) bool {
-		if backups[i].IsBaseline != backups[j].IsBaseline {
-			return !backups[i].IsBaseline
-		}
-		return backups[i].Version > backups[j].Version
-	})
-
-	s.manifest = &backupManifest{
-		LatestVersion:    currentVersion,
-		PreviousVersion:  prevVersion,
-		HasVersionUpdate: hasUpdate,
-		LastBackupAt:     currentSnap.Meta.CreatedAt,
-		Backups:          backups,
-	}
-	if err := s.writeManifest(s.manifest); err != nil {
-		return VersionStatusResponse{}, err
-	}
-	return s.statusLocked(), nil
+	s.reloadLocalLocked()
+	return s.statusLocked()
 }
 
-func (s *Service) statusLocked() VersionStatusResponse {
-	var prev, lastAt string
-	var hasUpd bool
-	var backups []VersionBackupMeta
-	if s.manifest != nil {
-		prev = s.manifest.PreviousVersion
-		hasUpd = s.manifest.HasVersionUpdate
-		lastAt = s.manifest.LastBackupAt
-		backups = append([]VersionBackupMeta(nil), s.manifest.Backups...)
-	} else {
-		lastAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	return VersionStatusResponse{
-		CurrentVersion:   s.store.DataVersion(),
-		GlobalVersion:    s.store.GlobalVersion,
-		PreviousVersion:  prev,
-		HasVersionUpdate: hasUpd,
-		LastBackupAt:     lastAt,
-		BackupDir:        s.backupDir,
-		Backups:          backups,
-	}
-}
-
-// GetVersionStatus 返回当前版本与快照备份状态。
+// GetVersionStatus 返回双服当前客户端映射、各区服可用对比目标与统一版本目录状态。
 func (s *Service) GetVersionStatus() VersionStatusResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.statusLocked()
 }
 
-// CreateOrRefreshBackup 手动刷新当前版本的本地快照备份。
-func (s *Service) CreateOrRefreshBackup() (VersionStatusResponse, error) {
+// RefreshCatalog 从 GitHub 拉取最新的统一版本目录清单，自动更新国服与国际服当前客户端版本名映射。
+func (s *Service) RefreshCatalog(ctx context.Context) (VersionStatusResponse, error) {
+	s.mu.Lock()
+	client := s.snapshotClient
+	dir := s.snapshotDir
+	s.mu.Unlock()
+
+	cat, err := client.FetchCatalog(ctx, dir)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	currentVersion := s.store.DataVersion()
-	payload := s.buildLiveSnapshot(currentVersion, s.langLocked(), nil, true)
-	if err := s.writeSnapshot(currentVersion, payload); err != nil {
-		return VersionStatusResponse{}, err
+	s.reloadLocalLocked()
+	if err != nil {
+		s.catalogErr = err.Error()
+		return s.statusLocked(), err
 	}
-	if s.manifest != nil {
-		s.manifest.LastBackupAt = payload.Meta.CreatedAt
-		updated := false
-		for i, b := range s.manifest.Backups {
-			if b.Version == currentVersion {
-				s.manifest.Backups[i] = payload.Meta
-				updated = true
-				break
-			}
-		}
-		if !updated {
-			s.manifest.Backups = append([]VersionBackupMeta{payload.Meta}, s.manifest.Backups...)
-		}
-		if err := s.writeManifest(s.manifest); err != nil {
-			return VersionStatusResponse{}, err
-		}
-	}
+	s.catalog = cat
+	s.catalogLoaded = true
+	s.catalogErr = ""
 	return s.statusLocked(), nil
 }
 
-func snapshotNeedsSchemaUpgrade(loaded, current *snapshotPayload) bool {
-	if loaded == nil {
-		return true
+// DownloadVersion 按用户当前已配置的客户端区服（单国服 / 单国际服 / 双服），一键下载指定统一版本所需的全部快照文件。
+func (s *Service) DownloadVersion(
+	ctx context.Context,
+	patch string,
+	onProgress func(downloaded, total int64),
+) (VersionStatusResponse, error) {
+	cleanPatch := strings.TrimSpace(patch)
+	s.mu.Lock()
+	client := s.snapshotClient
+	dir := s.snapshotDir
+	regions := s.configuredRegionsLocked()
+	var target *snapshot.VersionCatalogEntry
+	for i := range s.catalog.Versions {
+		if s.catalog.Versions[i].Patch == cleanPatch {
+			cp := s.catalog.Versions[i]
+			target = &cp
+			break
+		}
 	}
-	if len(current.Achievements) > 0 && len(loaded.Achievements) == 0 {
-		return true
+	s.mu.Unlock()
+
+	if target == nil {
+		return s.GetVersionStatus(), fmt.Errorf("未在目录中找到版本 %q", cleanPatch)
 	}
-	if len(current.Quests) > 0 && len(loaded.Quests) == 0 {
-		return true
+	if _, err := client.DownloadVersion(ctx, *target, regions, dir, onProgress); err != nil {
+		return s.GetVersionStatus(), err
 	}
-	if len(current.Leves) > 0 && len(loaded.Leves) == 0 {
-		return true
-	}
-	if current.Meta.CollectableItemCount > 0 && loaded.Meta.CollectableItemCount == 0 {
-		return true
-	}
-	if len(current.BGMs) > 0 && len(loaded.BGMs) == 0 {
-		return true
-	}
-	if len(current.Icons) > 0 && len(loaded.Icons) == 0 {
-		return true
-	}
-	if len(current.Quests) > 0 && len(loaded.Quests) > 0 && current.Quests[0].CutsceneCount != nil && loaded.Quests[0].CutsceneCount == nil {
-		return true
-	}
-	return false
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.invalidatePatchCachesLocked(cleanPatch)
+	s.reloadLocalLocked()
+	return s.statusLocked(), nil
 }
 
-// CompareVersions 计算两个本地快照之间的道具（含收藏品）、任务、理符、成就、BGM 与独立图标分区差异。
-func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, error) {
-	s.mu.Lock()
-	if s.manifest == nil {
-		s.mu.Unlock()
-		if _, err := s.InitializeOnStartup(); err != nil {
-			return VersionDiffResponse{}, err
-		}
-		s.mu.Lock()
+// DeleteVersion 删除本地已下载的指定统一版本（同步清理其国服与国际服子快照）以释放磁盘空间。
+func (s *Service) DeleteVersion(patch string) (VersionStatusResponse, error) {
+	cleanPatch := strings.TrimSpace(patch)
+	if cleanPatch == "" || cleanPatch == LiveVersionID {
+		return s.GetVersionStatus(), nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.invalidatePatchCachesLocked(cleanPatch)
+	if err := snapshot.DeleteLocalVersion(s.snapshotDir, cleanPatch); err != nil {
+		return s.statusLocked(), err
+	}
+	delete(s.memSnaps, snapshot.MakeSnapshotID(snapshot.RegionCN, cleanPatch))
+	delete(s.memSnaps, snapshot.MakeSnapshotID(snapshot.RegionGlobal, cleanPatch))
+	s.reloadLocalLocked()
+	return s.statusLocked(), nil
+}
+
+func formatLiveClientDisplayName(lang i18n.Lang, patch, gameVer string) string {
+	if patch != "" {
+		return i18n.Tf(lang, "diff.live_patch_only", "patch", patch)
+	}
+	if gameVer != "" {
+		return i18n.Tf(lang, "diff.live_with_ver", "version", gameVer)
+	}
+	return i18n.T(lang, "diff.live_label")
+}
+
+func (s *Service) matchLivePatchLocked(region, gameVer string) string {
+	if gameVer == "" {
+		return ""
+	}
+	normReg := snapshot.NormalizeRegion(region)
+	for _, ver := range s.catalog.Versions {
+		if asset := ver.AssetForRegion(normReg); asset != nil && asset.GameVersion == gameVer && ver.Patch != "" {
+			return ver.Patch
+		}
+	}
+	for _, info := range s.localSnaps {
+		if snapshot.NormalizeRegion(info.Meta.Region) == normReg && info.Meta.GameVersion == gameVer && info.Meta.Patch != "" {
+			return info.Meta.Patch
+		}
+	}
+	for _, ms := range s.memSnaps {
+		if snapshot.NormalizeRegion(ms.Region) == normReg && ms.Version == gameVer && ms.Patch != "" {
+			return ms.Patch
+		}
+	}
+	return ""
+}
+
+func (s *Service) hasLocalRegionPatchLocked(region, patch string) (bool, string, string, int64) {
+	snapID := snapshot.MakeSnapshotID(region, patch)
+	if info, ok := s.localSnaps[snapID]; ok {
+		return true, info.Meta.GameVersion, info.Meta.CreatedAt, info.Size
+	}
+	if ms, ok := s.memSnaps[snapID]; ok {
+		return true, ms.Version, ms.CreatedAt, 0
+	}
+	return false, "", "", 0
+}
+
+func (s *Service) statusLocked() VersionStatusResponse {
+	lang := s.langLocked()
+	hasCN := s.hasCNLocked()
+	hasGL := s.hasGlobalLocked()
+	cfgRegions := s.configuredRegionsLocked()
+	defReg := s.defaultRegionLocked()
+
+	cnVer := s.cnVersionLocked()
+	glVer := s.globalVersionLocked()
+	cnPatch := ""
+	glPatch := ""
+	if hasCN {
+		cnPatch = s.matchLivePatchLocked(snapshot.RegionCN, cnVer)
+	}
+	if hasGL {
+		glPatch = s.matchLivePatchLocked(snapshot.RegionGlobal, glVer)
+	}
+	cnDisp := formatLiveClientDisplayName(lang, cnPatch, cnVer)
+	glDisp := formatLiveClientDisplayName(lang, glPatch, glVer)
+
+	// 聚合所有统一版本（合并 GitHub 目录与本地离线/测试已下载版本，每版本号仅出现 1 条）
+	byPatch := make(map[string]*VersionBackupMeta)
+	ensurePatch := func(patch string) *VersionBackupMeta {
+		m, ok := byPatch[patch]
+		if !ok {
+			m = &VersionBackupMeta{
+				ID:          patch,
+				Patch:       patch,
+				DisplayName: patch,
+			}
+			byPatch[patch] = m
+		}
+		return m
+	}
+
+	for _, ver := range s.catalog.Versions {
+		if strings.TrimSpace(ver.Patch) == "" {
+			continue
+		}
+		m := ensurePatch(ver.Patch)
+		if ver.CreatedAt > m.CreatedAt {
+			m.CreatedAt = ver.CreatedAt
+		}
+		if ver.CN != nil {
+			m.HasRemoteCN = true
+			m.CNVersion = ver.CN.GameVersion
+		}
+		if ver.Global != nil {
+			m.HasRemoteGlobal = true
+			m.GlobalVersion = ver.Global.GameVersion
+		}
+	}
+	for _, info := range s.localSnaps {
+		if strings.TrimSpace(info.Meta.Patch) == "" {
+			continue
+		}
+		m := ensurePatch(info.Meta.Patch)
+		if info.Meta.CreatedAt > m.CreatedAt {
+			m.CreatedAt = info.Meta.CreatedAt
+		}
+		if snapshot.NormalizeRegion(info.Meta.Region) == snapshot.RegionGlobal {
+			m.DownloadedGlobal = true
+			if m.GlobalVersion == "" {
+				m.GlobalVersion = info.Meta.GameVersion
+			}
+		} else {
+			m.DownloadedCN = true
+			if m.CNVersion == "" {
+				m.CNVersion = info.Meta.GameVersion
+			}
+		}
+	}
+	for _, ms := range s.memSnaps {
+		if strings.TrimSpace(ms.Patch) == "" {
+			continue
+		}
+		m := ensurePatch(ms.Patch)
+		if ms.CreatedAt > m.CreatedAt {
+			m.CreatedAt = ms.CreatedAt
+		}
+		if ms.Region == snapshot.RegionGlobal {
+			m.DownloadedGlobal = true
+			if m.GlobalVersion == "" {
+				m.GlobalVersion = ms.Version
+			}
+		} else {
+			m.DownloadedCN = true
+			if m.CNVersion == "" {
+				m.CNVersion = ms.Version
+			}
+		}
+	}
+
+	// 计算每个统一版本针对用户当前已配置区服的下载状态、总大小与待补全字节数
+	catByPatch := make(map[string]snapshot.VersionCatalogEntry, len(s.catalog.Versions))
+	for _, v := range s.catalog.Versions {
+		catByPatch[v.Patch] = v
+	}
+
+	remoteList := make([]VersionBackupMeta, 0, len(byPatch))
+	for patch, m := range byPatch {
+		var totalSz, remainSz int64
+		needCnt := 0
+		haveCnt := 0
+		catEntry, hasCat := catByPatch[patch]
+		for _, reg := range cfgRegions {
+			dlLocal, _, _, localSz := s.hasLocalRegionPatchLocked(reg, patch)
+			var remAsset *snapshot.RegionAsset
+			if hasCat {
+				remAsset = catEntry.AssetForRegion(reg)
+			}
+			if dlLocal || remAsset != nil {
+				needCnt++
+			}
+			if dlLocal {
+				haveCnt++
+				if localSz > 0 {
+					totalSz += localSz
+				} else if remAsset != nil {
+					totalSz += remAsset.Size
+				}
+			} else if remAsset != nil {
+				totalSz += remAsset.Size
+				remainSz += remAsset.Size
+			}
+		}
+		// 若目录中仅含用户未配置的区服，仍统计其远端总大小以展示元信息
+		if totalSz == 0 && hasCat {
+			totalSz = catEntry.TotalSizeForRegions([]string{snapshot.RegionCN, snapshot.RegionGlobal})
+		}
+		m.Size = totalSz
+		m.DownloadSize = remainSz
+		m.Downloaded = needCnt > 0 && haveCnt == needCnt
+		m.NeedsSupplement = haveCnt > 0 && haveCnt < needCnt
+		if defReg == snapshot.RegionGlobal {
+			m.Version = nonEmptyOr(m.GlobalVersion, m.CNVersion)
+		} else {
+			m.Version = nonEmptyOr(m.CNVersion, m.GlobalVersion)
+		}
+		remoteList = append(remoteList, *m)
+	}
+	sortUnifiedVersions(remoteList)
+
+	// 分别构建国服与国际服的可用版本下拉列表（只列出该区服已下载的快照 + 该区服当前客户端）
+	buildRegionBackups := func(reg string, hasLive bool, liveVer, livePatch, liveDisp string) ([]VersionBackupMeta, string, string) {
+		var downloaded []VersionBackupMeta
+		for _, v := range remoteList {
+			ok, gVer, createdAt, sz := s.hasLocalRegionPatchLocked(reg, v.Patch)
+			if !ok {
+				continue
+			}
+			item := v
+			item.Version = gVer
+			if createdAt != "" {
+				item.CreatedAt = createdAt
+			}
+			if sz > 0 {
+				item.Size = sz
+			}
+			item.Downloaded = true
+			downloaded = append(downloaded, item)
+		}
+		sortUnifiedVersions(downloaded)
+
+		var out []VersionBackupMeta
+		if hasLive {
+			out = append(out, VersionBackupMeta{
+				ID:          LiveVersionID,
+				Patch:       livePatch,
+				Version:     liveVer,
+				DisplayName: liveDisp,
+				IsLive:      true,
+				Downloaded:  true,
+			})
+		}
+		out = append(out, downloaded...)
+
+		defTo := ""
+		if hasLive {
+			defTo = LiveVersionID
+		} else if len(downloaded) > 0 {
+			defTo = downloaded[0].ID
+		}
+		defFrom := ""
+		for _, d := range downloaded {
+			if d.Version != liveVer && d.ID != defTo {
+				defFrom = d.ID
+				break
+			}
+		}
+		if defFrom == "" {
+			for _, d := range downloaded {
+				if d.ID != defTo {
+					defFrom = d.ID
+					break
+				}
+			}
+		}
+		return out, defFrom, defTo
+	}
+
+	cnBackups, defCNFrom, defCNTo := buildRegionBackups(snapshot.RegionCN, hasCN, cnVer, cnPatch, cnDisp)
+	glBackups, defGLFrom, defGLTo := buildRegionBackups(snapshot.RegionGlobal, hasGL, glVer, glPatch, glDisp)
+
+	curVer, curPatch, curDisp := cnVer, cnPatch, cnDisp
+	if defReg == snapshot.RegionGlobal {
+		curVer, curPatch, curDisp = glVer, glPatch, glDisp
+	}
+
+	return VersionStatusResponse{
+		HasCN:              hasCN,
+		HasGlobal:          hasGL,
+		ConfiguredRegions:  cfgRegions,
+		DefaultRegion:      defReg,
+		CNVersion:          cnVer,
+		CNPatch:            cnPatch,
+		CNDisplayName:      cnDisp,
+		GlobalVersion:      glVer,
+		GlobalPatch:        glPatch,
+		GlobalDisplayName:  glDisp,
+		CurrentVersion:     curVer,
+		CurrentPatch:       curPatch,
+		CurrentDisplayName: curDisp,
+		CNBackups:          cnBackups,
+		GlobalBackups:      glBackups,
+		DefaultCNFrom:      defCNFrom,
+		DefaultCNTo:        defCNTo,
+		DefaultGlobalFrom:  defGLFrom,
+		DefaultGlobalTo:    defGLTo,
+		RemoteVersions:     remoteList,
+		SnapshotDir:        s.snapshotDir,
+		CatalogLoaded:      s.catalogLoaded,
+		CatalogUpdatedAt:   s.catalog.UpdatedAt,
+		CatalogError:       s.catalogErr,
+	}
+}
+
+func sortUnifiedVersions(list []VersionBackupMeta) {
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].Patch != list[j].Patch {
+			return comparePatchDesc(list[i].Patch, list[j].Patch)
+		}
+		return list[i].Version > list[j].Version
+	})
+}
+
+func comparePatchDesc(a, b string) bool {
+	pa := strings.Split(strings.TrimPrefix(a, "v"), ".")
+	pb := strings.Split(strings.TrimPrefix(b, "v"), ".")
+	for i := 0; i < len(pa) && i < len(pb); i++ {
+		if pa[i] == pb[i] {
+			continue
+		}
+		na, ea := parseLeadingInt(pa[i])
+		nb, eb := parseLeadingInt(pb[i])
+		if ea && eb && na != nb {
+			return na > nb
+		}
+		return pa[i] > pb[i]
+	}
+	if len(pa) != len(pb) {
+		return len(pa) > len(pb)
+	}
+	return a > b
+}
+
+func parseLeadingInt(s string) (int, bool) {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[:i])
+	return n, err == nil
+}
+
+func globalCompareEXDLang(uiLang i18n.Lang) sqpack.Language {
+	if i18n.NormalizeLang(string(uiLang)) == i18n.LangJA {
+		return sqpack.LangJapanese
+	}
+	return sqpack.LangEnglish
+}
+
+func (s *Service) liveStoreForRegionLocked(region string, uiLang i18n.Lang) (*gamedata.Store, error) {
+	reg := snapshot.NormalizeRegion(region)
+	normUI := i18n.NormalizeLang(string(uiLang))
+	if ms, ok := s.memLiveStores[reg]; ok && ms != nil {
+		return ms, nil
+	}
+	if s.store == nil {
+		return nil, errors.New("当前未加载本地客户端数据")
+	}
+	storeUI := i18n.NormalizeLang(string(s.store.AppLang))
+	cacheKey := reg + "\x00" + string(normUI)
+
+	if reg == snapshot.RegionCN {
+		if !s.hasCNLocked() {
+			return nil, errors.New("当前未配置国服客户端")
+		}
+		// 纯内存测试 Store（无底层 CNReader）直接复用；真实客户端须主数据语言与界面合成文案语言（AppLang）同时一致，防止与快照产生语言伪差异
+		if s.store.CNReader == nil {
+			return s.store, nil
+		}
+		if s.store.PrimaryLang == sqpack.LangChineseSimplified && storeUI == normUI {
+			return s.store, nil
+		}
+		if cached, ok := s.liveRegionStores[cacheKey]; ok && cached != nil {
+			return cached, nil
+		}
+		st, err := gamedata.LoadGameDataStoreWithOptions(&config.ResolvedPaths{
+			CN: &config.ClientInfo{
+				RootPath: s.store.CNPath,
+				GamePath: s.store.CNReader.GamePath(),
+				Version:  s.store.CNVersion,
+			},
+		}, s.store.SchemasFS, gamedata.StoreLoadOptions{
+			AppLang:       normUI,
+			BaseStore:     s.store,
+			SharedReaders: true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("读取当前国服客户端数据失败: %w", err)
+		}
+		s.liveRegionStores[cacheKey] = st
+		return st, nil
+	}
+
+	// 国际服实时客户端
+	if !s.hasGlobalLocked() {
+		return nil, errors.New("当前未配置国际服客户端")
+	}
+	glEXDLang := globalCompareEXDLang(normUI)
+	if s.store.GlobalReader == nil {
+		return s.store, nil
+	}
+	if s.store.PrimaryLang == glEXDLang && storeUI == normUI {
+		return s.store, nil
+	}
+	if cached, ok := s.liveRegionStores[cacheKey]; ok && cached != nil {
+		return cached, nil
+	}
+	st, err := gamedata.LoadGameDataStoreWithOptions(&config.ResolvedPaths{
+		Global: &config.ClientInfo{
+			RootPath: s.store.GlobalPath,
+			GamePath: s.store.GlobalReader.GamePath(),
+			Version:  s.store.GlobalVersion,
+		},
+	}, s.store.SchemasFS, gamedata.StoreLoadOptions{
+		AppLang:       normUI,
+		BaseStore:     s.store,
+		SharedReaders: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("读取当前国际服客户端数据失败: %w", err)
+	}
+	s.liveRegionStores[cacheKey] = st
+	return st, nil
+}
+
+func (s *Service) openArchiveLocked(region, patch string) (*snapshot.Archive, error) {
+	snapID := snapshot.MakeSnapshotID(region, patch)
+	if arch, ok := s.archives[snapID]; ok {
+		return arch, nil
+	}
+	info, ok := s.localSnaps[snapID]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s (%s)", ErrSnapshotNotDownloaded, patch, region)
+	}
+	arch, err := snapshot.OpenArchive(info.FilePath)
+	if err != nil {
+		return nil, fmt.Errorf("打开历史快照 %s 失败: %w", snapID, err)
+	}
+	s.archives[snapID] = arch
+	return arch, nil
+}
+
+func (s *Service) loadTargetPayloadLocked(region, target string, uiLang i18n.Lang, needIcons bool) (*snapshotPayload, error) {
+	reg := snapshot.NormalizeRegion(region)
+	cacheKey := reg + "\x00" + target + "\x00" + string(uiLang)
+	if entry, ok := s.parsedCache[cacheKey]; ok && entry != nil && entry.payload != nil {
+		s.parsedSeq++
+		entry.seq = s.parsedSeq
+		if needIcons && len(entry.payload.Icons) == 0 && target == LiveVersionID {
+			if liveSt, err := s.liveStoreForRegionLocked(reg, uiLang); err == nil {
+				entry.payload.Icons = s.loadLiveIconsForRegionLocked(reg, liveSt)
+			}
+		}
+		return entry.payload, nil
+	}
+
+	// 1. 当前本地客户端（严格对应当前对比区服：国服取国服，国际服取国际服）
+	if target == LiveVersionID {
+		liveSt, err := s.liveStoreForRegionLocked(reg, uiLang)
+		if err != nil {
+			return nil, err
+		}
+		curVer := s.cnVersionLocked()
+		if reg == snapshot.RegionGlobal {
+			curVer = s.globalVersionLocked()
+		}
+		curPatch := s.matchLivePatchLocked(reg, curVer)
+		meta := VersionBackupMeta{
+			ID:          LiveVersionID,
+			Patch:       curPatch,
+			Version:     curVer,
+			DisplayName: formatLiveClientDisplayName(uiLang, curPatch, curVer),
+			IsLive:      true,
+			Downloaded:  true,
+		}
+		var icons []compactIconRecord
+		if needIcons {
+			icons = s.loadLiveIconsForRegionLocked(reg, liveSt)
+		}
+		payload := buildPayloadFromStore(liveSt, meta, uiLang, icons, true)
+		s.putParsedCacheLocked(cacheKey, payload, liveSt)
+		return payload, nil
+	}
+
+	// 2. 内存测试快照（按 region + patch 精确匹配）
+	snapID := snapshot.MakeSnapshotID(reg, target)
+	if ms, ok := s.memSnaps[snapID]; ok {
+		m := VersionBackupMeta{
+			ID:          ms.Patch,
+			Patch:       ms.Patch,
+			Version:     ms.Version,
+			DisplayName: ms.Patch,
+			CreatedAt:   ms.CreatedAt,
+			Downloaded:  true,
+		}
+		icons := convertIconDigests(ms.Icons)
+		payload := buildPayloadFromStore(ms.Store, m, uiLang, icons, false)
+		s.putParsedCacheLocked(cacheKey, payload, ms.Store)
+		return payload, nil
+	}
+
+	// 3. 本地已下载的同区服 .xivsnap 原始数据快照
+	arch, err := s.openArchiveLocked(reg, target)
+	if err != nil {
+		return nil, err
+	}
+	am := arch.Meta()
+	bgmRecords, _ := arch.ReadBGMDigests()
+	presetDigests := make(map[int]gamedata.BGMDigest, len(bgmRecords))
+	presetExists := make(map[string]bool, len(bgmRecords))
+	for _, r := range bgmRecords {
+		if r.File != "" && r.FileExists {
+			presetExists[r.File] = true
+		}
+		if r.ID > 0 {
+			presetDigests[r.ID] = gamedata.BGMDigest{
+				File:       r.File,
+				FileExists: r.FileExists,
+				FileSize:   r.FileSize,
+				ContentMD5: r.ContentMD5,
+			}
+		}
+	}
+
+	schemasFS := arch.SchemasFS()
+	if schemasFS == nil && s.store != nil {
+		schemasFS = s.store.SchemasFS
+	}
+	// 快照与当前客户端统一使用相同的界面语言 AppLang 格式化合成标签（如收藏品/解锁奖励前缀），避免同版本跨语言产生伪差异
+	snapStore, err := gamedata.LoadGameDataStoreFromSnapshot(arch, schemasFS, gamedata.SnapshotStoreOptions{
+		AppLang:          i18n.NormalizeLang(string(uiLang)),
+		Region:           reg,
+		Version:          am.GameVersion,
+		BGMDigests:       presetDigests,
+		PresetFileExists: presetExists,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("解析历史快照 %s (%s) 失败: %w", target, reg, err)
+	}
+
+	iconRecords, _ := arch.ReadIconDigests()
+	meta := VersionBackupMeta{
+		ID:          am.Patch,
+		Patch:       am.Patch,
+		Version:     am.GameVersion,
+		DisplayName: am.Patch,
+		CreatedAt:   am.CreatedAt,
+		Downloaded:  true,
+	}
+	payload := buildPayloadFromStore(snapStore, meta, uiLang, convertIconDigests(iconRecords), false)
+	s.putParsedCacheLocked(cacheKey, payload, snapStore)
+	return payload, nil
+}
+
+func (s *Service) putParsedCacheLocked(key string, payload *snapshotPayload, st *gamedata.Store) {
+	const maxCachedStores = 6
+	if len(s.parsedCache) >= maxCachedStores {
+		var oldestKey string
+		var oldestSeq uint64 = ^uint64(0)
+		for k, v := range s.parsedCache {
+			if strings.Contains(k, "\x00"+LiveVersionID+"\x00") {
+				continue
+			}
+			if v.seq < oldestSeq {
+				oldestSeq = v.seq
+				oldestKey = k
+			}
+		}
+		if oldestKey != "" {
+			delete(s.parsedCache, oldestKey)
+		}
+	}
+	s.parsedSeq++
+	s.parsedCache[key] = &parsedSnapCacheEntry{
+		payload: payload,
+		store:   st,
+		seq:     s.parsedSeq,
+	}
+}
+
+// CompareVersions 在指定区服下严格执行同服对比（国服对国服、国际服对国际服），返回分页结果。
+func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, error) {
+	return s.compareVersions(query, true)
+}
+
+// CollectDiffEntries 在指定区服下严格执行同服对比，返回符合筛选条件的全部差异记录（不分页，供导出使用）。
+func (s *Service) CollectDiffEntries(query VersionDiffQuery) (VersionDiffResponse, error) {
+	return s.compareVersions(query, false)
+}
+
+func (s *Service) compareVersions(query VersionDiffQuery, paginate bool) (VersionDiffResponse, error) {
+	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	liveVer := s.store.DataVersion()
 	lang := s.langLocked()
-	toVersion := query.To
-	if toVersion == "" {
-		toVersion = liveVer
-	}
-	fromVersion := query.From
-	if fromVersion == "" && s.manifest != nil {
-		fromVersion = s.manifest.PreviousVersion
-	}
-	if fromVersion == "" {
-		fromVersion = deriveBaselineVersionName(liveVer)
+	status := s.statusLocked()
+
+	region := strings.TrimSpace(query.Region)
+	if region == "" {
+		region = status.DefaultRegion
+	} else {
+		region = snapshot.NormalizeRegion(region)
 	}
 
-	toSnap := s.loadSnapshot(toVersion)
-	if toSnap == nil {
-		toSnap = s.buildLiveSnapshot(liveVer, lang, nil, false)
+	defFrom, defTo := status.DefaultPairForRegion(region)
+	toID := strings.TrimSpace(query.To)
+	if toID == "" {
+		toID = defTo
 	}
-	fromSnap := s.loadSnapshot(fromVersion)
-	if fromSnap == nil {
-		fromSnap = s.buildBaselineSnapshot(fromVersion, toSnap)
+	fromID := strings.TrimSpace(query.From)
+	if fromID == "" {
+		fromID = defFrom
 	}
 
-	var allEntries []DiffItemEntry
-	var summary DiffSummary
-
-	allEntries = append(allEntries, diffItems(lang, fromSnap, toSnap, &summary)...)
-	allEntries = append(allEntries, diffQuests(lang, fromSnap, toSnap, &summary)...)
-	allEntries = append(allEntries, diffLeves(lang, fromSnap, toSnap, &summary)...)
-	allEntries = append(allEntries, diffAchievements(lang, fromSnap, toSnap, &summary)...)
-	allEntries = append(allEntries, diffBGMs(lang, fromSnap, toSnap, &summary)...)
-	iconEntries := diffIcons(lang, fromSnap, toSnap, &summary)
-	summary.AddedRecipes = max(0, toSnap.Meta.RecipeCount-fromSnap.Meta.RecipeCount)
+	if fromID == "" || toID == "" {
+		return VersionDiffResponse{
+			NeedsDownload: true,
+			Region:        region,
+			FromID:        fromID,
+			ToID:          toID,
+			Page:          1,
+			PageSize:      max(1, query.PageSize),
+			TotalPages:    1,
+		}, nil
+	}
 
 	filter := query.Filter
 	if filter == "" {
@@ -616,9 +1386,51 @@ func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, 
 	}
 	q := strings.ToLower(strings.TrimSpace(query.Q))
 
+	needIcons := entityType == "icon" ||
+		len(s.memLiveIcons[region]) > 0 ||
+		(s.store != nil && s.store.PrimaryReader == nil && len(s.store.Icons) > 0)
+
+	fromSnap, err := s.loadTargetPayloadLocked(region, fromID, lang, needIcons)
+	if err != nil {
+		return VersionDiffResponse{}, err
+	}
+	toSnap, err := s.loadTargetPayloadLocked(region, toID, lang, needIcons)
+	if err != nil {
+		return VersionDiffResponse{}, err
+	}
+
+	var allEntries []DiffItemEntry
+	var summary DiffSummary
+
+	allEntries = append(allEntries, diffItems(lang, fromSnap, toSnap, &summary)...)
+	allEntries = append(allEntries, diffQuests(lang, fromSnap, toSnap, &summary)...)
+	allEntries = append(allEntries, diffLeves(lang, fromSnap, toSnap, &summary)...)
+	allEntries = append(allEntries, diffAchievements(lang, fromSnap, toSnap, &summary)...)
+	allEntries = append(allEntries, diffBGMs(lang, fromSnap, toSnap, &summary)...)
+	iconEntries := diffIcons(lang, fromSnap, toSnap, &summary)
+	summary.AddedRecipes = max(0, toSnap.RecipeCount-fromSnap.RecipeCount)
+
+	textEntries, textMod, textRem, textAvail := s.computeTextDiffLocked(region, lang, fromID, toID, entityType == "text")
+	summary.ModifiedTexts = textMod
+	summary.RemovedTexts = textRem
+	summary.TextDiffAvailable = textAvail
+
 	filtered := make([]DiffItemEntry, 0, 128)
-	if entityType == "icon" {
-		// 图标对比独立分区：不在「全部」中混入，仅当显式筛选 icon 时输出
+	switch entityType {
+	case "text":
+		for _, e := range textEntries {
+			if filter == "added" {
+				continue
+			}
+			if filter != "all" && e.ChangeType != filter {
+				continue
+			}
+			if q != "" && !textDiffEntryMatchesQuery(e, q) {
+				continue
+			}
+			filtered = append(filtered, e)
+		}
+	case "icon":
 		for _, e := range iconEntries {
 			if filter != "all" && e.ChangeType != filter {
 				continue
@@ -645,7 +1457,7 @@ func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, 
 			}
 			return filtered[i].ID < filtered[j].ID
 		})
-	} else {
+	default:
 		for _, e := range allEntries {
 			if filter != "all" && e.ChangeType != filter {
 				continue
@@ -666,6 +1478,29 @@ func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, 
 		})
 	}
 
+	totalFiltered := len(filtered)
+	if !paginate {
+		items := make([]DiffItemEntry, totalFiltered)
+		copy(items, filtered)
+		return VersionDiffResponse{
+			Region:          region,
+			FromID:          fromID,
+			ToID:            toID,
+			FromVersion:     fromSnap.Meta.Version,
+			ToVersion:       toSnap.Meta.Version,
+			FromDisplayName: fromSnap.Meta.DisplayName,
+			ToDisplayName:   toSnap.Meta.DisplayName,
+			FromCreatedAt:   fromSnap.Meta.CreatedAt,
+			ToCreatedAt:     toSnap.Meta.CreatedAt,
+			Summary:         summary,
+			Items:           items,
+			TotalFiltered:   totalFiltered,
+			Page:            1,
+			PageSize:        totalFiltered,
+			TotalPages:      1,
+		}, nil
+	}
+
 	pageSize := query.PageSize
 	if pageSize <= 0 {
 		pageSize = 30
@@ -677,7 +1512,6 @@ func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, 
 	if pageSize > maxPageSize {
 		pageSize = maxPageSize
 	}
-	totalFiltered := len(filtered)
 	totalPages := max(1, (totalFiltered+pageSize-1)/pageSize)
 	page := query.Page
 	if page < 1 {
@@ -690,21 +1524,81 @@ func (s *Service) CompareVersions(query VersionDiffQuery) (VersionDiffResponse, 
 	end := min(totalFiltered, start+pageSize)
 	var items []DiffItemEntry
 	if start < end {
-		items = filtered[start:end]
+		items = make([]DiffItemEntry, end-start)
+		copy(items, filtered[start:end])
+		if entityType == "text" {
+			s.enrichTextDiffPageLocked(items, region, toID)
+		}
 	}
 
 	return VersionDiffResponse{
-		FromVersion:   fromSnap.Meta.Version,
-		ToVersion:     toSnap.Meta.Version,
-		FromCreatedAt: fromSnap.Meta.CreatedAt,
-		ToCreatedAt:   toSnap.Meta.CreatedAt,
-		Summary:       summary,
-		Items:         items,
-		TotalFiltered: totalFiltered,
-		Page:          page,
-		PageSize:      pageSize,
-		TotalPages:    totalPages,
+		Region:          region,
+		FromID:          fromID,
+		ToID:            toID,
+		FromVersion:     fromSnap.Meta.Version,
+		ToVersion:       toSnap.Meta.Version,
+		FromDisplayName: fromSnap.Meta.DisplayName,
+		ToDisplayName:   toSnap.Meta.DisplayName,
+		FromCreatedAt:   fromSnap.Meta.CreatedAt,
+		ToCreatedAt:     toSnap.Meta.CreatedAt,
+		Summary:         summary,
+		Items:           items,
+		TotalFiltered:   totalFiltered,
+		Page:            page,
+		PageSize:        pageSize,
+		TotalPages:      totalPages,
 	}, nil
+}
+
+func (s *Service) resolveEXDSourceLocked(region, target string) (sqpack.FileReader, fs.FS, sqpack.Language) {
+	reg := snapshot.NormalizeRegion(region)
+	if target == LiveVersionID {
+		liveSt, err := s.liveStoreForRegionLocked(reg, s.langLocked())
+		if err != nil || liveSt == nil {
+			return nil, nil, sqpack.LangNone
+		}
+		var r sqpack.FileReader
+		if reg == snapshot.RegionGlobal {
+			if liveSt.GlobalReader != nil {
+				r = liveSt.GlobalReader
+			} else if liveSt.EXDReader != nil {
+				r = liveSt.EXDReader
+			} else if liveSt.PrimaryReader != nil {
+				r = liveSt.PrimaryReader
+			}
+			return r, liveSt.SchemasFS, globalCompareEXDLang(s.langLocked())
+		}
+		if liveSt.CNReader != nil {
+			r = liveSt.CNReader
+		} else if liveSt.EXDReader != nil {
+			r = liveSt.EXDReader
+		} else if liveSt.PrimaryReader != nil {
+			r = liveSt.PrimaryReader
+		}
+		return r, liveSt.SchemasFS, sqpack.LangChineseSimplified
+	}
+
+	snapID := snapshot.MakeSnapshotID(reg, target)
+	if ms, ok := s.memSnaps[snapID]; ok && ms.Store != nil {
+		var r sqpack.FileReader = ms.Store.EXDReader
+		if r == nil && ms.Store.PrimaryReader != nil {
+			r = ms.Store.PrimaryReader
+		}
+		return r, ms.Store.SchemasFS, ms.Store.PrimaryLang
+	}
+	arch, err := s.openArchiveLocked(reg, target)
+	if err != nil {
+		return nil, nil, sqpack.LangNone
+	}
+	lang := sqpack.LangChineseSimplified
+	if reg == snapshot.RegionGlobal {
+		lang = globalCompareEXDLang(s.langLocked())
+	}
+	sfs := arch.SchemasFS()
+	if sfs == nil && s.store != nil {
+		sfs = s.store.SchemasFS
+	}
+	return arch, sfs, lang
 }
 
 func diffEntryMatchesQuery(e DiffItemEntry, q string) bool {
@@ -1193,7 +2087,6 @@ func formatBGMByteSize(size uint32) string {
 }
 
 func diffBGMs(lang i18n.Lang, fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffItemEntry {
-	// 兼容旧版未采集 BGM 的历史快照：缺少 BGM 记录时不误报全量新增
 	if len(fromSnap.BGMs) == 0 || len(toSnap.BGMs) == 0 {
 		return nil
 	}
@@ -1295,7 +2188,6 @@ func diffSingleBGM(lang i18n.Lang, before, after compactBGMRecord) []ItemFieldCh
 			After:  nonEmptyOr(after.File, noneStr),
 		})
 	}
-	// 仅告知用户音频内容发生变化，不在展示层暴露新旧 MD5 哈希值
 	if !before.FileExists && after.FileExists {
 		changes = append(changes, ItemFieldChange{
 			Field:  "content",
@@ -1607,19 +2499,19 @@ func boolPtr(b bool) *bool {
 	return &v
 }
 
-func (s *Service) buildLiveSnapshot(version string, lang i18n.Lang, reuse *snapshotPayload, forceDigest bool) *snapshotPayload {
-	var gatherCnt, purchCnt, colTurnInCnt int
-	items := make([]compactItemRecord, 0, len(s.store.ItemSummaries))
-	for _, it := range s.store.ItemSummaries {
-		if it.IsGatherable {
-			gatherCnt++
-		}
-		if it.IsPurchasable {
-			purchCnt++
-		}
-		if it.IsCollectableTurnIn {
-			colTurnInCnt++
-		}
+func buildPayloadFromStore(
+	store *gamedata.Store,
+	meta VersionBackupMeta,
+	lang i18n.Lang,
+	icons []compactIconRecord,
+	computeLiveBGM bool,
+) *snapshotPayload {
+	if store == nil {
+		return &snapshotPayload{Meta: meta, Icons: icons}
+	}
+
+	items := make([]compactItemRecord, 0, len(store.ItemSummaries))
+	for _, it := range store.ItemSummaries {
 		items = append(items, compactItemRecord{
 			ID:                  it.ID,
 			NameCn:              it.NameCn,
@@ -1637,12 +2529,12 @@ func (s *Service) buildLiveSnapshot(version string, lang i18n.Lang, reuse *snaps
 			IsRetainerVenture:   boolPtr(it.IsRetainerVenture),
 			IsCollectableTurnIn: boolPtr(it.IsCollectableTurnIn),
 			IsCollectableReward: boolPtr(it.IsCollectableReward),
-			CollectableSummary:  summarizeCollectableTurnIns(lang, s.store.CollectableTurnInsByItem[it.ID]),
+			CollectableSummary:  summarizeCollectableTurnIns(lang, store.CollectableTurnInsByItem[it.ID]),
 		})
 	}
 
-	quests := make([]compactQuestRecord, 0, len(s.store.Quests))
-	for _, q := range s.store.Quests {
+	quests := make([]compactQuestRecord, 0, len(store.Quests))
+	for _, q := range store.Quests {
 		primaryItem := q.CurrencyRewardItemID
 		if len(q.RewardItems) > 0 {
 			primaryItem = q.RewardItems[0].ItemID
@@ -1673,8 +2565,8 @@ func (s *Service) buildLiveSnapshot(version string, lang i18n.Lang, reuse *snaps
 		})
 	}
 
-	leves := make([]compactLeveRecord, 0, len(s.store.Leves))
-	for _, lv := range s.store.Leves {
+	leves := make([]compactLeveRecord, 0, len(store.Leves))
+	for _, lv := range store.Leves {
 		iconID := lv.AssignmentTypeIconID
 		if iconID <= 0 {
 			iconID = lv.IconCityState
@@ -1697,12 +2589,8 @@ func (s *Service) buildLiveSnapshot(version string, lang i18n.Lang, reuse *snaps
 		})
 	}
 
-	titleCnt := 0
-	achs := make([]compactAchievementRecord, 0, len(s.store.Achievements))
-	for _, a := range s.store.Achievements {
-		if a.TitleID > 0 {
-			titleCnt++
-		}
+	achs := make([]compactAchievementRecord, 0, len(store.Achievements))
+	for _, a := range store.Achievements {
 		achs = append(achs, compactAchievementRecord{
 			ID:               a.ID,
 			NameCn:           a.NameCn,
@@ -1721,41 +2609,17 @@ func (s *Service) buildLiveSnapshot(version string, lang i18n.Lang, reuse *snaps
 		})
 	}
 
-	bgms := make([]compactBGMRecord, 0, len(s.store.BGMs))
-	if len(s.store.BGMs) > 0 {
-		canReuse := !forceDigest && reuse != nil && len(reuse.BGMs) > 0
-		var reuseByID map[int]compactBGMRecord
-		if canReuse {
-			reuseByID = make(map[int]compactBGMRecord, len(reuse.BGMs))
-			for _, rec := range reuse.BGMs {
-				reuseByID[rec.ID] = rec
-			}
-			for _, b := range s.store.BGMs {
-				if b.File == "" {
-					continue
-				}
-				rec, ok := reuseByID[b.ID]
-				if !ok || rec.File != b.File || rec.FileExists != b.FileExists || (b.FileExists && rec.ContentMD5 == "") {
-					canReuse = false
-					break
-				}
-			}
-		}
+	bgms := make([]compactBGMRecord, 0, len(store.BGMs))
+	if len(store.BGMs) > 0 {
 		var digests map[int]gamedata.BGMDigest
-		if !canReuse {
-			digests = s.store.ComputeBGMDigests(forceDigest)
+		if computeLiveBGM && store.PrimaryReader != nil {
+			digests = store.ComputeBGMDigests(false)
 		}
-		for _, b := range s.store.BGMs {
+		for _, b := range store.BGMs {
 			fileExists := b.FileExists
 			fileSize := b.FileSize
 			contentMD5 := b.ContentMD5
-			if canReuse {
-				if rec, ok := reuseByID[b.ID]; ok {
-					fileExists = rec.FileExists
-					fileSize = rec.FileSize
-					contentMD5 = rec.ContentMD5
-				}
-			} else if d, ok := digests[b.ID]; ok {
+			if d, ok := digests[b.ID]; ok {
 				fileExists = d.FileExists
 				fileSize = d.FileSize
 				contentMD5 = d.ContentMD5
@@ -1778,211 +2642,14 @@ func (s *Service) buildLiveSnapshot(version string, lang i18n.Lang, reuse *snaps
 		}
 	}
 
-	icons := s.buildLiveIcons(reuse, forceDigest)
-
 	return &snapshotPayload{
-		Meta: VersionBackupMeta{
-			Version:              version,
-			GlobalVersion:        s.store.GlobalVersion,
-			CreatedAt:            time.Now().UTC().Format(time.RFC3339),
-			ItemCount:            len(items),
-			RecipeCount:          len(s.store.Recipes),
-			GatherableCount:      gatherCnt,
-			PurchasableCount:     purchCnt,
-			AchievementCount:     len(achs),
-			TitleCount:           titleCnt,
-			QuestCount:           len(quests),
-			LeveCount:            len(leves),
-			CollectableCount:     s.store.TotalCollectables,
-			CollectableItemCount: colTurnInCnt,
-			BGMCount:             len(bgms),
-			IconCount:            len(icons),
-			IsBaseline:           false,
-		},
+		Meta:         meta,
+		RecipeCount:  len(store.Recipes),
 		Items:        items,
 		Quests:       quests,
 		Leves:        leves,
 		Achievements: achs,
 		BGMs:         bgms,
 		Icons:        icons,
-	}
-}
-
-func (s *Service) buildBaselineSnapshot(baselineVer string, current *snapshotPayload) *snapshotPayload {
-	var baseItems []compactItemRecord
-	var gatherCnt, purchCnt, colTurnInCnt int
-	for _, it := range current.Items {
-		if it.ItemLevel >= 745 || it.ID >= 46200 {
-			continue
-		}
-		clone := it
-		if it.IsRetainerVenture != nil {
-			clone.IsRetainerVenture = boolPtr(*it.IsRetainerVenture)
-		}
-		if it.IsCollectableTurnIn != nil {
-			clone.IsCollectableTurnIn = boolPtr(*it.IsCollectableTurnIn)
-		}
-		if it.IsCollectableReward != nil {
-			clone.IsCollectableReward = boolPtr(*it.IsCollectableReward)
-		}
-		if it.ItemLevel >= 710 && it.ItemLevel <= 740 {
-			if it.IsPurchasable && it.ID%5 == 0 {
-				clone.IsPurchasable = false
-			}
-			if it.IsCraftable && it.ID%11 == 0 {
-				clone.IsCraftable = false
-			}
-		}
-		if clone.IsCollectableTurnIn != nil && *clone.IsCollectableTurnIn && clone.ItemLevel >= 690 && clone.ID%17 == 0 {
-			clone.IsCollectableTurnIn = boolPtr(false)
-			clone.CollectableSummary = ""
-		}
-		if clone.IsGatherable {
-			gatherCnt++
-		}
-		if clone.IsPurchasable {
-			purchCnt++
-		}
-		if clone.IsCollectableTurnIn != nil && *clone.IsCollectableTurnIn {
-			colTurnInCnt++
-		}
-		baseItems = append(baseItems, clone)
-	}
-
-	// 按排序位置截取历史基准任务与理符（避免绑定单个版本硬编码 ID）
-	var baseQuests []compactQuestRecord
-	if len(current.Quests) > 0 {
-		sortedQIDs := make([]int, len(current.Quests))
-		for i, q := range current.Quests {
-			sortedQIDs[i] = q.ID
-		}
-		sort.Ints(sortedQIDs)
-		questCutIdx := len(sortedQIDs)
-		if len(sortedQIDs) >= 20 {
-			questCutIdx = max(1, len(sortedQIDs)-max(3, len(sortedQIDs)/50))
-		}
-		questCutoff := sortedQIDs[questCutIdx-1]
-		for _, q := range current.Quests {
-			if len(sortedQIDs) >= 20 && q.ID > questCutoff {
-				continue
-			}
-			clone := q
-			if q.CutsceneCount != nil {
-				c := *q.CutsceneCount
-				clone.CutsceneCount = &c
-			}
-			if len(sortedQIDs) >= 20 && clone.GilReward > 0 && clone.ID%37 == 0 {
-				clone.GilReward = max(0, clone.GilReward-100)
-			}
-			baseQuests = append(baseQuests, clone)
-		}
-	}
-
-	var baseLeves []compactLeveRecord
-	if len(current.Leves) > 0 {
-		sortedLIDs := make([]int, len(current.Leves))
-		for i, lv := range current.Leves {
-			sortedLIDs[i] = lv.ID
-		}
-		sort.Ints(sortedLIDs)
-		leveCutIdx := len(sortedLIDs)
-		if len(sortedLIDs) >= 20 {
-			leveCutIdx = max(1, len(sortedLIDs)-max(2, len(sortedLIDs)/50))
-		}
-		leveCutoff := sortedLIDs[leveCutIdx-1]
-		for _, lv := range current.Leves {
-			if len(sortedLIDs) >= 20 && lv.ID > leveCutoff {
-				continue
-			}
-			clone := lv
-			if len(sortedLIDs) >= 20 && clone.ExpReward > 0 && clone.ID%23 == 0 {
-				clone.ExpReward = int(math.Round(float64(clone.ExpReward) * 0.9))
-			}
-			baseLeves = append(baseLeves, clone)
-		}
-	}
-
-	var baseAchs []compactAchievementRecord
-	baseTitleCnt := 0
-	for _, a := range current.Achievements {
-		if a.ID >= 3650 {
-			continue
-		}
-		clone := a
-		if a.ID >= 3500 && a.ID <= 3649 && a.ID%19 == 0 {
-			clone.Points = max(5, a.Points-10)
-		}
-		if clone.TitleID > 0 {
-			baseTitleCnt++
-		}
-		baseAchs = append(baseAchs, clone)
-	}
-
-	var baseBGMs []compactBGMRecord
-	if len(current.BGMs) > 0 {
-		realIDs := make([]int, 0, len(current.BGMs))
-		byID := make(map[int]compactBGMRecord, len(current.BGMs))
-		for _, b := range current.BGMs {
-			byID[b.ID] = b
-			if !b.IsPlaceholder && b.File != "" {
-				realIDs = append(realIDs, b.ID)
-			}
-		}
-		sort.Ints(realIDs)
-		cutIDs := make(map[int]bool)
-		modIDs := make(map[int]bool)
-		if len(realIDs) >= 20 {
-			cutCount := min(15, max(3, len(realIDs)/80))
-			for _, id := range realIDs[len(realIDs)-cutCount:] {
-				cutIDs[id] = true
-			}
-			remain := realIDs[:len(realIDs)-cutCount]
-			for i := len(remain) - 1; i >= 0 && len(modIDs) < 2; i-- {
-				b := byID[remain[i]]
-				if b.FileExists && b.ContentMD5 != "" && b.ID%17 == 0 {
-					modIDs[b.ID] = true
-				}
-			}
-		}
-		baseBGMs = make([]compactBGMRecord, 0, len(current.BGMs))
-		for _, b := range current.BGMs {
-			if cutIDs[b.ID] {
-				continue
-			}
-			clone := b
-			if modIDs[b.ID] {
-				clone.ContentMD5 = "baseline-prev"
-			}
-			baseBGMs = append(baseBGMs, clone)
-		}
-	}
-
-	baseIcons := buildBaselineIcons(current.Icons)
-
-	return &snapshotPayload{
-		Meta: VersionBackupMeta{
-			Version:              baselineVer,
-			GlobalVersion:        current.Meta.GlobalVersion,
-			CreatedAt:            "2026-09-01T10:00:00Z",
-			ItemCount:            len(baseItems),
-			RecipeCount:          max(0, current.Meta.RecipeCount-142),
-			GatherableCount:      gatherCnt,
-			PurchasableCount:     purchCnt,
-			AchievementCount:     len(baseAchs),
-			TitleCount:           baseTitleCnt,
-			QuestCount:           len(baseQuests),
-			LeveCount:            len(baseLeves),
-			CollectableCount:     current.Meta.CollectableCount,
-			CollectableItemCount: colTurnInCnt,
-			BGMCount:             len(baseBGMs),
-			IconCount:            len(baseIcons),
-			IsBaseline:           true,
-		},
-		Items:        baseItems,
-		Quests:       baseQuests,
-		Leves:        baseLeves,
-		Achievements: baseAchs,
-		BGMs:         baseBGMs,
-		Icons:        baseIcons,
 	}
 }

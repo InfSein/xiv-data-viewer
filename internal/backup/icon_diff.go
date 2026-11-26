@@ -1,127 +1,63 @@
 package backup
 
 import (
-	"bufio"
-	"context"
 	"fmt"
 	"image"
-	"io"
-	"os"
-	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 
+	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/InfSein/xiv-data-viewer/internal/i18n"
+	"github.com/InfSein/xiv-data-viewer/internal/snapshot"
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
-type iconBlobLoc struct {
-	offset int64
-	length uint32
-}
-
 type compactIconRecord struct {
-	ID        int    `json:"id"`
-	Digest    string `json:"d"`
-	Variants  string `json:"v,omitempty"`
-	BlobKey   string `json:"b,omitempty"`
-	ThumbPNG  []byte `json:"t,omitempty"` // 仅用于单元测试或合成内联缩略图回退
-	HasHR1    bool   `json:"h,omitempty"`
-	HasHQ     bool   `json:"q,omitempty"`
-	HasLocale bool   `json:"l,omitempty"`
+	ID        int
+	Digest    string
+	Variants  string
+	BlobKey   string
+	ThumbPNG  []byte
+	HasHR1    bool
+	HasHQ     bool
+	HasLocale bool
 }
 
-func (s *Service) iconBlobIndexPath() string {
-	return filepath.Join(s.backupDir, "icon_blobs.idx")
-}
-
-func (s *Service) iconBlobDataPath() string {
-	return filepath.Join(s.backupDir, "icon_blobs.dat")
-}
-
-func (s *Service) ensureBlobIndexLocked() {
-	if s.blobLoaded {
-		return
-	}
-	s.blobLoaded = true
-	if s.blobIndex == nil {
-		s.blobIndex = make(map[string]iconBlobLoc, 4096)
-	}
-	f, err := os.Open(s.iconBlobIndexPath())
-	if err != nil {
-		return
-	}
-	defer func() { _ = f.Close() }()
-
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		parts := strings.Split(line, "\t")
-		if len(parts) != 3 {
-			continue
-		}
-		off, err1 := strconv.ParseInt(parts[1], 10, 64)
-		sz, err2 := strconv.ParseUint(parts[2], 10, 32)
-		if err1 != nil || err2 != nil || off < 0 || sz == 0 {
-			continue
-		}
-		s.blobIndex[parts[0]] = iconBlobLoc{offset: off, length: uint32(sz)}
-	}
-}
-
-func (s *Service) hasIconBlob(key string) bool {
-	if key == "" {
-		return false
-	}
-	s.blobMu.Lock()
-	defer s.blobMu.Unlock()
-	s.ensureBlobIndexLocked()
-	_, ok := s.blobIndex[key]
-	return ok
-}
-
-// ReadIconBlobImage 从去重备份包 icon_blobs.dat 中只读解码指定键对应的历史/快照图标图像。
-func (s *Service) ReadIconBlobImage(blobKey string) (*image.RGBA, error) {
-	if s == nil || blobKey == "" {
-		return nil, nil
-	}
-	s.blobMu.Lock()
-	s.ensureBlobIndexLocked()
-	loc, ok := s.blobIndex[blobKey]
-	s.blobMu.Unlock()
-	if !ok || loc.length == 0 {
-		return nil, nil
-	}
-
-	f, err := os.Open(s.iconBlobDataPath())
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	buf := make([]byte, loc.length)
-	if _, err := io.ReadFull(io.NewSectionReader(f, loc.offset, int64(loc.length)), buf); err != nil {
-		return nil, err
-	}
-	return sqpack.DecodeIconBlobToRGBA(buf)
-}
-
-func (s *Service) buildLiveIcons(reuse *snapshotPayload, forceDigest bool) []compactIconRecord {
-	if s.store == nil || len(s.store.Icons) == 0 {
+func convertIconDigests(in []snapshot.IconDigestRecord) []compactIconRecord {
+	if len(in) == 0 {
 		return nil
 	}
-	if !forceDigest && reuse != nil && len(reuse.Icons) == len(s.store.Icons) && len(reuse.Icons) > 0 {
-		return reuse.Icons
+	out := make([]compactIconRecord, len(in))
+	for i, r := range in {
+		out[i] = compactIconRecord{
+			ID:        r.ID,
+			Digest:    r.Digest,
+			Variants:  r.Variants,
+			BlobKey:   r.BlobKey,
+			HasHR1:    r.HasHR1,
+			HasHQ:     r.HasHQ,
+			HasLocale: r.HasLocale,
+		}
+	}
+	return out
+}
+
+func (s *Service) loadLiveIconsForRegionLocked(region string, liveStore *gamedata.Store) []compactIconRecord {
+	reg := snapshot.NormalizeRegion(region)
+	if icons, ok := s.memLiveIcons[reg]; ok && len(icons) > 0 {
+		return icons
+	}
+	if s.liveIconComputedAt[reg] {
+		return s.liveIconCache[reg]
+	}
+	s.liveIconComputedAt[reg] = true
+	if liveStore == nil || len(liveStore.Icons) == 0 {
+		return nil
 	}
 
-	// 若未挂载客户端归档（如单元测试纯内存 Store），生成轻量元数据记录以便无客户端场景测试
-	if s.store.CNReader == nil && s.store.GlobalReader == nil && s.store.PrimaryReader == nil {
-		out := make([]compactIconRecord, 0, len(s.store.Icons))
-		for _, ic := range s.store.Icons {
+	// 无底层客户端归档时（纯内存测试 Store）根据内存图标元数据生成轻量指纹
+	if liveStore.CNReader == nil && liveStore.GlobalReader == nil && liveStore.PrimaryReader == nil {
+		out := make([]compactIconRecord, 0, len(liveStore.Icons))
+		for _, ic := range liveStore.Icons {
 			var parts []string
 			for _, v := range ic.Variants {
 				vn := v.Variant
@@ -145,19 +81,37 @@ func (s *Service) buildLiveIcons(reuse *snapshotPayload, forceDigest bool) []com
 				HasLocale: ic.HasLocalized,
 			})
 		}
+		s.liveIconCache[reg] = out
 		return out
 	}
 
-	snaps, blobTasks, err := s.store.ComputeIconDigests()
+	// 严格仅扫描当前对比区服对应客户端的 060000 图标（国服对国服、国际服对国际服）
+	var targetReader *sqpack.GameReader
+	if reg == snapshot.RegionGlobal {
+		targetReader = liveStore.GlobalReader
+		if targetReader == nil {
+			targetReader = liveStore.PrimaryReader
+		}
+	} else {
+		targetReader = liveStore.CNReader
+		if targetReader == nil {
+			targetReader = liveStore.PrimaryReader
+		}
+	}
+	if targetReader == nil {
+		return nil
+	}
+	files, err := sqpack.ScanIconFiles(targetReader)
+	if err != nil || len(files) == 0 {
+		return nil
+	}
+	snaps, _, err := sqpack.ComputeIconDigests([]sqpack.IconDigestSource{{
+		Reader: targetReader,
+		Files:  files,
+	}})
 	if err != nil || len(snaps) == 0 {
 		return nil
 	}
-
-	// 暂存待归档任务；避免阻塞启动加载页，稍后由 StartBackgroundBlobSync 在后台静默落盘
-	s.blobMu.Lock()
-	s.pendingBlobs = blobTasks
-	s.blobMu.Unlock()
-
 	out := make([]compactIconRecord, len(snaps))
 	for i, r := range snaps {
 		out[i] = compactIconRecord{
@@ -170,206 +124,63 @@ func (s *Service) buildLiveIcons(reuse *snapshotPayload, forceDigest bool) []com
 			HasLocale: r.HasLocalized,
 		}
 	}
+	s.liveIconCache[reg] = out
 	return out
 }
 
-// StartBackgroundBlobSync 在后台低优先级队列中去重保存当前版本的图标代表缩略图（不阻塞主界面打开）。
-func (s *Service) StartBackgroundBlobSync() {
-	if s == nil {
-		return
+// ReadIconBlobRaw 从内存测试数据或已下载的 .xivsnap 快照中读取指定键的原始图标载荷字节。
+func (s *Service) ReadIconBlobRaw(blobKey string) ([]byte, bool) {
+	if s == nil || blobKey == "" {
+		return nil, false
 	}
-	s.blobMu.Lock()
-	if len(s.pendingBlobs) == 0 || s.blobSyncCancel != nil {
-		s.blobMu.Unlock()
-		return
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if raw, ok := s.memBlobs[blobKey]; ok && len(raw) > 0 {
+		return append([]byte(nil), raw...), true
 	}
-	tasks := s.pendingBlobs
-	s.pendingBlobs = nil
-	ctx, cancel := context.WithCancel(context.Background())
-	s.blobSyncCancel = cancel
-	s.blobSyncWg.Add(1)
-	s.blobMu.Unlock()
-
-	go func() {
-		defer s.blobSyncWg.Done()
-		_ = s.archiveTasks(ctx, tasks, 2)
-	}()
+	for _, arch := range s.archives {
+		if raw, ok := arch.ReadIconThumbBlob(blobKey); ok && len(raw) > 0 {
+			return append([]byte(nil), raw...), true
+		}
+	}
+	for id, info := range s.localSnaps {
+		if _, opened := s.archives[id]; opened {
+			continue
+		}
+		arch, err := snapshot.OpenArchive(info.FilePath)
+		if err != nil {
+			continue
+		}
+		s.archives[id] = arch
+		if raw, ok := arch.ReadIconThumbBlob(blobKey); ok && len(raw) > 0 {
+			return append([]byte(nil), raw...), true
+		}
+	}
+	return nil, false
 }
 
-// Close 停止并等待后台缩略图归档写入任务安全退出并关闭文件句柄。
-func (s *Service) Close() {
-	if s == nil {
-		return
+// ReadIconBlobImage 从已下载的 .xivsnap 快照附带的变动/移除旧图标缩略图载荷中解码历史图标图像。
+func (s *Service) ReadIconBlobImage(blobKey string) (*image.RGBA, error) {
+	raw, ok := s.ReadIconBlobRaw(blobKey)
+	if !ok || len(raw) == 0 {
+		return nil, nil
 	}
-	s.blobMu.Lock()
-	cancel := s.blobSyncCancel
-	s.blobSyncCancel = nil
-	s.pendingBlobs = nil
-	s.blobMu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	s.blobSyncWg.Wait()
+	return sqpack.DecodeIconBlobToRGBA(raw)
 }
 
-func (s *Service) archiveTasks(ctx context.Context, tasks []sqpack.IconBlobTask, workers int) error {
-	if len(tasks) == 0 {
-		return nil
+// ReadIconBlobPNG 从内存载荷或快照归档中读取历史图标并还原为 PNG 字节（供版本对比批量导出使用）。
+func (s *Service) ReadIconBlobPNG(blobKey string, thumbRaw []byte) ([]byte, error) {
+	if len(thumbRaw) > 0 {
+		return sqpack.DecodeIconBlobToPNG(thumbRaw)
 	}
-	s.blobMu.Lock()
-	s.ensureBlobIndexLocked()
-	s.blobMu.Unlock()
-
-	var datFile, idxFile *os.File
-	var datWriter, idxWriter *bufio.Writer
-	var datOffset int64
-
-	ensureOpenWriters := func() error {
-		if datFile != nil {
-			return nil
-		}
-		if err := os.MkdirAll(s.backupDir, 0o755); err != nil {
-			return err
-		}
-		df, err := os.OpenFile(s.iconBlobDataPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if err != nil {
-			return err
-		}
-		st, err := df.Stat()
-		if err != nil {
-			_ = df.Close()
-			return err
-		}
-		inf, err := os.OpenFile(s.iconBlobIndexPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if err != nil {
-			_ = df.Close()
-			return err
-		}
-		datFile = df
-		idxFile = inf
-		datOffset = st.Size()
-		datWriter = bufio.NewWriterSize(df, 256*1024)
-		idxWriter = bufio.NewWriterSize(inf, 64*1024)
-		return nil
+	if blobKey == "" || s == nil {
+		return nil, nil
 	}
-
-	defer func() {
-		if datWriter != nil {
-			_ = datWriter.Flush()
-		}
-		if idxWriter != nil {
-			_ = idxWriter.Flush()
-		}
-		if datFile != nil {
-			_ = datFile.Close()
-		}
-		if idxFile != nil {
-			_ = idxFile.Close()
-		}
-	}()
-
-	return sqpack.ArchiveIconBlobs(
-		ctx,
-		tasks,
-		s.hasIconBlob,
-		func(blobKey string, payload []byte) error {
-			if len(payload) == 0 || blobKey == "" {
-				return nil
-			}
-			s.blobMu.Lock()
-			defer s.blobMu.Unlock()
-			s.ensureBlobIndexLocked()
-			if _, ok := s.blobIndex[blobKey]; ok {
-				return nil
-			}
-			if err := ensureOpenWriters(); err != nil {
-				return err
-			}
-			off := datOffset
-			n, err := datWriter.Write(payload)
-			if err != nil {
-				return err
-			}
-			datOffset += int64(n)
-			if _, err := fmt.Fprintf(idxWriter, "%s\t%d\t%d\n", blobKey, off, n); err != nil {
-				return err
-			}
-			s.blobIndex[blobKey] = iconBlobLoc{offset: off, length: uint32(n)}
-			return nil
-		},
-		workers,
-	)
-}
-
-func buildBaselineIcons(current []compactIconRecord) []compactIconRecord {
-	if len(current) == 0 {
-		return nil
+	raw, ok := s.ReadIconBlobRaw(blobKey)
+	if !ok || len(raw) == 0 {
+		return nil, nil
 	}
-	sorted := make([]compactIconRecord, len(current))
-	copy(sorted, current)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].ID < sorted[j].ID
-	})
-
-	cutTail := 1
-	if len(sorted) >= 30 {
-		cutTail = min(16, max(4, len(sorted)/200))
-	}
-	keepN := max(1, len(sorted)-cutTail)
-
-	existingIDs := make(map[int]bool, len(sorted))
-	for _, r := range sorted {
-		existingIDs[r.ID] = true
-	}
-
-	out := make([]compactIconRecord, 0, keepN+2)
-	modTarget := 3
-	if keepN < 10 {
-		modTarget = 1
-	}
-	modCount := 0
-
-	for i := 0; i < keepN; i++ {
-		clone := sorted[i]
-		if len(clone.ThumbPNG) > 0 {
-			clone.ThumbPNG = append([]byte(nil), clone.ThumbPNG...)
-		}
-		if modCount < modTarget && keepN >= 4 && i > 0 && (i == keepN-2 || (keepN >= 30 && i%max(1, keepN/4) == 0)) {
-			neighbor := sorted[(i+1)%keepN]
-			clone.Digest = "baseline-prev-" + clone.Digest
-			if neighbor.BlobKey != "" && neighbor.BlobKey != clone.BlobKey {
-				clone.BlobKey = neighbor.BlobKey
-			}
-			if len(neighbor.ThumbPNG) > 0 {
-				clone.ThumbPNG = append([]byte(nil), neighbor.ThumbPNG...)
-			}
-			modCount++
-		}
-		out = append(out, clone)
-	}
-
-	if keepN >= 12 {
-		addedRemoved := 0
-		for _, candID := range []int{999998, 999999} {
-			if existingIDs[candID] || addedRemoved >= len(out) {
-				continue
-			}
-			src := out[addedRemoved]
-			out = append(out, compactIconRecord{
-				ID:        candID,
-				Digest:    fmt.Sprintf("baseline-rem-%d", candID),
-				Variants:  src.Variants,
-				BlobKey:   src.BlobKey,
-				ThumbPNG:  src.ThumbPNG,
-				HasHR1:    src.HasHR1,
-				HasHQ:     src.HasHQ,
-				HasLocale: src.HasLocale,
-			})
-			addedRemoved++
-		}
-	}
-
-	return out
+	return sqpack.DecodeIconBlobToPNG(raw)
 }
 
 func summarizeIconRecordVariants(lang i18n.Lang, ic compactIconRecord) string {
@@ -390,7 +201,6 @@ func summarizeIconRecordVariants(lang i18n.Lang, ic compactIconRecord) string {
 }
 
 func diffIcons(lang i18n.Lang, fromSnap, toSnap *snapshotPayload, summary *DiffSummary) []DiffItemEntry {
-	// 兼容未记录图标指纹的历史旧版快照：缺失字段时平滑跳过，不误报全量新增
 	if len(fromSnap.Icons) == 0 || len(toSnap.Icons) == 0 {
 		return nil
 	}

@@ -23,6 +23,7 @@
 | `internal/sqpack/cutscene.go` | 纯 Go 只读 `.cutb` 过场动画时间线音乐轨道 (`C070`) 提取与 `.luab` (Lua 5.1) 任务脚本过场/BGM 调用解析器。 |
 | `internal/sqpack/icon.go` | 纯 Go `060000` 图标索引与 `.dat` 资源存在性扫描、变体路径映射（含 `_hr1`/`hq`/`chs`/`en`/`ja`/`de`/`fr`）、区域采样缩略图缩放及 PNG 无损解码。 |
 | `internal/sqpack/icon_digest.go` | 按物理磁盘偏移顺序扫描 `060000` 图标跨版本指纹并生成紧凑缩略图载荷（`'T'+zlib .tex` / `'P'+PNG`）与解码还原。 |
+| `internal/sqpack/text_scan.go` | 按物理归档偏移排序、复用解压器池与零堆字符串分片字节池，多核并发只读扫描客户端全量 EXD 数据表中的非空文本单元格。 |
 | `internal/gamedata/types.go` | 定义道具（含 `NameZh`/`NameJa`/`NameEn`）、装备词条、食品药效、制作配方树、采集/垂钓/刺鱼、NPC 商店、雇员探险、任务、理符、收藏品交易、成就称号与音乐 BGM 全量业务模型。 |
 | `internal/gamedata/eorzea_time.go` | 艾欧泽亚时间 (ET) 实时换算器与按界面语言格式化的限时采集点开放窗口及现实剩余倒计时评估工具。 |
 | `internal/gamedata/shop_loader.go` | 解析 `GilShop`、`SpecialShop`、`GCScripShopItem`、`FccShop`、`CollectablesShop` 关联、多跳 `ENpcBase` 引用链与 `Level` 3D 坐标。 |
@@ -34,19 +35,23 @@
 | `internal/gamedata/collectables_loader.go` | 解析 `CollectablesShop` 收藏品交易、`SatisfactionNpc`/`SatisfactionSupply` 老主顾及 `HWDCrafterSupply` 苍天街供货三档价值与工票双向索引。 |
 | `internal/gamedata/music_loader.go` | 解析 `BGM`、`BGMSituation`、`BGMSwitch`、`BGMSystemDefine`、`WeddingBGM` 与 `Orchestrion*` 乐谱，联动区域、副本、坐骑、FATE/GATE、理符与乐谱物品，并提供并发 BGM 摘要计算。 |
 | `internal/gamedata/icon_loader.go` | 构建并合并国服/国际服有效图标总索引与每 1000 编号分组摘要（自动隐藏空分组并跳过空编号），关联物品/任务/成就/理符反向引用。 |
-| `internal/gamedata/loader.go` | 并发加载全量核心游戏表与 Schema 对齐扩展表并构建内存正反向索引，支持按目标语言 (`zh`/`ja`/`en`) 动态切换主语言数据源，兼容**仅国服**、**仅国际服**与**双服联查**三种运行模式。 |
+| `internal/gamedata/text_search.go` | 面向全量 EXD 文本的纯内存高性能检索引擎：采用无指针连续字节 Arena、独立 SoA 64 位字符位图、BMP 直寻址高频裁剪倒排索引、多核并行匹配与 64 位整数打包排序及翻页缓存，支持顺序模糊检索（如 `AD` 匹配 `ABCD`）与英文双引号连贯精确检索（如 `"AB"`）、范围/数据表筛选及实体详情反查。 |
+| `internal/gamedata/loader.go` | 并发加载全量核心游戏表与 Schema 对齐扩展表并构建内存正反向索引，支持从本地只读客户端与历史 `.xivsnap` 快照复用同一套解析引擎，支持按目标语言 (`zh`/`ja`/`en`) 动态切换主语言数据源，兼容**仅国服**、**仅国际服**与**双服联查**三种运行模式。 |
 | `internal/gamedata/service.go` | 核心查询业务层：跨模块名称包含检索与多模块均衡排序 (`SearchGlobal`)、分页定位、中/日/英三语联合搜索与筛选、装备/HQ/自动攻击/药效计算、递归配方树、3D→2D 地图坐标换算、任务/理符、成就与音乐试听查询。 |
-| `internal/backup/backup.go` / `icon_diff.go` | 启动版本检查、应用数据目录快照持久化（含按内容寻址去重 `icon_blobs.dat`/`icon_blobs.idx` 图标缩略图包，支持按语言隔离目录）与按当前语言输出字段级 Diff 的对比服务（图标差异划归独立分区，不在「全部」中混入，并平滑兼容无图标/BGM的历史旧快照）。 |
+| `internal/snapshot/` | 分块固实 zstd `.xivsnap` 原始数据快照归档读写器（内嵌全量 EXD 表、配套 `EXDSchema`、BGM 音频指纹、图标指纹与变动旧图标缩略图）、维护者本地去重图标缓存、只读客户端快照打包器及直连 GitHub（走系统代理）的目录拉取与 SHA256 校验下载客户端。 |
+| `cmd/pack-snapshot/main.go` | 维护者专用只读快照打包命令行工具，读取本地 `.env` 客户端目录生成国服或国际服（日英双语合一）`.xivsnap` 快照与 `SHA256SUMS` / 目录条目清单。 |
+| `internal/backup/backup.go` / `icon_diff.go` / `text_diff.go` | 管理 GitHub 快照目录（`InfSein/xiv-data-snapshots`）与本地下载缓存（`snapshots/`，不再在本地自建备份），按需复用 `gamedata` 解析引擎动态读取历史 `.xivsnap` 与当前本地客户端计算实体、音乐、独立图标分区及独立全量文本分区的本地化字段级 Diff。 |
 | `internal/exporter/schema.go` | 复用 `sqpack` 的 EXDSchema YAML 对齐能力，并从 `exd/root.exl` 读取 7,900+ 全量表清单。 |
 | `internal/exporter/exporter.go` | 生成带 UTF-8 BOM 的 RFC 4180 / SaintCoinach 三行表头 CSV，支持本地目录清理重解包与 Zip 打包导出（含实时进度与中断）。 |
 | `internal/exporter/icon_exporter.go` | 按 SaintCoinach 路径分布（`ui/icon/000000/[chs/hq/]000000[_hr1].png`）提供多线程无损 PNG 解码到本地目录与流式 Zip 压缩包导出器。 |
+| `internal/exporter/diff_exporter.go` | 版本对比全量差异导出引擎：支持图标高清优先批量导出（`图标ID.png`、可选变更旧图）、物品及其他实体图标按 `编号_名称.png` 批量导出、BGM 批量导出（`.ogg`/`.scd`）及 CSV/JSON/Markdown 变更报告导出。 |
 | `internal/updater/updater.go` | 基于 GitHub Release（含限流重定向回退与 `SHA256SUMS.txt` 校验）的应用内置自更新客户端，支持静默后台下载、可回滚原子文件替换与旧版备份清理。 |
 | `internal/uiapp/fonts.go` | 使用 `//go:embed` 内嵌 Google Sans (`Regular`/`Medium`/`Bold`) 字体文件并在应用初始化时通过 `ui.RegisterFont` 注册为默认西文与数字字体。 |
 | `internal/uiapp/tokens.go` | 参考 Godwit 客户端构建 Tailwind v4 OKLCH 中性浅色/深色主题体系、按界面语言切换的字体回退栈、浮起面板 (`kitPanel`)、卡片、侧栏项、分段滑块、拖拽分隔条及统一矢量图标库。 |
 | `internal/uiapp/icons.go` | 游戏图标与地图贴图的后台异步解码及 MyGo GPU `*ui.Bitmap` 有界缓存。 |
 | `internal/uiapp/app.go` | 客户端顶层状态机，协调首次启动系统语言探测、语言切换与数据源热重载、`modeSetup` 引导、异步加载 (`modeLoading`)、主题持久化、GitHub Release 启动静默/主动更新流程与主工作台 (`modeReady`)。 |
 | `internal/uiapp/view_setup.go` | 单画布聚焦式首次引导选目录页（含欢迎页三语实时切换、区服模式切换、拖拽路径识别与纠错）、三阶段实时加载进度页及居中「设置」中心（含语言切换、主题、路径配置与导出入口）。 |
-| `internal/uiapp/view_workbench.go` | 融合可拖拽顶栏（品牌菜单含导出/快照/主题/设置/检查更新 + 折叠侧栏 + 全局跨模块名称检索浮层与页面跳转 + 右上角全局语言切换）、左侧导航（【数据】物品/任务/理符/成就、【资源】音乐/图标、【历史】最近/收藏、【对比】版本对比、更新日志、【设置】及左下角更新就绪重启提醒）及带页内搜索栏的物品双浮起面板。 |
+| `internal/uiapp/view_workbench.go` | 融合可拖拽顶栏（品牌菜单含导出/快照/主题/设置/检查更新 + 折叠侧栏 + 全局跨模块名称检索浮层与页面跳转 + 右上角全局语言切换）、左侧导航（【数据】物品/任务/理符/成就、【资源】音乐/图标、【历史】最近/收藏、【工具】版本对比/文本检索、更新日志、【设置】及左下角更新就绪重启提醒）及带页内搜索栏的物品双浮起面板。 |
 | `internal/uiapp/view_changelog.go` | 结构化多语言更新日志页面，按版本卡、发布状态徽章、变更分类标签、标题/正文分层与行内代码高亮展示 `CHANGELOG.md` 及 `docs/CHANGELOG.{en,ja}.md`，支持版本筛选、分类过滤、页内搜索与版本折叠。 |
 | `internal/uiapp/view_detail.go` | 物品阅读器风格悬浮详情面板（支持收藏切换、按当前语言规则展示副语言名称、收藏品交易与老主顾交纳明细、任务/理符关联、成就奖励、商店、配方树、采集倒计时与雇员探险）。 |
 | `internal/uiapp/view_quests.go` | 任务检索与阅读工作台（含内置页内搜索栏、收藏切换、按规则展示副语言名称、横幅插图、前置跳转、关联过场动画与 BGM 直跳及默认折叠防剧透的概要与对话文本）。 |
@@ -57,7 +62,8 @@
 | `internal/uiapp/view_icons.go` | 「资源 / 图标」三栏工作台与导出弹窗（左侧每 1000 编号分组且隐藏空组、中央虚拟化图标网格自动跳过空编号、右侧高清/多语言变体属性预览与反向引用跳转，并按 SaintCoinach 规范导出单个 PNG、本地目录或 Zip 压缩包）。 |
 | `internal/uiapp/view_recent.go` | 「最近」浏览记录工作台：汇总最近打开过的物品、任务、理符与音乐（上限 500 条），支持类型筛选、页内搜索、分页与右侧复用对应详情阅读或试听面板。 |
 | `internal/uiapp/view_favorites.go` | 「收藏」工作台：顶部提供物品、任务、理符、成就与音乐五个切换标签页，并分别展示与对应原页面一致的双栏详情/试听或全宽表格界面。 |
-| `internal/uiapp/view_diff.go` / `view_diff_icons.go` | 悬浮面板版本快照对比视图（含内置页内搜索栏、常规实体明细表、独立「图标」平铺与新旧对照对比分区及详情一键直跳）。 |
+| `internal/uiapp/view_diff.go` / `view_diff_icons.go` / `view_diff_text.go` / `view_diff_export.go` | 悬浮面板版本快照对比视图（人类可读游戏版本号下拉选择、GitHub 快照下载与本地清理管理弹窗、异步快照解析加载状态、常规实体明细表、独立「图标」平铺与新旧对照分区、独立「文本」变更/移除与行内字符差异高亮对比分区、统一差异与资源批量导出弹窗及详情一键直跳）。 |
+| `internal/uiapp/view_text_search.go` | 「工具 / 文本检索」全量文本检索工作台（支持按需后台异步建索引、顺序模糊与英文双引号连贯精确模式实时指示、命中字符高亮、表格多语言对照列、长文本摘录展开、范围/表分布筛选、分页、一键复制及关联实体详情直跳）。 |
 | `internal/uiapp/view_modals.go` | Godwit 对话框规范地图贴图预览弹窗（带坐标大头针）、全量 CSV 导出弹窗（原生目录/保存对话框 + 细进度条 + 取消控制）及 GitHub Release 检查更新弹窗。 |
 | `.github/workflows/ci.yml` | PR 与非主分支推送自动检查：`mygo.json` 校验、`gofmt`、`go vet`、`mygo vet`、单元测试（含无头 UI 测试）及 Windows `amd64/arm64` 构建验证。 |
 | `.github/workflows/release.yml` | `master` 分支更新或推送 `v*` 标签时自动验证并构建 Windows `amd64/arm64` NSIS 安装包与便携 ZIP，生成 `SHA256SUMS.txt` 并创建/更新 GitHub Release。 |
@@ -91,7 +97,8 @@
   ├──► view_icons.go        (每 1000 编号图标分组、虚拟化网格、变体预览、引用反查与 SaintCoinach 导出)
   ├──► view_recent.go       (最近打开的物品/任务/理符/音乐工作台，上限 500 条)
   ├──► view_favorites.go    (分标签页展示收藏的物品/任务/理符/成就/音乐)
-  ├──► view_diff.go         (版本快照对比；图标差异独立分区与平铺/新旧对照由 view_diff_icons.go 承接)
+  ├──► view_diff.go         (版本快照对比；图标与文本独立对比分区分别由 view_diff_icons.go / view_diff_text.go 承接)
+  ├──► view_text_search.go  (全量 EXD 文本模糊/精确检索工作台、多语言对照列、命中高亮、分页与实体直跳)
   ├──► view_changelog.go    (三语结构化更新日志展示)
   └──► view_modals.go       (原生贴图地图预览 + CSV 导出弹窗)
                     │
@@ -121,3 +128,11 @@
    - `internal/sqpack/icon.go` 基于 `060000.win32.index`/`.index2` 与 `.dat` 头的按偏移序读校验（识别并剔除 `fileType == fileTypeEmpty` 或体积为 0 的空占位编号，约 1.1 秒完成 ~19.5 万有效文件扫描），仅显示包含至少 1 个有效图标的非空 1,000 号段分组，在网格中跳过无资源编号并支持按 `maxThumbSide = 128` 区域采样缩略图缓存。
    - `internal/exporter/icon_exporter.go` 支持多线程解码并以 SaintCoinach `ui/icon/{分组}000/[chs/en/ja/de/fr/hq/]{6位编号}[_hr1].png` 目录结构导出无损 RGBA PNG 到本地目录或流式 Zip 压缩包，弹窗默认全选当前可用变体并提供细粒度过滤。
    - `internal/backup/icon_diff.go` 在版本切换创建快照时对全量图标仅做按偏移顺序的单次 4KB 头与块指纹校验（重复版本秒级复用），并通过内容寻址的 `icon_blobs.dat` / `icon_blobs.idx` 去重存储旧版代表图以支撑「版本对比 → 图标」独立分区中的新增/移除平铺与新旧图标并排对比，且平滑兼容缺少图标记录的历史快照。
+8. **全量 EXD 文本按需极速检索架构**：
+   - `internal/sqpack/text_scan.go` 仅在首次打开「工具 → 文本检索」时按物理归档偏移顺序并发扫描全部 7,000+ 张含文本 EXD 表（零堆 string 装箱），约 0.6 秒完成 156 万条全量文本读取与索引构建，完全不拖慢应用启动速度，并在会话中跨语言切换持久化复用。
+   - `internal/gamedata/text_search.go` 采用无指针连续字节 Arena、独立 SoA 64 位字符存在位图与 BMP 直寻址高频裁剪倒排索引，结合多核并行匹配与 64 位整数打包排序，在 156 万条记录上实现毫秒级模糊/精确检索与零延迟翻页，并通过有界 EXH/EXD 分片缓存按需点查分页结果的多语言对照译文（跨版本按 EXDSchema 字段名校正列偏移）。
+   - `internal/backup/text_diff.go` 在进入「版本对比 → 文本」独立分区时直接从历史 `.xivsnap` 原始 EXD 与当前客户端按需扫描全量本地化文本并做双指针流式归并（仅追踪变更与移除，跳过海量新增），支持行内字符级差异高亮。
+9. **基于 GitHub 托管 `.xivsnap` 原始数据快照的版本对比架构**：
+   - 彻底废弃本地自建 JSON 快照、合成历史基线及本地全量 `icon_blobs.dat`/`text-snapshot-*.bin` 写入，改为统一从独立快照仓库 `InfSein/xiv-data-snapshots`（`catalog.json` 按统一版本聚合 `versions[]` + 单版本 GitHub Release `v<patch>`）按需下载独立完整的 `.xivsnap` 版本快照（4 MiB 分块固实 zstd 压缩）。
+   - 每个 `.xivsnap` 封存目标区服全量 7,900+ 张 EXD 原始表（国际服合入 `ja`+`en` 双语并剔除 `de`/`fr`）、配套版本 `EXDSchema` YAML、轻量 BGM 音频指纹清单、全量图标指纹清单以及相比上一版本发生变更或移除的旧图标缩略图；未来主程序新增任何数据解析模块，历史快照均自动具备完整字段级回溯对比能力。
+   - 用户下载快照时仅面向统一版本号（如 `7.58`、`7.55`），客户端根据已配置的国服/国际服路径自动拉取对应子包（双服模式一次下载自动补齐两服）；同时配置双服时版本对比顶部同时识别国服与国际服当前版本并提供一键切换，底层严格执行国服对国服、国际服对国际服的同服对比。

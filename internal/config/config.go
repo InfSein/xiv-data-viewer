@@ -20,6 +20,7 @@ type AppConfig struct {
 	GlobalPath          string `json:"globalPath"`
 	ExportOutputDir     string `json:"exportOutputDir"`
 	IconExportOutputDir string `json:"iconExportOutputDir,omitempty"`
+	DiffExportOutputDir string `json:"diffExportOutputDir,omitempty"`
 	Theme               string `json:"theme,omitempty"`    // "system" | "light" | "dark"，空值默认跟随系统
 	Language            string `json:"language,omitempty"` // "zh" | "ja" | "en"，空值表示自动跟随系统语言
 }
@@ -77,6 +78,7 @@ func normalizeConfigFields(cfg *AppConfig) {
 	cfg.GlobalPath = strings.TrimSpace(cfg.GlobalPath)
 	cfg.ExportOutputDir = strings.TrimSpace(cfg.ExportOutputDir)
 	cfg.IconExportOutputDir = strings.TrimSpace(cfg.IconExportOutputDir)
+	cfg.DiffExportOutputDir = strings.TrimSpace(cfg.DiffExportOutputDir)
 	if lang, ok := i18n.ParseLang(cfg.Language); ok {
 		cfg.Language = string(lang)
 	} else {

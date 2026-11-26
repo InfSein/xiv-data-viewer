@@ -246,8 +246,8 @@ func resolveNeededColumnIndexes(colIndex map[string]int, neededFields []string) 
 }
 
 // LoadSheetWithSchema 读取普通表并按 EXDSchema YAML 自动对齐列名；neededFields 非空时仅解包所需列。
-func LoadSheetWithSchema(reader *GameReader, schemasFS fs.FS, sheetName string, preferredLang Language, neededFields []string) (*SchemaSheet, error) {
-	if reader == nil || schemasFS == nil {
+func LoadSheetWithSchema(reader FileReader, schemasFS fs.FS, sheetName string, preferredLang Language, neededFields []string) (*SchemaSheet, error) {
+	if isNilFileReader(reader) || schemasFS == nil {
 		return &SchemaSheet{Rows: make(map[int]Row), Cols: make(map[string]int)}, nil
 	}
 	lower := strings.ToLower(sheetName)
@@ -280,8 +280,8 @@ func LoadSheetWithSchema(reader *GameReader, schemasFS fs.FS, sheetName string, 
 }
 
 // LoadSubrowSheetWithSchema 读取子行表并按 EXDSchema YAML 自动对齐列名。
-func LoadSubrowSheetWithSchema(reader *GameReader, schemasFS fs.FS, sheetName string, preferredLang Language) (*SchemaSubrowSheet, error) {
-	if reader == nil || schemasFS == nil {
+func LoadSubrowSheetWithSchema(reader FileReader, schemasFS fs.FS, sheetName string, preferredLang Language) (*SchemaSubrowSheet, error) {
+	if isNilFileReader(reader) || schemasFS == nil {
 		return &SchemaSubrowSheet{Rows: make(map[int][]SubRow), Cols: make(map[string]int)}, nil
 	}
 	lower := strings.ToLower(sheetName)

@@ -620,15 +620,13 @@ func (a *App) renderLoadingView(c *ui.Context) {
 	switch a.loadStage {
 	case loadStageSheets:
 		if a.loadSheetsTotal > 0 {
-			pct = 72 * float32(a.loadSheetsDone) / float32(a.loadSheetsTotal)
+			pct = 75 * float32(a.loadSheetsDone) / float32(a.loadSheetsTotal)
 		} else {
 			pct = 8
 		}
 	case loadStageIndices:
 		totalIdx := max(1, a.loadIndexTotal)
-		pct = 72 + 20*float32(a.loadIndexStep)/float32(totalIdx)
-	case loadStageSnapshot:
-		pct = 94
+		pct = 75 + 23*float32(a.loadIndexStep)/float32(totalIdx)
 	}
 	pct = min(max(pct, 4), 98)
 
@@ -706,17 +704,10 @@ func (a *App) renderLoadingView(c *ui.Context) {
 							indicesMeta = a.tf("loading.step_progress", "step", fmt.Sprintf("%d", min(a.loadIndexStep+1, max(1, a.loadIndexTotal))), "total", fmt.Sprintf("%d", max(1, a.loadIndexTotal)))
 						}
 
-						snapshotMeta := a.t("loading.waiting")
-						if a.loadStage == loadStageSnapshot {
-							snapshotMeta = a.t("loading.verifying")
-						}
-
 						kitCard(c, ui.Column(c).FillWidth().Clip(), toneCard).Children(func() {
 							drawLoadingStageRow(c, a.t("loading.stage_sheets"), sheetsMeta, a.loadStage == loadStageSheets, a.loadStage > loadStageSheets)
 							kitSeparator(c, false).Margin(0, 16)
 							drawLoadingStageRow(c, a.t("loading.stage_indices"), indicesMeta, a.loadStage == loadStageIndices, a.loadStage > loadStageIndices)
-							kitSeparator(c, false).Margin(0, 16)
-							drawLoadingStageRow(c, a.t("loading.stage_snapshot"), snapshotMeta, a.loadStage == loadStageSnapshot, false)
 						})
 
 						ui.Text(c, a.t("loading.footnote")).
@@ -878,9 +869,9 @@ func (a *App) renderSettingsView(c *ui.Context) {
 							"ms", fmt.Sprintf("%d", a.status.Stats.LoadTimeMs),
 						)
 					}
-					backupDirDisp := filepath.Join(a.dataDir, "backups")
-					if a.versionStatus != nil && a.versionStatus.BackupDir != "" {
-						backupDirDisp = a.versionStatus.BackupDir
+					backupDirDisp := a.snapshotDir()
+					if a.versionStatus != nil && a.versionStatus.SnapshotDir != "" {
+						backupDirDisp = a.versionStatus.SnapshotDir
 					}
 					drawSettingsSection(c, a.t("settings.section_status"), "",
 						func() { drawSettingKVRow(c, a.t("settings.kv_cn"), cnState) },

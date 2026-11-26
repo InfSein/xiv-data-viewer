@@ -215,8 +215,9 @@ func (a *App) renderBrandMenu(c *ui.Context) {
 		if m.Item(a.t("menu.export_csv")).Chosen() {
 			a.openExportModal()
 		}
-		if m.Item(a.t("menu.refresh_snapshot")).Disabled(a.backupSvc == nil || a.diffBusy).Chosen() {
-			a.refreshVersionBackup()
+		if m.Item(a.t("menu.snapshot_manager")).Disabled(a.backupSvc == nil).Chosen() {
+			a.navigateTab(tabDiff)
+			a.openSnapshotManager()
 		}
 		m.Separator()
 		if m.Item(a.t("menu.theme_light")).Checked(a.cfg.Theme == "light").Chosen() {
@@ -257,6 +258,7 @@ func (a *App) globalJumpTargets() []globalJumpTarget {
 		{tab: tabMusic, label: a.t("search.global_module_music"), icon: icoMusic},
 		{tab: tabIcons, label: a.t("search.global_module_icon"), icon: icoImage},
 		{tab: tabDiff, label: a.t("search.global_module_diff"), icon: icoCompare},
+		{tab: tabTextSearch, label: a.t("search.global_module_text_search"), icon: icoTextSearch},
 	}
 }
 
@@ -595,6 +597,8 @@ func (a *App) renderShellBody(c *ui.Context) {
 				a.renderFavoritesView(c)
 			case tabDiff:
 				a.renderDiffView(c)
+			case tabTextSearch:
+				a.renderTextSearchView(c)
 			case tabChangelog:
 				a.renderChangelogView(c)
 			case tabSettings:
@@ -669,15 +673,13 @@ func (a *App) renderSidebar(c *ui.Context) {
 					a.navigateTab(tabFavorites)
 				}
 
-				ui.Text(c, a.t("nav.section.compare")).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).Padding(14, 10, 4, 10)
+				ui.Text(c, a.t("nav.section.tools")).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).Padding(14, 10, 4, 10)
 
-				hasUpdate := a.versionStatus != nil && a.versionStatus.HasVersionUpdate
-				diffMeta := ""
-				if hasUpdate {
-					diffMeta = a.t("nav.diff_update_badge")
-				}
-				if kitSidebarItem(c, "nav-diff", icoCompare, icoCompare, a.t("nav.diff"), diffMeta, a.tab == tabDiff, hasUpdate) {
+				if kitSidebarItem(c, "nav-diff", icoCompare, icoCompare, a.t("nav.diff"), "", a.tab == tabDiff, false) {
 					a.navigateTab(tabDiff)
+				}
+				if kitSidebarItem(c, "nav-text-search", icoTextSearch, icoTextSearchFill, a.t("nav.text_search"), "", a.tab == tabTextSearch, false) {
+					a.navigateTab(tabTextSearch)
 				}
 			})
 		})
@@ -685,9 +687,6 @@ func (a *App) renderSidebar(c *ui.Context) {
 		ui.Column(c).FillWidth().Gap(6).Padding(8, 0, 0, 0).Children(func() {
 			if a.updateState == updateReady {
 				a.renderSidebarAppRestartCard(c)
-			}
-			if a.versionStatus != nil && a.versionStatus.HasVersionUpdate && a.tab != tabDiff && !a.dismissUpdateBanner {
-				a.renderSidebarUpdateCard(c)
 			}
 
 			kitSeparator(c, false).Margin(0, 6)
@@ -752,32 +751,6 @@ func (a *App) renderSidebar(c *ui.Context) {
 				})
 			})
 		})
-	})
-}
-
-// renderSidebarUpdateCard 检测到客户端版本更新时低调提醒，支持点击直达版本对比或关闭提醒。
-func (a *App) renderSidebarUpdateCard(c *ui.Context) {
-	t := themeOf(c)
-	ui.Row(c.Key("sb-update-card")).FillWidth().Padding(8, 8, 8, 10).Radius(t.radius.lg).Gap(6).
-		Background(t.background).Border(hairline, t.border).AlignItems(ui.Center).Children(func() {
-		nav := ui.ButtonBase(c.Key("sb-update-go")).Label(a.t("shell.update_card_label")).
-			Grow(1).Shrink(1).Cursor(ui.CursorPointer)
-		nav.Children(func() {
-			ui.Column(c).FillWidth().Gap(2).Children(func() {
-				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-					drawStatusDot(c, t.success)
-					ui.Text(c, a.t("shell.update_detected")).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
-				})
-				numText(c, a.versionStatus.CurrentVersion).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
-			})
-		})
-		if nav.Clicked() {
-			a.navigateTab(tabDiff)
-		}
-
-		if kitIconButton(c, "sb-update-dismiss", icoClose, a.t("shell.dismiss_update"), btnOpts{variant: btnGhost, size: btnSizeXs}) {
-			a.dismissUpdateBanner = true
-		}
 	})
 }
 

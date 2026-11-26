@@ -469,6 +469,37 @@ func DecodeIconBlobToRGBA(payload []byte) (*image.RGBA, error) {
 	}
 }
 
+// DecodeIconBlobToPNG 将快照图标载荷直接还原为无损 PNG 字节（用于历史/已移除图标导出）。
+func DecodeIconBlobToPNG(payload []byte) ([]byte, error) {
+	if len(payload) == 0 {
+		return nil, errors.New("空图标缓存载荷")
+	}
+	switch payload[0] {
+	case iconBlobKindTexZlib:
+		zr, err := zlib.NewReader(bytes.NewReader(payload[1:]))
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = zr.Close() }()
+		raw, err := io.ReadAll(zr)
+		if err != nil {
+			return nil, err
+		}
+		return DecodeTexToPNGWithCompression(raw, png.BestSpeed)
+	case iconBlobKindPNG:
+		if len(payload) <= 1 {
+			return nil, errors.New("损坏的 PNG 图标缓存载荷")
+		}
+		return append([]byte(nil), payload[1:]...), nil
+	default:
+		// 兼容无前缀原始 PNG 字节
+		if _, err := png.DecodeConfig(bytes.NewReader(payload)); err != nil {
+			return nil, err
+		}
+		return append([]byte(nil), payload...), nil
+	}
+}
+
 func decodePNGToPremulRGBA(pngBytes []byte) (*image.RGBA, error) {
 	img, err := png.Decode(bytes.NewReader(pngBytes))
 	if err != nil {
