@@ -2,13 +2,19 @@ package sqpack
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"image"
 	"image/png"
+	"io"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 )
 
 const (
@@ -111,6 +117,43 @@ func TexFormatName(format uint32) string {
 	}
 }
 
+func writeSixDigits(dst []byte, n int) {
+	dst[5] = byte('0' + n%10)
+	n /= 10
+	dst[4] = byte('0' + n%10)
+	n /= 10
+	dst[3] = byte('0' + n%10)
+	n /= 10
+	dst[2] = byte('0' + n%10)
+	n /= 10
+	dst[1] = byte('0' + n%10)
+	n /= 10
+	dst[0] = byte('0' + n%10)
+}
+
+func buildIconTexPathFast(iconID int, variant string, hr1 bool) string {
+	groupID := IconGroupID(iconID)
+	var buf [48]byte
+	copy(buf[0:8], "ui/icon/")
+	writeSixDigits(buf[8:14], groupID)
+	pos := 14
+	buf[pos] = '/'
+	pos++
+	if variant != "" {
+		pos += copy(buf[pos:], variant)
+		buf[pos] = '/'
+		pos++
+	}
+	writeSixDigits(buf[pos:pos+6], iconID)
+	pos += 6
+	if hr1 {
+		pos += copy(buf[pos:], "_hr1.tex")
+	} else {
+		pos += copy(buf[pos:], ".tex")
+	}
+	return string(buf[:pos])
+}
+
 // ScanIconFiles 只读扫描指定客户端 SqPack 0600 归档中全部真实存在的有效图标资源，自动剔除空占位条目 (fileTypeEmpty)。
 func ScanIconFiles(reader *GameReader) ([]IconFileEntry, error) {
 	if reader == nil {
@@ -125,10 +168,9 @@ func ScanIconFiles(reader *GameReader) ([]IconFileEntry, error) {
 		return nil, nil
 	}
 
-	// 预计算每个分组编号的 1000 个标准与高清文件名哈希，避免跨变体重复计算 CRC32
+	// 预计算每个分组编号的 1000 个标准与高清文件名哈希（栈缓冲零堆分配）
 	var stdFileHashes [IconGroupCount][IconGroupSize]uint32
 	var hr1FileHashes [IconGroupCount][IconGroupSize]uint32
-	// 延迟初始化：仅当某分组存在至少一个变体目录时填充该分组的文件名哈希
 	var groupHashed [IconGroupCount]bool
 
 	ensureGroupHashes := func(g int) {
@@ -136,47 +178,66 @@ func ScanIconFiles(reader *GameReader) ([]IconFileEntry, error) {
 			return
 		}
 		base := g * IconGroupSize
+		var stdBuf [10]byte
+		copy(stdBuf[6:], ".tex")
+		var hr1Buf [14]byte
+		copy(hr1Buf[6:], "_hr1.tex")
 		for sub := 0; sub < IconGroupSize; sub++ {
 			id := base + sub
-			stdName := fmt.Sprintf("%06d.tex", id)
-			hr1Name := fmt.Sprintf("%06d_hr1.tex", id)
-			stdFileHashes[g][sub] = JamCRC32([]byte(stdName))
-			hr1FileHashes[g][sub] = JamCRC32([]byte(hr1Name))
+			writeSixDigits(stdBuf[:6], id)
+			copy(hr1Buf[:6], stdBuf[:6])
+			stdFileHashes[g][sub] = JamCRC32(stdBuf[:])
+			hr1FileHashes[g][sub] = JamCRC32(hr1Buf[:])
 		}
 		groupHashed[g] = true
 	}
 
 	type rawCandidate struct {
 		ar         *ArchiveReader
+		arIdx      uint16
 		dataFileID uint32
 		offset     uint64
-		entry      IconFileEntry
+		iconID     uint32
+		variantIdx uint8
+		hr1        bool
 	}
 
-	var matched []rawCandidate
-	seenPath := make(map[string]bool)
+	matched := make([]rawCandidate, 0, 210000)
+	// 用整数键 (iconID<<8 | variantIdx<<1 | hr1Bit) 去重，避免 20 万次字符串分配
+	seenKey := make(map[uint64]struct{}, 210000)
+	makeDedupKey := func(id int, vIdx int, hr1 bool) uint64 {
+		k := (uint64(id) << 8) | (uint64(vIdx) << 1)
+		if hr1 {
+			k |= 1
+		}
+		return k
+	}
 
-	for _, cand := range cands {
+	var dirBuf [32]byte
+	copy(dirBuf[0:8], "ui/icon/")
+
+	for arIdx, cand := range cands {
 		ar, err := reader.getArchive(cand)
 		if err != nil {
 			return nil, err
 		}
 
 		if !ar.useIndex2 {
-			validDirs := make(map[uint32]bool, 2048)
+			validDirs := make(map[uint32]struct{}, 2048)
 			for h := range ar.indexEntries {
-				validDirs[uint32(h>>32)] = true
+				validDirs[uint32(h>>32)] = struct{}{}
 			}
 			for g := 0; g < IconGroupCount; g++ {
 				groupID := g * IconGroupSize
-				groupCode := fmt.Sprintf("%06d", groupID)
-				for _, v := range KnownIconVariants {
-					dirPath := "ui/icon/" + groupCode
+				writeSixDigits(dirBuf[8:14], groupID)
+				for vIdx, v := range KnownIconVariants {
+					dirLen := 14
 					if v != "" {
-						dirPath += "/" + v
+						dirBuf[14] = '/'
+						dirLen = 15 + copy(dirBuf[15:], v)
 					}
-					dh := JamCRC32([]byte(dirPath))
-					if !validDirs[dh] {
+					dh := JamCRC32(dirBuf[:dirLen])
+					if _, ok := validDirs[dh]; !ok {
 						continue
 					}
 					ensureGroupHashes(g)
@@ -184,38 +245,32 @@ func ScanIconFiles(reader *GameReader) ([]IconFileEntry, error) {
 					for sub := 0; sub < IconGroupSize; sub++ {
 						id := groupID + sub
 						if e, ok := ar.indexEntries[dirPrefix|uint64(stdFileHashes[g][sub])]; ok {
-							p := buildIconPath(id, v, false, "tex")
-							if !seenPath[p] {
-								seenPath[p] = true
+							dk := makeDedupKey(id, vIdx, false)
+							if _, dup := seenKey[dk]; !dup {
+								seenKey[dk] = struct{}{}
 								matched = append(matched, rawCandidate{
 									ar:         ar,
+									arIdx:      uint16(arIdx),
 									dataFileID: e.dataFileID,
 									offset:     e.offset,
-									entry: IconFileEntry{
-										IconID:  id,
-										GroupID: groupID,
-										Variant: v,
-										HR1:     false,
-										Path:    p,
-									},
+									iconID:     uint32(id),
+									variantIdx: uint8(vIdx),
+									hr1:        false,
 								})
 							}
 						}
 						if e, ok := ar.indexEntries[dirPrefix|uint64(hr1FileHashes[g][sub])]; ok {
-							p := buildIconPath(id, v, true, "tex")
-							if !seenPath[p] {
-								seenPath[p] = true
+							dk := makeDedupKey(id, vIdx, true)
+							if _, dup := seenKey[dk]; !dup {
+								seenKey[dk] = struct{}{}
 								matched = append(matched, rawCandidate{
 									ar:         ar,
+									arIdx:      uint16(arIdx),
 									dataFileID: e.dataFileID,
 									offset:     e.offset,
-									entry: IconFileEntry{
-										IconID:  id,
-										GroupID: groupID,
-										Variant: v,
-										HR1:     true,
-										Path:    p,
-									},
+									iconID:     uint32(id),
+									variantIdx: uint8(vIdx),
+									hr1:        true,
 								})
 							}
 						}
@@ -228,27 +283,25 @@ func ScanIconFiles(reader *GameReader) ([]IconFileEntry, error) {
 		// .index2 回退路径：无独立目录哈希，直接按已知变体路径查表
 		for g := 0; g < IconGroupCount; g++ {
 			groupID := g * IconGroupSize
-			for _, v := range KnownIconVariants {
+			for vIdx, v := range KnownIconVariants {
 				for sub := 0; sub < IconGroupSize; sub++ {
 					id := groupID + sub
 					for _, hr1 := range []bool{false, true} {
-						p := buildIconPath(id, v, hr1, "tex")
-						if seenPath[p] {
+						dk := makeDedupKey(id, vIdx, hr1)
+						if _, dup := seenKey[dk]; dup {
 							continue
 						}
+						p := buildIconTexPathFast(id, v, hr1)
 						if e, ok := ar.lookup(p); ok {
-							seenPath[p] = true
+							seenKey[dk] = struct{}{}
 							matched = append(matched, rawCandidate{
 								ar:         ar,
+								arIdx:      uint16(arIdx),
 								dataFileID: e.dataFileID,
 								offset:     e.offset,
-								entry: IconFileEntry{
-									IconID:  id,
-									GroupID: groupID,
-									Variant: v,
-									HR1:     hr1,
-									Path:    p,
-								},
+								iconID:     uint32(id),
+								variantIdx: uint8(vIdx),
+								hr1:        hr1,
 							})
 						}
 					}
@@ -261,17 +314,10 @@ func ScanIconFiles(reader *GameReader) ([]IconFileEntry, error) {
 		return nil, nil
 	}
 
-	// 按物理归档与偏移升序排列，使 .dat 文件头校验保持顺序 I/O
-	arOrder := make(map[*ArchiveReader]int, len(cands))
-	for i := range matched {
-		if _, ok := arOrder[matched[i].ar]; !ok {
-			arOrder[matched[i].ar] = len(arOrder)
-		}
-	}
+	// 按物理归档、数据文件号与偏移升序排列，便于合并窗口顺序读取
 	sort.Slice(matched, func(i, j int) bool {
-		ai, aj := arOrder[matched[i].ar], arOrder[matched[j].ar]
-		if ai != aj {
-			return ai < aj
+		if matched[i].arIdx != matched[j].arIdx {
+			return matched[i].arIdx < matched[j].arIdx
 		}
 		if matched[i].dataFileID != matched[j].dataFileID {
 			return matched[i].dataFileID < matched[j].dataFileID
@@ -279,40 +325,277 @@ func ScanIconFiles(reader *GameReader) ([]IconFileEntry, error) {
 		return matched[i].offset < matched[j].offset
 	})
 
-	out := make([]IconFileEntry, 0, len(matched))
-	var hdr [12]byte
-	for _, m := range matched {
-		f, err := m.ar.getDataFile(m.dataFileID)
-		if err != nil {
-			continue
+	// 按 (arIdx, dataFileID) 分组：不同 .dat 文件并发处理，同一 .dat 文件内单协程顺序读取，
+	// 避免 Windows 下多协程共享同一文件句柄调用 ReadAt 触发锁竞争，同时使用 64KB 顺序窗口大幅减少系统调用次数。
+	type verifyGroup struct {
+		items []rawCandidate
+	}
+	var groups []verifyGroup
+	for start := 0; start < len(matched); {
+		end := start + 1
+		aIdx := matched[start].arIdx
+		dID := matched[start].dataFileID
+		for end < len(matched) && matched[end].arIdx == aIdx && matched[end].dataFileID == dID {
+			end++
 		}
-		if err := readAtFull(f, hdr[:], int64(m.offset)); err != nil {
-			continue
-		}
-		fileType := binary.LittleEndian.Uint32(hdr[4:8])
-		rawSize := binary.LittleEndian.Uint32(hdr[8:12])
-		if fileType != fileTypeTexture || rawSize == 0 {
-			continue
-		}
-		out = append(out, m.entry)
+		groups = append(groups, verifyGroup{items: matched[start:end]})
+		start = end
 	}
 
-	variantOrder := make(map[string]int, len(KnownIconVariants))
-	for idx, v := range KnownIconVariants {
-		variantOrder[v] = idx
+	type validItem struct {
+		iconID     uint32
+		variantIdx uint8
+		hr1        bool
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].IconID != out[j].IconID {
-			return out[i].IconID < out[j].IconID
+	groupResults := make([][]validItem, len(groups))
+
+	verifyOneFile := func(items []rawCandidate) []validItem {
+		if len(items) == 0 {
+			return nil
 		}
-		vi, vj := variantOrder[out[i].Variant], variantOrder[out[j].Variant]
-		if vi != vj {
-			return vi < vj
+		f, err := items[0].ar.getDataFile(items[0].dataFileID)
+		if err != nil {
+			return nil
 		}
-		return !out[i].HR1 && out[j].HR1
+		const winSize = 64 * 1024
+		buf := make([]byte, winSize)
+		var winStart int64 = -1
+		winEnd := int64(-1)
+		local := make([]validItem, 0, len(items))
+
+		for _, m := range items {
+			off := int64(m.offset)
+			if off < winStart || off+12 > winEnd {
+				n, rErr := f.ReadAt(buf, off)
+				if n < 12 || (rErr != nil && rErr != io.EOF) {
+					winStart, winEnd = -1, -1
+					continue
+				}
+				winStart = off
+				winEnd = off + int64(n)
+			}
+			rel := off - winStart
+			fileType := binary.LittleEndian.Uint32(buf[rel+4 : rel+8])
+			rawSize := binary.LittleEndian.Uint32(buf[rel+8 : rel+12])
+			if fileType != fileTypeTexture || rawSize == 0 {
+				continue
+			}
+			local = append(local, validItem{
+				iconID:     m.iconID,
+				variantIdx: m.variantIdx,
+				hr1:        m.hr1,
+			})
+		}
+		return local
+	}
+
+	if len(groups) == 1 {
+		groupResults[0] = verifyOneFile(groups[0].items)
+	} else {
+		workers := min(len(groups), min(4, max(2, runtime.NumCPU())))
+		jobCh := make(chan int, len(groups))
+		for i := range groups {
+			jobCh <- i
+		}
+		close(jobCh)
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for range workers {
+			go func() {
+				defer wg.Done()
+				for idx := range jobCh {
+					groupResults[idx] = verifyOneFile(groups[idx].items)
+				}
+			}()
+		}
+		wg.Wait()
+	}
+
+	totalValid := 0
+	for _, gr := range groupResults {
+		totalValid += len(gr)
+	}
+	valid := make([]validItem, 0, totalValid)
+	for _, gr := range groupResults {
+		valid = append(valid, gr...)
+	}
+
+	sort.Slice(valid, func(i, j int) bool {
+		if valid[i].iconID != valid[j].iconID {
+			return valid[i].iconID < valid[j].iconID
+		}
+		if valid[i].variantIdx != valid[j].variantIdx {
+			return valid[i].variantIdx < valid[j].variantIdx
+		}
+		return !valid[i].hr1 && valid[j].hr1
 	})
 
+	out := make([]IconFileEntry, len(valid))
+	for i, v := range valid {
+		id := int(v.iconID)
+		variant := KnownIconVariants[v.variantIdx]
+		out[i] = IconFileEntry{
+			IconID:  id,
+			GroupID: IconGroupID(id),
+			Variant: variant,
+			HR1:     v.hr1,
+			Path:    buildIconTexPathFast(id, variant, v.hr1),
+		}
+	}
 	return out, nil
+}
+
+const (
+	iconScanCacheMagic      = "XIVICN01"
+	iconScanCacheHeaderSize = 8 + 32 + 4
+	iconScanCacheEntrySize  = 6
+)
+
+// computeIconScanFingerprint 基于客户端 0600 图标索引文件及版本文件的只读元数据计算指纹，
+// 客户端更新后指纹自动变化以触发重扫，绝不修改游戏目录。
+func computeIconScanFingerprint(reader *GameReader) ([32]byte, bool) {
+	var zero [32]byte
+	if reader == nil || strings.TrimSpace(reader.gamePath) == "" {
+		return zero, false
+	}
+	directory := filepath.Join(reader.gamePath, "sqpack", "ffxiv")
+	cands, err := reader.getCandidates(directory, "0600")
+	if err != nil || len(cands) == 0 {
+		return zero, false
+	}
+
+	h := sha256.New()
+	_, _ = h.Write([]byte(filepath.Clean(reader.gamePath)))
+	_, _ = h.Write([]byte{0})
+
+	if verBytes, err := os.ReadFile(filepath.Join(reader.gamePath, "ffxivgame.ver")); err == nil {
+		_, _ = h.Write(bytes.TrimSpace(verBytes))
+	}
+	_, _ = h.Write([]byte{0})
+
+	for _, cand := range cands {
+		ext := ".win32.index"
+		if cand.useIndex2 {
+			ext = ".win32.index2"
+		}
+		idxPath := cand.prefix + ext
+		st, err := os.Stat(idxPath)
+		if err != nil {
+			return zero, false
+		}
+		var meta [16]byte
+		binary.LittleEndian.PutUint64(meta[0:8], uint64(st.Size()))
+		binary.LittleEndian.PutUint64(meta[8:16], uint64(st.ModTime().UnixNano()))
+		_, _ = h.Write([]byte(filepath.Base(idxPath)))
+		_, _ = h.Write(meta[:])
+	}
+
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum, true
+}
+
+func loadIconScanCache(cachePath string, wantFP [32]byte) ([]IconFileEntry, bool) {
+	raw, err := os.ReadFile(cachePath)
+	if err != nil || len(raw) < iconScanCacheHeaderSize {
+		return nil, false
+	}
+	if string(raw[0:8]) != iconScanCacheMagic {
+		return nil, false
+	}
+	if !bytes.Equal(raw[8:40], wantFP[:]) {
+		return nil, false
+	}
+	count := int(binary.LittleEndian.Uint32(raw[40:44]))
+	if count < 0 || iconScanCacheHeaderSize+count*iconScanCacheEntrySize != len(raw) {
+		return nil, false
+	}
+
+	out := make([]IconFileEntry, count)
+	pos := iconScanCacheHeaderSize
+	for i := 0; i < count; i++ {
+		id := int(binary.LittleEndian.Uint32(raw[pos : pos+4]))
+		vIdx := int(raw[pos+4])
+		hr1 := raw[pos+5] != 0
+		pos += iconScanCacheEntrySize
+		if vIdx >= len(KnownIconVariants) || id < 0 || id > MaxIconID {
+			return nil, false
+		}
+		variant := KnownIconVariants[vIdx]
+		out[i] = IconFileEntry{
+			IconID:  id,
+			GroupID: IconGroupID(id),
+			Variant: variant,
+			HR1:     hr1,
+			Path:    buildIconTexPathFast(id, variant, hr1),
+		}
+	}
+	return out, true
+}
+
+func saveIconScanCache(cachePath string, fp [32]byte, files []IconFileEntry) {
+	dir := filepath.Dir(cachePath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	variantToIdx := make(map[string]uint8, len(KnownIconVariants))
+	for idx, v := range KnownIconVariants {
+		variantToIdx[v] = uint8(idx)
+	}
+
+	buf := make([]byte, iconScanCacheHeaderSize+len(files)*iconScanCacheEntrySize)
+	copy(buf[0:8], iconScanCacheMagic)
+	copy(buf[8:40], fp[:])
+	binary.LittleEndian.PutUint32(buf[40:44], uint32(len(files)))
+	pos := iconScanCacheHeaderSize
+	for _, f := range files {
+		vIdx, ok := variantToIdx[f.Variant]
+		if !ok {
+			return
+		}
+		binary.LittleEndian.PutUint32(buf[pos:pos+4], uint32(f.IconID))
+		buf[pos+4] = vIdx
+		if f.HR1 {
+			buf[pos+5] = 1
+		}
+		pos += iconScanCacheEntrySize
+	}
+
+	tmpPath := fmt.Sprintf("%s.%d.tmp", cachePath, os.Getpid())
+	if err := os.WriteFile(tmpPath, buf, 0o644); err != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := os.Rename(tmpPath, cachePath); err != nil {
+		_ = os.Remove(tmpPath)
+	}
+}
+
+// ScanIconFilesCached 带本地版本指纹缓存的只读图标扫描；cacheDir 为空时退化为直接扫描。
+func ScanIconFilesCached(reader *GameReader, cacheDir string) ([]IconFileEntry, error) {
+	if reader == nil {
+		return nil, nil
+	}
+	cacheDir = strings.TrimSpace(cacheDir)
+	if cacheDir == "" {
+		return ScanIconFiles(reader)
+	}
+
+	fp, ok := computeIconScanFingerprint(reader)
+	if !ok {
+		return ScanIconFiles(reader)
+	}
+	cachePath := filepath.Join(cacheDir, "icon-scan-"+hex.EncodeToString(fp[:8])+".bin")
+	if cached, hit := loadIconScanCache(cachePath, fp); hit {
+		return cached, nil
+	}
+
+	files, err := ScanIconFiles(reader)
+	if err != nil {
+		return nil, err
+	}
+	saveIconScanCache(cachePath, fp, files)
+	return files, nil
 }
 
 // ReadIconVariantRaw 读取指定图标变体的原始 .tex 字节与贴图文件头（支持 iconID == 0）。

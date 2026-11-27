@@ -5,10 +5,13 @@ import (
 	"strings"
 
 	"github.com/InfSein/xiv-data-viewer/internal/backup"
+	"github.com/InfSein/xiv-data-viewer/internal/config"
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/InfSein/xiv-data-viewer/internal/snapshot"
 	"github.com/egoist/mygo/ui"
 )
+
+var snapMgrFilterModes = []string{"all", "downloaded", "not_downloaded"}
 
 var diffFilterModes = []string{"all", "added", "modified", "removed"}
 
@@ -170,21 +173,41 @@ func (a *App) renderDiffView(c *ui.Context) {
 				kitAlert(c, toneSuccess, a.diffNotice)
 			}
 
-			if a.diffRes != nil {
+			// 仅在实体总览视图展示非零汇总项，避免零值指标刷屏与图标/文本独立分区重复堆叠两层统计条
+			if a.diffRes != nil && a.diffEntity != "icon" && a.diffEntity != "text" {
 				sum := a.diffRes.Summary
-				kitBlock(c, ui.Row(c).FillWidth().Padding(8, 12).Gap(16).AlignItems(ui.Center).Wrap(), toneCard).Children(func() {
-					drawCompactDiffStat(c, a.t("diff.stat_added_items"), "+"+formatInt(sum.AddedItems), t.successText)
-					drawCompactDiffStat(c, a.t("diff.stat_modified_items"), formatInt(sum.ModifiedItems), t.warningText)
-					colTotal := sum.NewCollectableTurnInItems + sum.ModifiedCollectableItems
-					drawCompactDiffStat(c, a.t("diff.stat_collectables"), formatInt(colTotal), t.infoText)
-					drawCompactDiffStat(c, a.t("diff.stat_added_quests"), "+"+formatInt(sum.AddedQuests), t.successText)
-					drawCompactDiffStat(c, a.t("diff.stat_added_leves"), "+"+formatInt(sum.AddedLeves), t.successText)
-					drawCompactDiffStat(c, a.t("diff.stat_added_recipes"), "+"+formatInt(sum.AddedRecipes), t.foreground)
-					drawCompactDiffStat(c, a.t("diff.stat_added_achievements"), "+"+formatInt(sum.AddedAchievements), t.infoText)
-					drawCompactDiffStat(c, a.t("diff.stat_added_titles"), "+"+formatInt(sum.AddedTitles), t.foreground)
-					drawCompactDiffStat(c, a.t("diff.stat_added_bgms"), "+"+formatInt(sum.AddedBGMs), t.successText)
-					drawCompactDiffStat(c, a.t("diff.stat_modified_bgms"), formatInt(sum.ModifiedBGMs), t.warningText)
-				})
+				colTotal := sum.NewCollectableTurnInItems + sum.ModifiedCollectableItems
+				type diffStatDef struct {
+					label string
+					val   int
+					text  string
+					col   ui.Color
+				}
+				allStats := []diffStatDef{
+					{a.t("diff.stat_added_items"), sum.AddedItems, "+" + formatInt(sum.AddedItems), t.successText},
+					{a.t("diff.stat_modified_items"), sum.ModifiedItems, formatInt(sum.ModifiedItems), t.warningText},
+					{a.t("diff.stat_collectables"), colTotal, formatInt(colTotal), t.infoText},
+					{a.t("diff.stat_added_quests"), sum.AddedQuests, "+" + formatInt(sum.AddedQuests), t.successText},
+					{a.t("diff.stat_added_leves"), sum.AddedLeves, "+" + formatInt(sum.AddedLeves), t.successText},
+					{a.t("diff.stat_added_recipes"), sum.AddedRecipes, "+" + formatInt(sum.AddedRecipes), t.foreground},
+					{a.t("diff.stat_added_achievements"), sum.AddedAchievements, "+" + formatInt(sum.AddedAchievements), t.infoText},
+					{a.t("diff.stat_added_titles"), sum.AddedTitles, "+" + formatInt(sum.AddedTitles), t.foreground},
+					{a.t("diff.stat_added_bgms"), sum.AddedBGMs, "+" + formatInt(sum.AddedBGMs), t.successText},
+					{a.t("diff.stat_modified_bgms"), sum.ModifiedBGMs, formatInt(sum.ModifiedBGMs), t.warningText},
+				}
+				var visibleStats []diffStatDef
+				for _, st := range allStats {
+					if st.val > 0 {
+						visibleStats = append(visibleStats, st)
+					}
+				}
+				if len(visibleStats) > 0 {
+					kitBlock(c, ui.Row(c).FillWidth().Padding(8, 12).Gap(16).AlignItems(ui.Center).Wrap(), toneCard).Children(func() {
+						for _, st := range visibleStats {
+							drawCompactDiffStat(c, st.label, st.text, st.col)
+						}
+					})
+				}
 			}
 
 			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Wrap().Gap(8).Children(func() {
@@ -279,23 +302,17 @@ func (a *App) renderDiffView(c *ui.Context) {
 
 		// 后台首次解析历史 .xivsnap 快照或扫描文本期间展示平滑加载指示
 		if a.diffBusy {
-			ui.Column(c).Grow(1).FillWidth().Center().Padding(32, 24).Gap(10).Children(func() {
-				ui.Spinner(c).FontSize(22).TextColor(t.primary)
-				ui.Text(c, a.t("diff.computing_title")).FontSize(t.text.sm).FontWeight(600).TextColor(t.foreground)
-				ui.Text(c, a.t("diff.computing_desc")).FontSize(t.text.xs).TextColor(t.muted).TextAlign(ui.Center).MaxWidth(420)
-			})
+			kitLoading(c, a.t("diff.computing_title"), a.t("diff.computing_desc"))
 			return
 		}
 
-		// 3 & 4. 图标与文本独立分区使用专属视图，常规实体使用四列表格
+		// 3 & 4. 图标、文本与成就使用专属视图，常规实体使用四列表格
 		if a.diffEntity == "icon" {
-			if a.diffRes == nil || len(a.diffRes.Items) == 0 {
-				kitEmpty(c, icoImage, a.t("diff.empty_title"), a.t("diff.empty_desc"), nil)
-			} else {
-				a.renderIconDiffPartition(c)
-			}
+			a.renderIconDiffPartition(c)
 		} else if a.diffEntity == "text" {
 			a.renderTextDiffPartition(c)
+		} else if a.diffEntity == "achievement" {
+			a.renderAchievementDiffTable(c)
 		} else {
 			ui.Row(c).FillWidth().Padding(8, 16).Background(t.card).
 				BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Gap(diffColGap).Children(func() {
@@ -394,21 +411,14 @@ func (a *App) renderDiffView(c *ui.Context) {
 								})
 
 								ui.Row(c).Grow(1).Shrink(1).MinWidth(diffColChgMin).Gap(10).Wrap().AlignItems(ui.Center).Children(func() {
+									if entry.ChangeType == "added" && entry.EntityType == "achievement" {
+										a.renderAddedAchievementInlineSummary(c, entry)
+										return
+									}
 									if entry.ChangeType != "modified" {
 										return
 									}
-									for _, chg := range entry.Changes {
-										ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
-											ui.Text(c, chg.Label).FontSize(t.text.micro).TextColor(t.muted)
-											ui.Box(c).Padding(1, 4).Radius(t.radius.xs).Background(t.delBg).Children(func() {
-												numText(c, chg.Before).FontSize(t.text.micro).TextColor(t.delText).Strikethrough()
-											})
-											ui.Text(c, "→").FontSize(t.text.micro).TextColor(t.muted)
-											ui.Box(c).Padding(1, 4).Radius(t.radius.xs).Background(t.insBg).Children(func() {
-												numText(c, chg.After).FontSize(t.text.micro).FontWeight(500).TextColor(t.insText)
-											})
-										})
-									}
+									renderDiffFieldChanges(c, entry.Changes)
 								})
 							})
 						}
@@ -434,14 +444,195 @@ func (a *App) renderDiffView(c *ui.Context) {
 	})
 }
 
+// diffEntryToAchievement 将版本对比中的成就差异记录转换为成就表格展示模型。
+func diffEntryToAchievement(entry backup.DiffItemEntry) gamedata.AchievementEntry {
+	ach := gamedata.AchievementEntry{
+		ID:               entry.ID,
+		NameCn:           entry.NameCn,
+		NameEn:           entry.NameEn,
+		NameJa:           entry.NameJa,
+		DescriptionCn:    entry.DescriptionCn,
+		Points:           entry.Points,
+		IconID:           entry.IconID,
+		KindName:         entry.AchKindName,
+		CategoryName:     entry.AchCategoryName,
+		TitleID:          entry.TitleID,
+		TitleMasculineCn: entry.TitleMasculineCn,
+		TitleFeminineCn:  entry.TitleFeminineCn,
+		TitleNameJa:      entry.TitleNameJa,
+		TitleNameEn:      entry.TitleNameEn,
+		RewardItemID:     entry.RewardItemID,
+		RewardItemNameCn: entry.RewardItemNameCn,
+		RewardItemIconID: entry.RewardItemIconID,
+	}
+	if ach.KindName == "" && ach.CategoryName == "" {
+		ach.CategoryName = entry.CategoryName
+	}
+	if ach.TitleID == 0 && entry.TitleNameCn != "" {
+		ach.TitleID = 1
+		ach.TitleMasculineCn = entry.TitleNameCn
+	}
+	return ach
+}
+
+// renderAddedAchievementInlineSummary 在「全部」视图的变更内容列为新增成就展示点数、称号与奖励道具摘要。
+func (a *App) renderAddedAchievementInlineSummary(c *ui.Context, entry backup.DiffItemEntry) {
+	t := themeOf(c)
+	ach := diffEntryToAchievement(entry)
+	if ach.Points > 0 {
+		numText(c, a.tf("backup.ach_points", "pts", formatInt(ach.Points))).FontSize(t.text.micro).FontWeight(600).TextColor(t.subdued)
+	}
+	titleTxt := ach.TitleMasculineCn
+	if titleTxt == "" {
+		titleTxt = ach.TitleFeminineCn
+	} else if ach.TitleFeminineCn != "" && ach.TitleFeminineCn != ach.TitleMasculineCn {
+		titleTxt += " / " + ach.TitleFeminineCn
+	}
+	if titleTxt != "" {
+		ui.Text(c, a.tf("achievements.title_format", "title", titleTxt)).FontSize(t.text.xs).FontWeight(500).TextColor(t.warningText).SingleLine()
+	}
+	if ach.RewardItemID > 0 && ach.RewardItemNameCn != "" {
+		btn := ui.ButtonBase(c.Key(fmt.Sprintf("df-ach-rew-%d", ach.ID))).Label(a.tf("common.view_item", "name", ach.RewardItemNameCn)).
+			Padding(2, 6).Radius(t.radius.md).Background(t.card).
+			Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+		if btn.Hovered() {
+			btn.Background(t.tint(1.5))
+		}
+		btn.Children(func() {
+			ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
+				a.drawGameIcon(c, ach.RewardItemIconID, false, 16, 3)
+				ui.Text(c, ach.RewardItemNameCn).FontSize(t.text.micro).FontWeight(500).TextColor(t.infoText).SingleLine()
+			})
+		})
+		if btn.Clicked() {
+			a.inspectItemFromOtherTab(ach.RewardItemID)
+		}
+	}
+	if ach.DescriptionCn != "" {
+		ui.Text(c, ach.DescriptionCn).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(1)
+	}
+}
+
+const (
+	diffAchColIDW   float32 = 58
+	diffAchColNameW float32 = 190
+)
+
+// renderAchievementDiffTable 在版本对比「成就」分类下复用成就页面一致的表格结构，直接展示分类、点数、达成条件、称号与奖励道具。
+func (a *App) renderAchievementDiffTable(c *ui.Context) {
+	t := themeOf(c)
+	ui.Row(c).FillWidth().Padding(8, 16).Background(t.card).
+		BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Gap(10).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, a.t("achievements.col_id")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffAchColIDW).Shrink(0)
+		ui.Text(c, a.t("achievements.col_name")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffAchColNameW).Shrink(0)
+		ui.Text(c, a.t("achievements.col_category")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColCatW).Shrink(0)
+		ui.Text(c, a.t("achievements.col_points")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColPointsW).Shrink(0).TextAlign(ui.Center)
+		ui.Text(c, a.t("achievements.col_condition")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(achColCondMin)
+		ui.Text(c, a.t("achievements.col_reward")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(achColRewardW).Shrink(0)
+		ui.Box(c).Width(achColFavW).Shrink(0).Center().Children(func() {
+			ui.Icon(c, icoStar).Size(iconSm, iconSm).TextColor(t.muted)
+		})
+	})
+
+	if a.diffRes == nil || len(a.diffRes.Items) == 0 {
+		kitEmpty(c, icoTrophy, a.t("diff.empty_title"), a.t("diff.empty_desc"), nil)
+		return
+	}
+
+	ui.Scroll(c.Key("diff-ach-table-scroll")).TrackScroll(&a.diffScroll).Grow(1).Shrink(1).Children(func() {
+		ui.Column(c).FillWidth().Selectable().Children(func() {
+			for i, entry := range a.diffRes.Items {
+				if i > 0 {
+					kitSeparator(c, false).Margin(0, 16)
+				}
+				ach := diffEntryToAchievement(entry)
+				row := ui.Row(c.Key(fmt.Sprintf("df-ach-row-%d", ach.ID))).FillWidth().Padding(10, 16).Gap(10).
+					AlignItems(ui.Center).Transition(colorTransition(motionFast))
+				if row.Hovered() {
+					row.Background(t.tint(0.85))
+				}
+				row.Children(func() {
+					// 1. ID 与变更类型徽章
+					ui.Column(c).Width(diffAchColIDW).Shrink(0).AlignItems(ui.Start).Gap(3).Children(func() {
+						numTextf(c, "#%d", ach.ID).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+						switch entry.ChangeType {
+						case "added":
+							drawPill(c, a.t("diff.change_added"), pillPositive)
+						case "modified":
+							drawPill(c, a.t("diff.change_modified"), pillWarning)
+						default:
+							drawPill(c, a.t("diff.change_removed"), pillNegative)
+						}
+					})
+
+					// 2. 图标与成就名称（含副语言，非移除条目支持点击跳转成就页）
+					ui.Row(c).Width(diffAchColNameW).Shrink(0).Gap(8).AlignItems(ui.Center).Children(func() {
+						a.drawGameIcon(c, ach.IconID, false, 28, t.radius.md)
+						ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
+							ui.Text(c, ach.NameCn).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground).SingleLine()
+							for _, sec := range a.secondaryDataLines(ach.NameCn, ach.NameJa, ach.NameEn) {
+								ui.Text(c, sec.text).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+							}
+						})
+					})
+
+					// 3. 分类
+					ui.Column(c).Width(achColCatW).Shrink(0).Gap(1).Children(func() {
+						if ach.KindName != "" {
+							ui.Text(c, ach.KindName).FontSize(t.text.xs).TextColor(t.subdued).SingleLine()
+						}
+						if ach.CategoryName != "" {
+							ui.Text(c, ach.CategoryName).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+						}
+					})
+
+					// 4. 点数
+					numTextf(c, "%d", ach.Points).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground).
+						Width(achColPointsW).Shrink(0).TextAlign(ui.Center).SingleLine()
+
+					// 5. 达成条件（变更条目同时附加字段变更明细）
+					ui.Column(c).Grow(1).Shrink(1).MinWidth(achColCondMin).Gap(5).Children(func() {
+						desc := ach.DescriptionCn
+						if desc == "" {
+							desc = "–"
+						}
+						ui.Text(c, desc).FontSize(t.text.xs).TextColor(t.subdued)
+						if entry.ChangeType == "modified" && len(entry.Changes) > 0 {
+							ui.Row(c).FillWidth().Gap(8).Wrap().AlignItems(ui.Center).Children(func() {
+								renderDiffFieldChanges(c, entry.Changes)
+							})
+						}
+					})
+
+					// 6. 奖励称号与奖励道具（直接复用成就页单元格，展示称号、副语言与可直跳道具按钮）
+					a.renderAchievementRewardCell(c, ach)
+
+					// 7. 星标收藏按钮（已移除条目不提供收藏）
+					ui.Box(c).Width(achColFavW).Shrink(0).Center().Children(func() {
+						if entry.ChangeType == "removed" {
+							return
+						}
+						fav := a.isFavorite(config.RecordKindAchievement, ach.ID)
+						tip := a.tf("favorites.add_tip", "name", ach.NameCn)
+						if fav {
+							tip = a.tf("favorites.remove_tip", "name", ach.NameCn)
+						}
+						if kitFavoriteStarIconButton(c, fmt.Sprintf("df-ach-fav-%d", ach.ID), tip, fav) {
+							a.toggleFavorite(config.RecordKindAchievement, ach.ID)
+						}
+					})
+				})
+			}
+		})
+	})
+}
+
 // renderDiffNeedsDownloadView 在用户尚未下载任何 GitHub 历史快照时展示清晰引导与一键下载入口。
 func (a *App) renderDiffNeedsDownloadView(c *ui.Context) {
 	t := themeOf(c)
-	ui.Column(c).Grow(1).FillWidth().Center().Padding(32, 24).Gap(16).Children(func() {
-		ui.Box(c).Size(48, 48).Radius(t.radius.xl).Background(t.tint(1.2)).Border(hairline, t.border).Center().Children(func() {
-			ui.Icon(c, icoDownload).Size(22, 22).TextColor(t.primary)
-		})
-		ui.Column(c).AlignItems(ui.Center).Gap(6).MaxWidth(460).Children(func() {
+	ui.Column(c).Grow(1).FillWidth().Center().Padding(32, 24).Gap(14).Children(func() {
+		ui.Icon(c, icoDownload).Size(24, 24).TextColor(t.idle)
+		ui.Column(c).AlignItems(ui.Center).Gap(6).MaxWidth(440).Children(func() {
 			ui.Text(c, a.t("diff.need_download_title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).TextAlign(ui.Center)
 			ui.Text(c, a.t("diff.need_download_desc")).FontSize(t.text.xs).LineHeight(lineProse).TextColor(t.muted).TextAlign(ui.Center)
 		})
@@ -470,7 +661,15 @@ func (a *App) renderDiffNeedsDownloadView(c *ui.Context) {
 	})
 }
 
-// renderSnapshotManagerModal 渲染 GitHub 统一版本快照下载与本地缓存管理弹窗（按版本号统一下载，不区分国服/国际服）。
+const (
+	snapMgrModalW      float32 = 660
+	snapMgrModalH      float32 = 520
+	snapMgrColSizeW    float32 = 96
+	snapMgrColStatusW  float32 = 88
+	snapMgrColActionsW float32 = 68
+)
+
+// renderSnapshotManagerModal 渲染 GitHub 统一版本快照下载与本地缓存管理弹窗（固定高度、原生表格布局，切换栏目不抖动）。
 func (a *App) renderSnapshotManagerModal(c *ui.Context) {
 	if !a.snapMgrOpen {
 		return
@@ -478,175 +677,316 @@ func (a *App) renderSnapshotManagerModal(c *ui.Context) {
 	t := themeOf(c)
 	ui.DialogBase(c.Key("snap-mgr-modal"), &a.snapMgrOpen, func(backdrop, panel ui.Element) {
 		backdrop.Background(t.scrim)
-		applyOverlaySurface(c, panel.Width(640).MaxHeight(580).Radius(t.radius.x2l).Clip(), shadowDialog)
+		// 固定宽高并撑满内部纵向布局，确保切换全部/已下载/未下载或加载空态时弹窗高度始终恒定
+		applyOverlaySurface(c, panel.Width(snapMgrModalW).Height(snapMgrModalH).Radius(t.radius.x2l).Clip(), shadowDialog)
 
-		// 1. 弹窗标题栏
-		ui.Row(c).FillWidth().Padding(16, 20, 12, 20).
-			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).
-			Justify(ui.SpaceBetween).AlignItems(ui.Start).Gap(12).Children(func() {
-			ui.Column(c).Gap(3).Grow(1).Shrink(1).MinWidth(0).Children(func() {
-				ui.Text(c, a.t("diff.snap_mgr_title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
-				ui.Text(c, a.t("diff.snap_mgr_subtitle")).FontSize(t.text.xs).TextColor(t.muted)
-			})
-			ui.Row(c).Gap(6).AlignItems(ui.Center).Shrink(0).Children(func() {
-				refLbl := a.t("diff.snap_refresh_catalog")
-				if a.snapCatalogBusy {
-					refLbl = a.t("diff.snap_refreshing")
-				}
-				if kitButton(c, "snap-mgr-refresh", refLbl, btnOpts{variant: btnOutline, size: btnSizeSm, icon: icoRefresh, disabled: a.snapCatalogBusy}) {
-					a.refreshSnapshotCatalog(true)
-				}
-				if kitIconButton(c, "snap-mgr-close", icoClose, a.t("common.close"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
-					a.snapMgrOpen = false
-				}
-			})
-		})
-
-		// 2. 已识别的本地客户端状态、下载进度与提示
-		ui.Column(c).FillWidth().Padding(10, 20).Gap(8).
-			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Children(func() {
-			if summary := a.detectedClientsSummaryText(); summary != "" {
-				numText(c, a.tf("diff.snap_client_scope", "clients", summary)).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
-			}
-			if a.snapMgrError != "" {
-				kitAlert(c, toneDanger, a.snapMgrError)
-			} else if a.snapMgrNotice != "" {
-				kitAlert(c, toneSuccess, a.snapMgrNotice)
-			}
-			if a.snapDownID != "" {
-				a.renderSnapshotDownloadProgressCard(c)
-			}
-		})
-
-		// 3. 统一版本条目列表（每个版本号仅呈现 1 行，自动按已配置的客户端下载所需区服数据）
-		var items []backup.VersionBackupMeta
+		var allItems []backup.VersionBackupMeta
 		if a.versionStatus != nil {
-			items = a.versionStatus.RemoteVersions
+			allItems = a.versionStatus.RemoteVersions
 		}
-		if a.snapCatalogBusy && len(items) == 0 {
-			ui.Column(c).FillWidth().Height(220).Center().Gap(10).Children(func() {
-				ui.Spinner(c).FontSize(20).TextColor(t.primary)
-				ui.Text(c, a.t("diff.snap_refreshing")).FontSize(t.text.xs).TextColor(t.muted)
-			})
-			return
-		}
-		if len(items) == 0 {
-			ui.Box(c).FillWidth().Height(220).Children(func() {
-				kitEmpty(c, icoDownload, a.t("diff.snap_empty_catalog"), a.t("diff.snap_empty_catalog_desc"), nil)
-			})
-			return
+		var downloadedCnt int
+		var downloadedBytes int64
+		for _, it := range allItems {
+			if it.Downloaded {
+				downloadedCnt++
+				downloadedBytes += it.Size
+			}
 		}
 
-		st := a.versionStatus
-		ui.Scroll(c.Key("snap-mgr-scroll")).TrackScroll(&a.snapMgrScroll).MaxHeight(340).FillWidth().Children(func() {
-			ui.Column(c).FillWidth().Padding(8, 20, 14, 20).Gap(8).Children(func() {
-				for _, item := range items {
-					sameAsClient := false
-					canDownload := false
-					hasAnyLocal := false
-					if st != nil {
-						if st.HasCN {
-							if st.CNVersion != "" && item.CNVersion == st.CNVersion {
-								sameAsClient = true
-							}
-							if item.HasRemoteCN {
-								canDownload = true
-							}
-							if item.DownloadedCN {
-								hasAnyLocal = true
-							}
+		ui.Column(c).Fill().Children(func() {
+			// 1. 紧凑单行顶栏：标题 + 已识别客户端范围，右侧刷新与关闭
+			ui.Row(c).FillWidth().Shrink(0).Padding(14, 20).
+				BorderWidth(0, 0, hairline, 0).BorderColor(t.border).
+				Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(12).Children(func() {
+				ui.Column(c).Gap(2).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+					ui.Text(c, a.t("diff.snap_mgr_title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
+					if summary := a.detectedClientsSummaryText(); summary != "" {
+						numText(c, a.tf("diff.snap_client_scope", "clients", summary)).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+					}
+				})
+				ui.Row(c).Gap(6).AlignItems(ui.Center).Shrink(0).Children(func() {
+					refLbl := a.t("diff.snap_refresh_catalog")
+					if a.snapCatalogBusy {
+						refLbl = a.t("diff.snap_refreshing")
+					}
+					if kitButton(c, "snap-mgr-refresh", refLbl, btnOpts{variant: btnOutline, size: btnSizeSm, icon: icoRefresh, disabled: a.snapCatalogBusy}) {
+						a.refreshSnapshotCatalog(true)
+					}
+					if kitIconButton(c, "snap-mgr-close", icoClose, a.t("common.close"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
+						a.snapMgrOpen = false
+					}
+				})
+			})
+
+			// 2. 筛选工具条：左侧分段切换（全部 / 已下载 / 未下载），右侧本地缓存汇总
+			ui.Row(c).FillWidth().Shrink(0).Padding(10, 20).Gap(12).
+				BorderWidth(0, 0, hairline, 0).BorderColor(t.border).
+				Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
+				curTabIdx := 0
+				for i, mode := range snapMgrFilterModes {
+					if mode == a.snapMgrFilter {
+						curTabIdx = i
+						break
+					}
+				}
+				tabLabels := []string{
+					a.t("diff.snap_tab_all"),
+					a.t("diff.snap_tab_downloaded"),
+					a.t("diff.snap_tab_not_downloaded"),
+				}
+				if nextIdx, changed := kitSegmentedTabs(c, "snap-mgr-filter", curTabIdx, tabLabels); changed {
+					a.snapMgrFilter = snapMgrFilterModes[nextIdx]
+					a.snapMgrScroll.Y = 0
+				}
+
+				if len(allItems) > 0 {
+					var storageText string
+					if downloadedCnt > 0 {
+						storageText = a.tf("diff.snap_storage_summary",
+							"downloaded", formatInt(downloadedCnt),
+							"total", formatInt(len(allItems)),
+							"size", formatSnapshotSize(downloadedBytes),
+						)
+					} else {
+						storageText = a.tf("diff.snap_storage_summary_empty", "total", formatInt(len(allItems)))
+					}
+					numText(c, storageText).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+				}
+			})
+
+			// 3. 固定表头行（对齐版本、大小、状态与操作列）
+			ui.Row(c).FillWidth().Shrink(0).Padding(7, 20).Gap(12).Background(t.card).
+				BorderWidth(0, 0, hairline, 0).BorderColor(t.border).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, a.t("diff.snap_col_version")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(0)
+				ui.Text(c, a.t("diff.snap_col_size")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(snapMgrColSizeW).Shrink(0).TextAlign(ui.End)
+				ui.Text(c, a.t("diff.snap_col_status")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(snapMgrColStatusW).Shrink(0)
+				ui.Text(c, a.t("diff.snap_col_actions")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(snapMgrColActionsW).Shrink(0).TextAlign(ui.End)
+			})
+
+			// 4. 固定伸缩主体区域：加载、空态与滚动列表共享同一容器高度
+			ui.Box(c).FillWidth().Grow(1).Shrink(1).MinHeight(0).Children(func() {
+				if a.snapCatalogBusy && len(allItems) == 0 {
+					kitLoading(c, a.t("diff.snap_refreshing"), "")
+					return
+				}
+				if len(allItems) == 0 {
+					kitEmpty(c, icoDownload, a.t("diff.snap_empty_catalog"), a.t("diff.snap_empty_catalog_desc"), nil)
+					return
+				}
+
+				items := make([]backup.VersionBackupMeta, 0, len(allItems))
+				for _, it := range allItems {
+					switch a.snapMgrFilter {
+					case "downloaded":
+						if !it.Downloaded {
+							continue
 						}
-						if st.HasGlobal {
-							if st.GlobalVersion != "" && item.GlobalVersion == st.GlobalVersion {
-								sameAsClient = true
-							}
-							if item.HasRemoteGlobal {
-								canDownload = true
-							}
-							if item.DownloadedGlobal {
-								hasAnyLocal = true
-							}
+					case "not_downloaded":
+						if it.Downloaded {
+							continue
 						}
 					}
-					isDownloading := a.snapDownID == item.Patch
-					kitBlock(c, ui.Row(c.Key("snap-item-"+item.Patch)).FillWidth().Padding(10, 12).Gap(10).
-						Justify(ui.SpaceBetween).AlignItems(ui.Center), toneCard).Children(func() {
-						ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
-							ui.Row(c).Gap(6).AlignItems(ui.Center).Wrap().Children(func() {
-								numText(c, item.DisplayName).FontSize(t.text.sm).FontWeight(600).TextColor(t.foreground).SingleLine()
-								if item.Downloaded {
-									drawPill(c, a.t("diff.snap_downloaded"), pillPositive)
-								} else if item.NeedsSupplement {
-									drawPill(c, a.t("diff.snap_needs_supplement"), pillWarning)
-								}
-								if sameAsClient {
-									drawPill(c, a.t("diff.snap_same_as_client"), pillAccent)
-								}
-							})
-							var metaParts []string
-							if item.Version != "" {
-								metaParts = append(metaParts, a.tf("diff.snap_meta_build", "ver", item.Version))
-							}
-							if item.Size > 0 {
-								metaParts = append(metaParts, formatSnapshotSize(item.Size))
-							}
-							if item.NeedsSupplement && item.DownloadSize > 0 {
-								metaParts = append(metaParts, a.tf("diff.snap_remaining_size", "size", formatSnapshotSize(item.DownloadSize)))
-							}
-							if len(item.CreatedAt) >= 10 {
-								metaParts = append(metaParts, item.CreatedAt[:10])
-							}
-							numText(c, strings.Join(metaParts, " · ")).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
-						})
+					items = append(items, it)
+				}
+				if len(items) == 0 {
+					emptyTitle := a.t("diff.snap_empty_filtered_downloaded")
+					if a.snapMgrFilter == "not_downloaded" {
+						emptyTitle = a.t("diff.snap_empty_filtered_not_downloaded")
+					}
+					kitEmpty(c, icoDownload, emptyTitle, "", nil)
+					return
+				}
 
-						ui.Row(c).Gap(6).AlignItems(ui.Center).Shrink(0).Children(func() {
-							if item.Downloaded {
-								if kitButton(c, "snap-use-"+item.Patch, a.t("diff.snap_use_compare"), btnOpts{variant: btnOutline, size: btnSizeSm, disabled: !hasAnyLocal}) {
-									a.selectSnapshotAsFrom(item.Patch)
-								}
-								if kitButton(c, "snap-del-"+item.Patch, a.t("diff.snap_delete"), btnOpts{variant: btnGhost, size: btnSizeSm, disabled: a.snapDownID != ""}) {
-									a.deleteLocalSnapshot(item.Patch, item.DisplayName)
-								}
-							} else if item.NeedsSupplement {
-								btnLbl := a.t("diff.snap_supplement")
-								if isDownloading {
-									btnLbl = a.t("diff.snap_downloading")
-								}
-								if kitButton(c, "snap-dl-"+item.Patch, btnLbl, btnOpts{
-									variant:  btnDefault,
-									size:     btnSizeSm,
-									icon:     icoDownload,
-									disabled: a.snapDownID != "" || !canDownload,
-								}) {
-									a.startSnapshotDownload(item.Patch, item.DisplayName)
-								}
-								if hasAnyLocal {
-									if kitButton(c, "snap-use-"+item.Patch, a.t("diff.snap_use_compare"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
-										a.selectSnapshotAsFrom(item.Patch)
+				st := a.versionStatus
+				ui.Scroll(c.Key("snap-mgr-scroll")).TrackScroll(&a.snapMgrScroll).Fill().Children(func() {
+					ui.Column(c).FillWidth().Children(func() {
+						for i, item := range items {
+							if i > 0 {
+								kitSeparator(c, false).Margin(0, 20)
+							}
+							sameAsClient := false
+							canDownload := false
+							if st != nil {
+								if st.HasCN {
+									if st.CNVersion != "" && item.CNVersion == st.CNVersion {
+										sameAsClient = true
+									}
+									if item.HasRemoteCN {
+										canDownload = true
 									}
 								}
-								if kitButton(c, "snap-del-"+item.Patch, a.t("diff.snap_delete"), btnOpts{variant: btnGhost, size: btnSizeSm, disabled: a.snapDownID != ""}) {
-									a.deleteLocalSnapshot(item.Patch, item.DisplayName)
-								}
-							} else {
-								btnLbl := a.t("diff.snap_download")
-								if isDownloading {
-									btnLbl = a.t("diff.snap_downloading")
-								}
-								if kitButton(c, "snap-dl-"+item.Patch, btnLbl, btnOpts{
-									variant:  btnDefault,
-									size:     btnSizeSm,
-									icon:     icoDownload,
-									disabled: a.snapDownID != "" || !canDownload,
-								}) {
-									a.startSnapshotDownload(item.Patch, item.DisplayName)
+								if st.HasGlobal {
+									if st.GlobalVersion != "" && item.GlobalVersion == st.GlobalVersion {
+										sameAsClient = true
+									}
+									if item.HasRemoteGlobal {
+										canDownload = true
+									}
 								}
 							}
-						})
+							isDownloading := a.snapDownID == item.Patch
+
+							row := ui.Row(c.Key("snap-item-"+item.Patch)).FillWidth().Padding(10, 20).Gap(12).
+								AlignItems(ui.Center).Transition(colorTransition(motionFast))
+							if row.Hovered() {
+								row.Background(t.tint(0.85))
+							}
+							row.Children(func() {
+								// 列 1：版本号、当前客户端同版标注与构建号/日期
+								ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
+									ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+										numText(c, item.DisplayName).FontSize(t.text.sm).FontWeight(600).TextColor(t.foreground).SingleLine()
+										if sameAsClient {
+											drawPill(c, a.t("diff.snap_same_as_client"), pillAccent)
+										}
+									})
+									var subParts []string
+									if item.Version != "" {
+										subParts = append(subParts, item.Version)
+									}
+									if len(item.CreatedAt) >= 10 {
+										subParts = append(subParts, item.CreatedAt[:10])
+									}
+									if len(subParts) > 0 {
+										numText(c, strings.Join(subParts, " · ")).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+									}
+								})
+
+								// 列 2：快照体积（等宽右对齐）
+								ui.Column(c).Width(snapMgrColSizeW).Shrink(0).AlignItems(ui.End).Gap(2).Children(func() {
+									sizeStr := "–"
+									if item.Size > 0 {
+										sizeStr = formatSnapshotSize(item.Size)
+									}
+									numText(c, sizeStr).FontSize(t.text.xs).TextColor(t.subdued).SingleLine()
+									if item.NeedsSupplement && item.DownloadSize > 0 {
+										numText(c, a.tf("diff.snap_remaining_size", "size", formatSnapshotSize(item.DownloadSize))).
+											FontSize(t.text.micro).TextColor(t.warningText).SingleLine()
+									}
+								})
+
+								// 列 3：状态（克制状态点 + 文案，避免整列彩色胶囊堆砌）
+								ui.Row(c).Width(snapMgrColStatusW).Shrink(0).Gap(6).AlignItems(ui.Center).Children(func() {
+									switch {
+									case item.Downloaded:
+										drawStatusDot(c, t.success)
+										ui.Text(c, a.t("diff.snap_downloaded")).FontSize(t.text.xs).TextColor(t.successText).SingleLine()
+									case item.NeedsSupplement:
+										drawStatusDot(c, t.attention)
+										ui.Text(c, a.t("diff.snap_needs_supplement")).FontSize(t.text.xs).TextColor(t.warningText).SingleLine()
+									default:
+										drawStatusDot(c, t.idle)
+										ui.Text(c, a.t("diff.snap_status_not_downloaded")).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+									}
+								})
+
+								// 列 4：行级操作（克制描边图标下载按钮 + 红色删除图标按钮）
+								ui.Row(c).Width(snapMgrColActionsW).Shrink(0).Gap(6).Justify(ui.End).AlignItems(ui.Center).Children(func() {
+									if item.Downloaded {
+										if kitIconButton(c, "snap-del-"+item.Patch, icoTrash, a.t("diff.snap_delete"), btnOpts{
+											variant:  btnDanger,
+											size:     btnSizeSm,
+											disabled: a.snapDownID != "",
+										}) {
+											a.deleteLocalSnapshot(item.Patch, item.DisplayName)
+										}
+									} else if item.NeedsSupplement {
+										dlTip := a.t("diff.snap_supplement")
+										if isDownloading {
+											dlTip = a.t("diff.snap_downloading")
+										}
+										if kitIconButton(c, "snap-dl-"+item.Patch, icoDownload, dlTip, btnOpts{
+											variant:  btnOutline,
+											size:     btnSizeSm,
+											disabled: a.snapDownID != "" || !canDownload,
+										}) {
+											a.startSnapshotDownload(item.Patch, item.DisplayName)
+										}
+										if kitIconButton(c, "snap-del-"+item.Patch, icoTrash, a.t("diff.snap_delete"), btnOpts{
+											variant:  btnDanger,
+											size:     btnSizeSm,
+											disabled: a.snapDownID != "",
+										}) {
+											a.deleteLocalSnapshot(item.Patch, item.DisplayName)
+										}
+									} else {
+										dlTip := a.t("diff.snap_download")
+										if isDownloading {
+											dlTip = a.t("diff.snap_downloading")
+										}
+										if kitIconButton(c, "snap-dl-"+item.Patch, icoDownload, dlTip, btnOpts{
+											variant:  btnOutline,
+											size:     btnSizeSm,
+											disabled: a.snapDownID != "" || !canDownload,
+										}) {
+											a.startSnapshotDownload(item.Patch, item.DisplayName)
+										}
+									}
+								})
+							})
+						}
 					})
-				}
+				})
+			})
+
+			// 5. 固定底栏：统一承载下载进度、错误/完成反馈或静态说明与关闭按钮，避免插入横幅导致列表跳动
+			ui.Row(c).FillWidth().Shrink(0).Padding(10, 20).Gap(12).Background(t.sidebar).
+				BorderWidth(hairline, 0, 0, 0).BorderColor(t.border).
+				Justify(ui.SpaceBetween).AlignItems(ui.Center).Children(func() {
+				ui.Box(c).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+					switch {
+					case a.snapDownID != "":
+						a.renderSnapshotFooterDownloadStatus(c)
+					case a.snapMgrError != "":
+						ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
+							ui.Icon(c, icoAlertCircle).Size(iconSm, iconSm).Shrink(0).TextColor(t.danger)
+							ui.Text(c, a.snapMgrError).FontSize(t.text.xs).TextColor(t.dangerText).SingleLine().Grow(1).Shrink(1)
+						})
+					case a.snapMgrNotice != "":
+						ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
+							drawStatusDot(c, t.success)
+							ui.Text(c, a.snapMgrNotice).FontSize(t.text.xs).TextColor(t.successText).SingleLine().Grow(1).Shrink(1)
+						})
+					default:
+						ui.Text(c, a.t("diff.snap_footer_hint")).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+					}
+				})
+				ui.Row(c).Gap(6).AlignItems(ui.Center).Shrink(0).Children(func() {
+					if a.snapDownID != "" {
+						if kitButton(c, "snap-dl-cancel-footer", a.t("diff.snap_cancel_download"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
+							a.cancelSnapshotDownload()
+						}
+					}
+					if kitButton(c, "snap-mgr-done", a.t("common.close"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
+						a.snapMgrOpen = false
+					}
+				})
 			})
 		})
+	})
+}
+
+func (a *App) renderSnapshotFooterDownloadStatus(c *ui.Context) {
+	t := themeOf(c)
+	var pct float32
+	if a.snapDownTotal > 0 {
+		pct = min(max(float32(a.snapDownBytes)*100/float32(a.snapDownTotal), 2), 100)
+	} else {
+		pct = 15
+	}
+	sizeInfo := formatSnapshotSize(a.snapDownBytes)
+	if a.snapDownTotal > 0 {
+		sizeInfo = fmt.Sprintf("%s / %s (%.0f%%)", formatSnapshotSize(a.snapDownBytes), formatSnapshotSize(a.snapDownTotal), pct)
+	}
+	ui.Column(c).FillWidth().Gap(4).Children(func() {
+		ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
+			ui.Row(c).Gap(6).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+				ui.Spinner(c).FontSize(12).TextColor(t.primary)
+				ui.Text(c, a.tf("diff.snap_downloading_title", "name", a.snapDownName)).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
+			})
+			numText(c, sizeInfo).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
+		})
+		kitProgressBar(c, pct)
 	})
 }
 
@@ -704,11 +1044,25 @@ func (a *App) renderSnapshotDownloadProgressCard(c *ui.Context) {
 				}
 			})
 		})
-		ui.Row(c).FillWidth().Height(4).Radius(t.radius.full).Background(t.border).Clip().AlignItems(ui.Stretch).Children(func() {
-			ui.Box(c).Grow(pct).FillHeight().Background(t.primary)
-			ui.Box(c).Grow(max(0, 100-pct)).FillHeight()
-		})
+		kitProgressBar(c, pct)
 	})
+}
+
+// renderDiffFieldChanges 绘制结构化字段前后变更明细（供通用实体与成就表格复用）。
+func renderDiffFieldChanges(c *ui.Context, changes []backup.ItemFieldChange) {
+	t := themeOf(c)
+	for _, chg := range changes {
+		ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, chg.Label).FontSize(t.text.micro).TextColor(t.muted)
+			ui.Box(c).Padding(1, 4).Radius(t.radius.xs).Background(t.delBg).Children(func() {
+				numText(c, chg.Before).FontSize(t.text.micro).TextColor(t.delText).Strikethrough()
+			})
+			ui.Text(c, "→").FontSize(t.text.micro).TextColor(t.muted)
+			ui.Box(c).Padding(1, 4).Radius(t.radius.xs).Background(t.insBg).Children(func() {
+				numText(c, chg.After).FontSize(t.text.micro).FontWeight(500).TextColor(t.insText)
+			})
+		})
+	}
 }
 
 func formatSnapshotSize(sz int64) string {

@@ -551,7 +551,7 @@ func (a *App) renderFavoritesTabHeader(c *ui.Context, counts favoriteTabCounts) 
 				numText(c, a.tf("favorites.summary", "count", formatInt(counts.total))).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
 			})
 
-			ui.Row(c.Key("fav-tabs-track")).Padding(3).Gap(2).Radius(t.radius.lg).Background(t.tint(1.1)).AlignItems(ui.Center).Wrap().Children(func() {
+			ui.Row(c.Key("fav-tabs-track")).Padding(3).Gap(2).Radius(t.radius.lg).Background(t.segTrack).AlignItems(ui.Center).Wrap().Children(func() {
 				for _, tb := range tabs {
 					active := a.favTab == tb.id
 					btn := ui.ButtonBase(c.Key("fav-tab-" + tb.id)).Role(ui.RoleTab).Label(tb.a11y).Selected(active).
@@ -559,7 +559,7 @@ func (a *App) renderFavoritesTabHeader(c *ui.Context, counts favoriteTabCounts) 
 						Justify(ui.Center).AlignItems(ui.Center).
 						Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 					if active {
-						btn.Background(t.background).Border(hairline, t.border)
+						btn.Background(t.segActive).Border(hairline, t.border)
 					} else if btn.Hovered() {
 						btn.Background(t.tint(0.75))
 					}

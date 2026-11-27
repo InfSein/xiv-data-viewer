@@ -171,15 +171,38 @@ func TestToolsMenuAndTextSearchUI(t *testing.T) {
 		t.Fatalf("期望跳转至物品 #1001，实际 tab=%v itemID=%d", app.tab, app.selectedItemID)
 	}
 
-	// 6. 验证多语言对照列：挂载日/英对照数据后在表格中展示「多语言对照」列与 JA/EN 译文
+	// 6. 验证跨语言统一检索与多语言对照列，且操作列已移除复制按钮、页头不显示检索语言切换下拉
+	svc.SetTextSearchIndex("chs", gamedata.NewTextSearchIndexFromRecords("chs",
+		[]gamedata.TextIndexSheetInput{
+			{Name: "Item", IsLocalized: true, ColNames: []string{"Name", "Description"}},
+			{Name: "ClassJobCategory", IsLocalized: true, ColNames: []string{"Name"}},
+		},
+		[]gamedata.TextIndexRowInput{
+			{SheetIdx: 0, RowID: 1001, SubRowID: -1, ColIdx: 0, Text: "ABCD"},
+			{SheetIdx: 1, RowID: 33, SubRowID: -1, ColIdx: 0, Text: "能工巧匠"},
+		},
+		nil, nil,
+	))
 	svc.SetTextSearchIndex("ja", gamedata.NewTextSearchIndexFromRecords("ja",
-		[]gamedata.TextIndexSheetInput{{Name: "Item", IsLocalized: true, ColNames: []string{"Name"}}},
-		[]gamedata.TextIndexRowInput{{SheetIdx: 0, RowID: 1001, SubRowID: -1, ColIdx: 0, Text: "ABCDの日本語名"}},
+		[]gamedata.TextIndexSheetInput{
+			{Name: "Item", IsLocalized: true, ColNames: []string{"Name"}},
+			{Name: "ClassJobCategory", IsLocalized: true, ColNames: []string{"Name"}},
+		},
+		[]gamedata.TextIndexRowInput{
+			{SheetIdx: 0, RowID: 1001, SubRowID: -1, ColIdx: 0, Text: "ABCDの日本語名"},
+			{SheetIdx: 1, RowID: 33, SubRowID: -1, ColIdx: 0, Text: "クラフター"},
+		},
 		nil, nil,
 	))
 	svc.SetTextSearchIndex("en", gamedata.NewTextSearchIndexFromRecords("en",
-		[]gamedata.TextIndexSheetInput{{Name: "Item", IsLocalized: true, ColNames: []string{"Name"}}},
-		[]gamedata.TextIndexRowInput{{SheetIdx: 0, RowID: 1001, SubRowID: -1, ColIdx: 0, Text: "ABCD English Name"}},
+		[]gamedata.TextIndexSheetInput{
+			{Name: "Item", IsLocalized: true, ColNames: []string{"Name"}},
+			{Name: "ClassJobCategory", IsLocalized: true, ColNames: []string{"Name"}},
+		},
+		[]gamedata.TextIndexRowInput{
+			{SheetIdx: 0, RowID: 1001, SubRowID: -1, ColIdx: 0, Text: "ABCD English Name"},
+			{SheetIdx: 1, RowID: 33, SubRowID: -1, ColIdx: 0, Text: "Disciples of the Hand"},
+		},
 		nil, nil,
 	))
 	app.navigateTab(tabTextSearch)
@@ -189,6 +212,26 @@ func TestToolsMenuAndTextSearchUI(t *testing.T) {
 	tt.Frame()
 	if !tt.HasText("多语言对照") || !tt.HasText("ABCDの日本語名") || !tt.HasText("ABCD English Name") {
 		t.Fatalf("存在多语言数据时应在表格中展示多语言对照列及日英译文: %v", tt.Texts())
+	}
+	if _, hasCopy := tt.Find("复制文本"); hasCopy {
+		t.Fatalf("文本检索表格操作列不应再显示复制按钮")
+	}
+	if tt.HasText("简体中文 (chs)") {
+		t.Fatalf("文本检索页头不应再显示手动语言切换下拉")
+	}
+
+	// 不切换语言直接输入日文与英文，均应检索到「能工巧匠」条目
+	for _, q := range []string{"クラフター", "Disciples of the Hand"} {
+		app.textSearchQ = q
+		app.textSearchPage = 1
+		app.runTextSearch(false)
+		tt.Frame()
+		if app.textSearchRes.Total != 1 || len(app.textSearchRes.Items) != 1 || app.textSearchRes.Items[0].Text != "能工巧匠" {
+			t.Fatalf("中文界面下直接搜索 %q 应命中「能工巧匠」，实际: %+v", q, app.textSearchRes.Items)
+		}
+		if !tt.HasText("能工巧匠") || !tt.HasText("クラフター") || !tt.HasText("Disciples of the Hand") {
+			t.Fatalf("中文界面下直接搜索 %q 未正确渲染多语言对照内容: %v", q, tt.Texts())
+		}
 	}
 }
 

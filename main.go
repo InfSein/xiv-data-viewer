@@ -26,7 +26,7 @@ func getChangelogFS() fs.FS {
 }
 
 // appVersion 默认版本号，正式构建时也可通过 -ldflags "-X main.appVersion=x.y.z" 覆盖。
-var appVersion = "2.5.0"
+var appVersion = "2.5.1"
 
 // userDataDirName 是应用持久化用户数据（配置、版本快照、窗口状态等）的目录名。
 const userDataDirName = "xiv-data-viewer"

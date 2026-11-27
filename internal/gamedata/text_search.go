@@ -56,6 +56,8 @@ type TextSearchLangOption struct {
 // TextIndexProgress 上报全量文本索引的异步构建进度。
 type TextIndexProgress struct {
 	LangCode     string
+	LangIndex    int    // 当前正在构建第几种语言（1-based）
+	LangTotal    int    // 本次共需构建的语言总数
 	Phase        string // "scanning" | "indexing" | "ready"
 	DoneSheets   int
 	TotalSheets  int
@@ -65,6 +67,7 @@ type TextIndexProgress struct {
 // TextIndexStats 描述已就绪全量文本索引的统计概览。
 type TextIndexStats struct {
 	LangCode    string
+	Languages   []string
 	TotalSheets int
 	TotalTexts  int
 	BuildTimeMs int64
@@ -89,14 +92,16 @@ type TextSheetFacet struct {
 
 // TextTranslation 表示单条文本在另一种客户端语言下的对应译文。
 type TextTranslation struct {
-	LangCode string // "chs" | "ja" | "en" | "de" | "fr"
-	Badge    string // "ZH" | "JA" | "EN" | "DE" | "FR"
-	Text     string
+	LangCode   string // "chs" | "ja" | "en" | "de" | "fr"
+	Badge      string // "ZH" | "JA" | "EN" | "DE" | "FR"
+	Text       string
+	MatchSpans []TextMatchSpan
 }
 
 // TextSearchHit 表示文本检索的单条命中记录。
 type TextSearchHit struct {
 	DocID        uint32
+	LangCode     string // 主展示文本所属语言代码（通常为主语言；若主语言无该条目则回退命中语言）
 	SheetName    string
 	Scope        TextSearchScope
 	RowID        int
@@ -1793,6 +1798,32 @@ func isWordBoundaryAt(b []byte, bytePos int) bool {
 	return unicode.IsPunct(prev) || unicode.IsSymbol(prev)
 }
 
+// computeHighlightSpansIfMatched 仅当 origText 完整满足查询条件时才返回原文字节高亮区间，避免跨语言未命中文本出现部分误高亮。
+func computeHighlightSpansIfMatched(origText string, parsed ParsedTextQuery) []TextMatchSpan {
+	if origText == "" || parsed.Empty {
+		return nil
+	}
+	folded := foldString(origText)
+	if parsed.Mode == TextMatchExact {
+		if len(parsed.ExactTerms) == 0 {
+			return nil
+		}
+		for _, term := range parsed.ExactTerms {
+			if !strings.Contains(folded, term) {
+				return nil
+			}
+		}
+		return computeHighlightSpans(origText, parsed)
+	}
+	if len(parsed.FuzzyRunes) == 0 {
+		return nil
+	}
+	if _, ok := forwardSubseqEnd([]byte(folded), 0, parsed.FuzzyRunes); !ok {
+		return nil
+	}
+	return computeHighlightSpans(origText, parsed)
+}
+
 // computeHighlightSpans 仅对当前展示页的结果计算精确的原文字节高亮区间，自动合并相邻片段。
 func computeHighlightSpans(origText string, parsed ParsedTextQuery) []TextMatchSpan {
 	if origText == "" || parsed.Empty {
@@ -2075,16 +2106,275 @@ func (s *Service) SetTextSearchIndex(langCode string, index *TextSearchIndex) {
 		s.textIndices = make(map[string]*TextSearchIndex, 4)
 	}
 	s.textIndices[code] = index
+	s.textIndexGen++
 	s.textIndexMu.Unlock()
+
+	s.textUnifiedMu.Lock()
+	s.textUnifiedCache = nil
+	s.textUnifiedMu.Unlock()
+}
+
+// CoreTextSearchLangs 返回当前客户端配置下需纳入跨语言统一检索的核心语言列表（中/日/英，主语言排在首位）。
+func (s *Service) CoreTextSearchLangs() []string {
+	if s == nil {
+		return nil
+	}
+	avail := make(map[string]bool, 4)
+	if s.store != nil {
+		if s.store.HasCN && s.store.CNReader != nil {
+			avail["chs"] = true
+		}
+		if s.store.HasGlobal && s.store.GlobalReader != nil {
+			avail["ja"] = true
+			avail["en"] = true
+		}
+	}
+	// 无真实客户端句柄的测试场景下兼容已手工注入的内存索引
+	if len(avail) == 0 {
+		s.textIndexMu.RLock()
+		for code, idx := range s.textIndices {
+			if idx != nil {
+				avail[strings.ToLower(code)] = true
+			}
+		}
+		s.textIndexMu.RUnlock()
+	}
+	if len(avail) == 0 {
+		return nil
+	}
+
+	def := s.DefaultTextSearchLang()
+	order := []string{def, "chs", "ja", "en"}
+	seen := make(map[string]bool, 4)
+	out := make([]string, 0, len(avail))
+	for _, code := range order {
+		if code != "" && avail[code] && !seen[code] {
+			seen[code] = true
+			out = append(out, code)
+		}
+	}
+	for code := range avail {
+		if !seen[code] {
+			seen[code] = true
+			out = append(out, code)
+		}
+	}
+	return out
+}
+
+// HasAllCoreTextSearchIndices 判断当前客户端可用的全部核心语言全文索引是否均已构建就绪。
+func (s *Service) HasAllCoreTextSearchIndices() bool {
+	if s == nil {
+		return false
+	}
+	langs := s.CoreTextSearchLangs()
+	if len(langs) == 0 {
+		return false
+	}
+	s.textIndexMu.RLock()
+	defer s.textIndexMu.RUnlock()
+	if len(s.textIndices) == 0 {
+		return false
+	}
+	for _, code := range langs {
+		if s.textIndices[code] == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// CombinedTextIndexStats 汇总当前所有已就绪语言全文索引的合并统计（数据表按表名去重）。
+func (s *Service) CombinedTextIndexStats() TextIndexStats {
+	if s == nil {
+		return TextIndexStats{}
+	}
+	indices, _ := s.collectSearchIndices(s.DefaultTextSearchLang())
+	if len(indices) == 0 {
+		return TextIndexStats{LangCode: s.DefaultTextSearchLang()}
+	}
+	if len(indices) == 1 {
+		st := indices[0].Stats()
+		st.Languages = []string{indices[0].langCode}
+		return st
+	}
+
+	langs := make([]string, 0, len(indices))
+	sheetSet := make(map[string]struct{}, 8192)
+	totalTexts := 0
+	var totalBuildMs int64
+	for _, idx := range indices {
+		langs = append(langs, idx.langCode)
+		totalTexts += len(idx.records)
+		totalBuildMs += idx.buildTimeMs
+		for i := range idx.sheets {
+			sheetSet[idx.sheets[i].lowerName] = struct{}{}
+		}
+	}
+	return TextIndexStats{
+		LangCode:    s.DefaultTextSearchLang(),
+		Languages:   langs,
+		TotalSheets: len(sheetSet),
+		TotalTexts:  totalTexts,
+		BuildTimeMs: totalBuildMs,
+	}
+}
+
+func (s *Service) collectSearchIndices(primaryLang string) ([]*TextSearchIndex, uint64) {
+	if s == nil {
+		return nil, 0
+	}
+	primary := strings.ToLower(strings.TrimSpace(primaryLang))
+	if primary == "" {
+		primary = s.DefaultTextSearchLang()
+	}
+
+	s.textIndexMu.RLock()
+	gen := s.textIndexGen
+	if len(s.textIndices) == 0 {
+		s.textIndexMu.RUnlock()
+		return nil, gen
+	}
+	order := []string{primary, "chs", "ja", "en", "de", "fr"}
+	seen := make(map[string]bool, len(s.textIndices))
+	out := make([]*TextSearchIndex, 0, len(s.textIndices))
+	for _, code := range order {
+		if code == "" || seen[code] {
+			continue
+		}
+		if idx := s.textIndices[code]; idx != nil {
+			seen[code] = true
+			out = append(out, idx)
+		}
+	}
+	var extras []string
+	for code, idx := range s.textIndices {
+		if idx != nil && !seen[code] {
+			extras = append(extras, code)
+		}
+	}
+	sort.Strings(extras)
+	for _, code := range extras {
+		out = append(out, s.textIndices[code])
+	}
+	s.textIndexMu.RUnlock()
+	return out, gen
 }
 
 // BuildTextSearchIndex 按需异步/同步构建并缓存指定客户端语言的全部 EXD 文本索引。
 func (s *Service) BuildTextSearchIndex(ctx context.Context, langCode string, onProgress func(TextIndexProgress)) (*TextSearchIndex, error) {
+	return s.buildTextSearchIndexWithOpts(ctx, langCode, false, 1, 1, 0, onProgress)
+}
+
+// BuildAllTextSearchIndices 构建当前已配置客户端支持的全部核心语言（中/日/英）全文检索索引，
+// 同一客户端的后续语言自动跳过重复的无语言通用表，构建完成后无需切换语言即可跨语言直接命中。
+func (s *Service) BuildAllTextSearchIndices(ctx context.Context, onProgress func(TextIndexProgress)) (map[string]*TextSearchIndex, error) {
 	if s == nil || s.store == nil {
 		return nil, fmt.Errorf("游戏数据服务未初始化")
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	langs := s.CoreTextSearchLangs()
+	if len(langs) == 0 {
+		return nil, fmt.Errorf("未配置可用客户端，无法构建文本索引")
+	}
+
+	result := make(map[string]*TextSearchIndex, len(langs))
+	scannedReaders := make(map[*sqpack.GameReader]bool, 2)
+	accTexts := 0
+
+	// 先检查已缓存的语言索引，避免重复扫描同一客户端的无语言通用表
+	s.textIndexMu.RLock()
+	for _, code := range langs {
+		if cached := s.textIndices[code]; cached != nil {
+			result[code] = cached
+			accTexts += len(cached.records)
+			if r, _, _ := s.textSearchReaderAndLang(code); r != nil {
+				scannedReaders[r] = true
+			}
+		}
+	}
+	s.textIndexMu.RUnlock()
+
+	var missing []string
+	for _, code := range langs {
+		if result[code] == nil {
+			missing = append(missing, code)
+		}
+	}
+
+	if len(missing) == 0 {
+		if onProgress != nil {
+			st := s.CombinedTextIndexStats()
+			onProgress(TextIndexProgress{
+				LangCode:     st.LangCode,
+				LangIndex:    len(langs),
+				LangTotal:    len(langs),
+				Phase:        "ready",
+				DoneSheets:   st.TotalSheets,
+				TotalSheets:  st.TotalSheets,
+				IndexedTexts: st.TotalTexts,
+			})
+		}
+		return result, nil
+	}
+
+	totalMissing := len(missing)
+	for i, code := range missing {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		reader, _, _ := s.textSearchReaderAndLang(code)
+		locOnly := reader != nil && scannedReaders[reader]
+		built, err := s.buildTextSearchIndexWithOpts(ctx, code, locOnly, i+1, totalMissing, accTexts, onProgress)
+		if err != nil {
+			return nil, err
+		}
+		result[code] = built
+		if built != nil {
+			accTexts += len(built.records)
+		}
+		if reader != nil {
+			scannedReaders[reader] = true
+		}
+	}
+
+	if onProgress != nil {
+		st := s.CombinedTextIndexStats()
+		onProgress(TextIndexProgress{
+			LangCode:     st.LangCode,
+			LangIndex:    totalMissing,
+			LangTotal:    totalMissing,
+			Phase:        "ready",
+			DoneSheets:   st.TotalSheets,
+			TotalSheets:  st.TotalSheets,
+			IndexedTexts: st.TotalTexts,
+		})
+	}
+	return result, nil
+}
+
+func (s *Service) buildTextSearchIndexWithOpts(
+	ctx context.Context,
+	langCode string,
+	localizedOnly bool,
+	langIndex int,
+	langTotal int,
+	baseIndexedTexts int,
+	onProgress func(TextIndexProgress),
+) (*TextSearchIndex, error) {
+	if s == nil || s.store == nil {
+		return nil, fmt.Errorf("游戏数据服务未初始化")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if langTotal < 1 {
+		langTotal = 1
+	}
+	if langIndex < 1 {
+		langIndex = 1
 	}
 	reader, lang, normCode := s.textSearchReaderAndLang(langCode)
 
@@ -2095,10 +2385,12 @@ func (s *Service) BuildTextSearchIndex(ctx context.Context, langCode string, onP
 			st := cached.Stats()
 			onProgress(TextIndexProgress{
 				LangCode:     normCode,
+				LangIndex:    langIndex,
+				LangTotal:    langTotal,
 				Phase:        "ready",
 				DoneSheets:   st.TotalSheets,
 				TotalSheets:  st.TotalSheets,
-				IndexedTexts: st.TotalTexts,
+				IndexedTexts: baseIndexedTexts + st.TotalTexts,
 			})
 		}
 		return cached, nil
@@ -2118,14 +2410,17 @@ func (s *Service) BuildTextSearchIndex(ctx context.Context, langCode string, onP
 	scanRes, err := sqpack.ScanAllEXDStrings(ctx, reader, sqpack.EXDTextScanOptions{
 		PreferredLang: lang,
 		ResolveSheet:  resolveFn,
+		LocalizedOnly: localizedOnly,
 		OnProgress: func(done, total, texts int) {
 			if onProgress != nil {
 				onProgress(TextIndexProgress{
 					LangCode:     normCode,
+					LangIndex:    langIndex,
+					LangTotal:    langTotal,
 					Phase:        "scanning",
 					DoneSheets:   done,
 					TotalSheets:  total,
-					IndexedTexts: texts,
+					IndexedTexts: baseIndexedTexts + texts,
 				})
 			}
 		},
@@ -2137,10 +2432,12 @@ func (s *Service) BuildTextSearchIndex(ctx context.Context, langCode string, onP
 	if onProgress != nil {
 		onProgress(TextIndexProgress{
 			LangCode:     normCode,
+			LangIndex:    langIndex,
+			LangTotal:    langTotal,
 			Phase:        "indexing",
 			DoneSheets:   len(scanRes.Sheets),
 			TotalSheets:  len(scanRes.Sheets),
-			IndexedTexts: scanRes.TotalRows,
+			IndexedTexts: baseIndexedTexts + scanRes.TotalRows,
 		})
 	}
 
@@ -2154,47 +2451,469 @@ func (s *Service) BuildTextSearchIndex(ctx context.Context, langCode string, onP
 		s.textIndices = make(map[string]*TextSearchIndex, 4)
 	}
 	s.textIndices[normCode] = built
+	s.textIndexGen++
 	s.textIndexMu.Unlock()
 
-	if onProgress != nil {
+	s.textUnifiedMu.Lock()
+	s.textUnifiedCache = nil
+	s.textUnifiedMu.Unlock()
+
+	if onProgress != nil && langTotal == 1 {
 		st := built.Stats()
 		onProgress(TextIndexProgress{
 			LangCode:     normCode,
+			LangIndex:    langIndex,
+			LangTotal:    langTotal,
 			Phase:        "ready",
 			DoneSheets:   st.TotalSheets,
 			TotalSheets:  st.TotalSheets,
-			IndexedTexts: st.TotalTexts,
+			IndexedTexts: baseIndexedTexts + st.TotalTexts,
 		})
 	}
 	return built, nil
 }
 
-// SearchTexts 在指定语言的已构建全文索引中执行查询并返回分页结果、多语言对照与实体跳转信息。
+type unifiedCellKey struct {
+	sheetID  uint32
+	rowID    uint32
+	subRowID int16
+	colIdx   uint16
+}
+
+type unifiedHitRef struct {
+	langIdx uint8
+	docID   uint32
+	score   uint16
+}
+
+type unifiedTextSearchCacheEntry struct {
+	key       string
+	mode      TextMatchMode
+	hits      []unifiedHitRef
+	topSheets []TextSheetFacet
+}
+
+// SearchTexts 跨所有已构建语言的全量索引执行统一检索（用户输入任意语言均可命中同一条目），
+// 按匹配程度去重合并并按当前主语言展示正文与多语言对照译文及命中高亮。
 func (s *Service) SearchTexts(ctx context.Context, query TextSearchQuery) (TextSearchResponse, error) {
 	if s == nil {
 		return TextSearchResponse{Page: 1, PageSize: 50, TotalPages: 1}, nil
 	}
-	idx := s.GetTextSearchIndex(query.LangCode)
-	if idx == nil {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	primaryLang := strings.ToLower(strings.TrimSpace(query.LangCode))
+	if primaryLang == "" {
+		primaryLang = s.DefaultTextSearchLang()
+	}
+
+	searchIndices, gen := s.collectSearchIndices(primaryLang)
+	parsed := ParseTextSearchQuery(query.Q)
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+
+	if len(searchIndices) == 0 {
 		return TextSearchResponse{
-			LangCode:   query.LangCode,
+			LangCode:   primaryLang,
 			Query:      query.Q,
-			Mode:       ParseTextSearchQuery(query.Q).Mode,
+			Mode:       parsed.Mode,
 			Page:       1,
-			PageSize:   max(1, query.PageSize),
+			PageSize:   pageSize,
 			TotalPages: 1,
 		}, nil
 	}
-	res, err := idx.Search(ctx, query, s.resolveTextJumpTarget)
-	if err != nil {
-		return res, err
+
+	combinedStats := s.CombinedTextIndexStats()
+	if parsed.Empty {
+		return TextSearchResponse{
+			LangCode:   primaryLang,
+			Query:      query.Q,
+			Mode:       parsed.Mode,
+			Page:       1,
+			PageSize:   pageSize,
+			TotalPages: 1,
+			IndexStats: combinedStats,
+		}, nil
 	}
-	compareLangs := s.CompareTextSearchLangs(res.LangCode)
-	res.CompareLangs = compareLangs
-	if len(compareLangs) > 0 && len(res.Items) > 0 {
-		s.populateHitTranslations(idx, res.Items, compareLangs)
+
+	// 单语言快速通道（如仅配置国服客户端，且唯一索引即为当前主语言）
+	if len(searchIndices) == 1 && searchIndices[0].langCode == primaryLang {
+		idx := searchIndices[0]
+		res, err := idx.Search(ctx, query, s.resolveTextJumpTarget)
+		if err != nil {
+			return res, err
+		}
+		res.IndexStats = combinedStats
+		for i := range res.Items {
+			res.Items[i].LangCode = primaryLang
+		}
+		compareLangs := s.CompareTextSearchLangs(primaryLang)
+		res.CompareLangs = compareLangs
+		if len(compareLangs) > 0 && len(res.Items) > 0 {
+			s.populateHitTranslations(idx, res.Items, compareLangs, parsed)
+		}
+		return res, nil
 	}
-	return res, nil
+
+	started := time.Now()
+	scope := query.Scope
+	if scope == "" {
+		scope = TextScopeAll
+	}
+	sheetFilterLower := strings.ToLower(strings.TrimSpace(query.SheetFilter))
+
+	cacheKey := fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00%s", gen, primaryLang, query.Q, scope, sheetFilterLower)
+	s.textUnifiedMu.Lock()
+	var cached *unifiedTextSearchCacheEntry
+	if s.textUnifiedCache != nil && s.textUnifiedCache.key == cacheKey {
+		cached = s.textUnifiedCache
+	}
+	s.textUnifiedMu.Unlock()
+
+	var merged []unifiedHitRef
+	var topSheets []TextSheetFacet
+
+	if cached != nil {
+		merged = cached.hits
+		topSheets = cached.topSheets
+	} else {
+		var err error
+		merged, topSheets, err = executeUnifiedMultiLangSearch(ctx, searchIndices, parsed, scope, sheetFilterLower)
+		if err != nil {
+			return TextSearchResponse{}, err
+		}
+		s.textUnifiedMu.Lock()
+		s.textUnifiedCache = &unifiedTextSearchCacheEntry{
+			key:       cacheKey,
+			mode:      parsed.Mode,
+			hits:      merged,
+			topSheets: topSheets,
+		}
+		s.textUnifiedMu.Unlock()
+	}
+
+	total := len(merged)
+	page, totalPages, start, end := paginateRange(total, query.Page, pageSize)
+	compareLangs := s.CompareTextSearchLangs(primaryLang)
+	items := s.materializeUnifiedHits(searchIndices, merged[start:end], primaryLang, compareLangs, parsed)
+
+	return TextSearchResponse{
+		LangCode:     primaryLang,
+		CompareLangs: compareLangs,
+		Query:        query.Q,
+		Mode:         parsed.Mode,
+		Items:        items,
+		TopSheets:    topSheets,
+		Total:        total,
+		Page:         page,
+		PageSize:     pageSize,
+		TotalPages:   totalPages,
+		ElapsedMs:    float64(time.Since(started).Microseconds()) / 1000.0,
+		IndexStats:   combinedStats,
+	}, nil
+}
+
+// executeUnifiedMultiLangSearch 在所有已加载语言索引中执行检索并按 (表, 行, 子行, 列) 去重合并，
+// 利用各语言结果的有序性进行单趟 K 路归并，无需二次排序。
+func executeUnifiedMultiLangSearch(
+	ctx context.Context,
+	indices []*TextSearchIndex,
+	parsed ParsedTextQuery,
+	scope TextSearchScope,
+	sheetFilterLower string,
+) ([]unifiedHitRef, []TextSheetFacet, error) {
+	perLangPacked := make([][]uint64, len(indices))
+	perLangFacets := make([][]TextSheetFacet, len(indices))
+	nonEmpty := make([]int, 0, len(indices))
+
+	for li, idx := range indices {
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		packed, facets, err := idx.executeSearch(ctx, parsed, scope, sheetFilterLower)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(packed) > 0 {
+			perLangPacked[li] = packed
+			perLangFacets[li] = facets
+			nonEmpty = append(nonEmpty, li)
+		}
+	}
+
+	if len(nonEmpty) == 0 {
+		return nil, nil, nil
+	}
+
+	// 绝大多数单语言关键词仅命中一个语言索引：零去重开销直接封装
+	if len(nonEmpty) == 1 {
+		li := nonEmpty[0]
+		src := perLangPacked[li]
+		out := make([]unifiedHitRef, len(src))
+		uLang := uint8(li)
+		for i, key := range src {
+			out[i] = unifiedHitRef{
+				langIdx: uLang,
+				docID:   uint32(key & 0xFFFFFFFF),
+				score:   uint16(65535 - (key >> 48)),
+			}
+		}
+		return out, perLangFacets[li], nil
+	}
+
+	// 多语言同时命中：统一映射数据表 ID 后做 K 路归并去重（高分优先，同分主语言优先）
+	type globalSheetInfo struct {
+		name  string
+		scope TextSearchScope
+	}
+	sheetIDByLower := make(map[string]uint32, 1024)
+	globalSheets := make([]globalSheetInfo, 0, 1024)
+	sheetIDMaps := make([][]uint32, len(indices))
+
+	totalEst := 0
+	for _, li := range nonEmpty {
+		idx := indices[li]
+		totalEst += len(perLangPacked[li])
+		m := make([]uint32, len(idx.sheets))
+		for si := range idx.sheets {
+			sh := &idx.sheets[si]
+			gid, ok := sheetIDByLower[sh.lowerName]
+			if !ok {
+				gid = uint32(len(globalSheets))
+				sheetIDByLower[sh.lowerName] = gid
+				globalSheets = append(globalSheets, globalSheetInfo{
+					name:  sh.name,
+					scope: sh.scope,
+				})
+			}
+			m[si] = gid
+		}
+		sheetIDMaps[li] = m
+	}
+
+	cursors := make([]int, len(nonEmpty))
+	seen := make(map[unifiedCellKey]struct{}, min(totalEst, 262144))
+	merged := make([]unifiedHitRef, 0, min(totalEst, 262144))
+	sheetCounts := make(map[uint32]int, 64)
+
+	iters := 0
+	for {
+		if (iters&8191) == 0 && ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		iters++
+
+		bestSlot := -1
+		var bestRank uint64
+		for slot, li := range nonEmpty {
+			cur := cursors[slot]
+			arr := perLangPacked[li]
+			if cur >= len(arr) {
+				continue
+			}
+			// 高 32 位编码了 (65535-score, runeCount)，越小越靠前；同分时靠前的 slot（主语言）自然胜出
+			rank := arr[cur] >> 32
+			if bestSlot < 0 || rank < bestRank {
+				bestSlot = slot
+				bestRank = rank
+			}
+		}
+		if bestSlot < 0 {
+			break
+		}
+
+		li := nonEmpty[bestSlot]
+		key := perLangPacked[li][cursors[bestSlot]]
+		cursors[bestSlot]++
+
+		docID := uint32(key & 0xFFFFFFFF)
+		rec := indices[li].records[docID]
+		gid := sheetIDMaps[li][rec.sheetIdx]
+		ck := unifiedCellKey{
+			sheetID:  gid,
+			rowID:    rec.rowID,
+			subRowID: rec.subRowID,
+			colIdx:   rec.colIdx,
+		}
+		if _, dup := seen[ck]; dup {
+			continue
+		}
+		seen[ck] = struct{}{}
+		merged = append(merged, unifiedHitRef{
+			langIdx: uint8(li),
+			docID:   docID,
+			score:   uint16(65535 - (key >> 48)),
+		})
+		sheetCounts[gid]++
+	}
+
+	facets := make([]TextSheetFacet, 0, len(sheetCounts))
+	for gid, cnt := range sheetCounts {
+		info := globalSheets[gid]
+		facets = append(facets, TextSheetFacet{
+			SheetName: info.name,
+			Scope:     info.scope,
+			Count:     cnt,
+		})
+	}
+	sort.Slice(facets, func(i, j int) bool {
+		if facets[i].Count != facets[j].Count {
+			return facets[i].Count > facets[j].Count
+		}
+		return facets[i].SheetName < facets[j].SheetName
+	})
+	if len(facets) > 30 {
+		facets = facets[:30]
+	}
+	return merged, facets, nil
+}
+
+// materializeUnifiedHits 将当前分页命中的统一记录投影为主语言正文与多语言对照译文，并分别为所有命中的语言计算高亮区间。
+func (s *Service) materializeUnifiedHits(
+	indices []*TextSearchIndex,
+	refs []unifiedHitRef,
+	primaryLang string,
+	compareLangs []string,
+	parsed ParsedTextQuery,
+) []TextSearchHit {
+	if len(refs) == 0 {
+		return nil
+	}
+	items := make([]TextSearchHit, len(refs))
+
+	buildOne := func(i int) {
+		hr := refs[i]
+		winIdx := indices[hr.langIdx]
+		rec := winIdx.records[hr.docID]
+		sh := &winIdx.sheets[rec.sheetIdx]
+		colName := winIdx.resolveColumnName(rec.sheetIdx, rec.colIdx)
+		winText := string(winIdx.textBytesOf(int(hr.docID)))
+		jumpKind, jumpID := s.resolveTextJumpTarget(sh.lowerName, int(rec.rowID))
+
+		// 将语言槽位编入高 4 位，保证跨语言结果在 UI 列表中具备全局唯一键
+		uniqueDocID := (uint32(hr.langIdx) << 28) | hr.docID
+
+		hit := TextSearchHit{
+			DocID:     uniqueDocID,
+			LangCode:  primaryLang,
+			SheetName: sh.name,
+			Scope:     sh.scope,
+			RowID:     int(rec.rowID),
+			SubRowID:  int(rec.subRowID),
+			ColIndex:  int(rec.colIdx),
+			ColName:   colName,
+			Score:     int(hr.score),
+			JumpKind:  jumpKind,
+			JumpID:    jumpID,
+		}
+
+		if !sh.isLocalized {
+			hit.Text = winText
+			hit.MatchSpans = computeHighlightSpansIfMatched(winText, parsed)
+			items[i] = hit
+			return
+		}
+
+		fetchLang := func(langCode string) string {
+			if langCode == winIdx.langCode {
+				return winText
+			}
+			return s.lookupParallelCellText(langCode, sh.name, sh.lowerName, int(rec.rowID), int(rec.subRowID), int(rec.colIdx), colName)
+		}
+
+		primaryText := fetchLang(primaryLang)
+		if primaryText != "" {
+			hit.LangCode = primaryLang
+			hit.Text = primaryText
+			hit.MatchSpans = computeHighlightSpansIfMatched(primaryText, parsed)
+			if len(compareLangs) > 0 {
+				trans := make([]TextTranslation, 0, len(compareLangs))
+				for _, cLang := range compareLangs {
+					cText := fetchLang(cLang)
+					if cText == "" {
+						continue
+					}
+					trans = append(trans, TextTranslation{
+						LangCode:   cLang,
+						Badge:      TextLangBadge(cLang),
+						Text:       cText,
+						MatchSpans: computeHighlightSpansIfMatched(cText, parsed),
+					})
+				}
+				if len(trans) > 0 {
+					hit.Translations = trans
+				}
+			}
+		} else {
+			// 主语言无该条目时（例如国际服新版本独占条目），主列直接展示命中语言文本并附带其余可用语言对照
+			hit.LangCode = winIdx.langCode
+			hit.Text = winText
+			hit.MatchSpans = computeHighlightSpansIfMatched(winText, parsed)
+			if len(compareLangs) > 0 {
+				trans := make([]TextTranslation, 0, len(compareLangs))
+				for _, cLang := range compareLangs {
+					if cLang == winIdx.langCode {
+						continue
+					}
+					cText := fetchLang(cLang)
+					if cText == "" {
+						continue
+					}
+					trans = append(trans, TextTranslation{
+						LangCode:   cLang,
+						Badge:      TextLangBadge(cLang),
+						Text:       cText,
+						MatchSpans: computeHighlightSpansIfMatched(cText, parsed),
+					})
+				}
+				if len(trans) > 0 {
+					hit.Translations = trans
+				}
+			}
+		}
+
+		items[i] = hit
+	}
+
+	if len(refs) <= 4 {
+		for i := range refs {
+			buildOne(i)
+		}
+		return items
+	}
+
+	workers := min(len(refs), min(runtime.NumCPU(), 8))
+	if workers < 2 {
+		for i := range refs {
+			buildOne(i)
+		}
+		return items
+	}
+
+	jobs := make(chan int, len(refs))
+	for i := range refs {
+		jobs <- i
+	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				buildOne(idx)
+			}
+		}()
+	}
+	wg.Wait()
+	return items
 }
 
 // CompareTextSearchLangs 返回针对当前检索语言可供表格多语言对照的其他语言代码列表（核心中/日/英优先）。
@@ -2249,7 +2968,8 @@ func (s *Service) CompareTextSearchLangs(searchLangCode string) []string {
 	return out
 }
 
-func textLangBadge(code string) string {
+// TextLangBadge 返回客户端语言代码对应的简短大写徽章标签（ZH / JA / EN / DE / FR）。
+func TextLangBadge(code string) string {
 	switch strings.ToLower(code) {
 	case "chs":
 		return "ZH"
@@ -2331,7 +3051,7 @@ func (idx *TextSearchIndex) lookupExactCell(sheetLower string, rowID, subRowID, 
 
 // populateHitTranslations 为当前分页命中的少量条目（最多每页 30~100 条）并发按需读取其他语言的对照译文，
 // 配合有界 EXH/EXD 分片缓存，冷查与翻页均保持毫秒级响应且无需为对照语言构建全量内存索引。
-func (s *Service) populateHitTranslations(srcIdx *TextSearchIndex, items []TextSearchHit, compareLangs []string) {
+func (s *Service) populateHitTranslations(srcIdx *TextSearchIndex, items []TextSearchHit, compareLangs []string, parsed ParsedTextQuery) {
 	if len(items) == 0 || len(compareLangs) == 0 {
 		return
 	}
@@ -2351,9 +3071,10 @@ func (s *Service) populateHitTranslations(srcIdx *TextSearchIndex, items []TextS
 				continue
 			}
 			trans = append(trans, TextTranslation{
-				LangCode: langCode,
-				Badge:    textLangBadge(langCode),
-				Text:     txt,
+				LangCode:   langCode,
+				Badge:      TextLangBadge(langCode),
+				Text:       txt,
+				MatchSpans: computeHighlightSpansIfMatched(txt, parsed),
 			})
 		}
 		if len(trans) > 0 {
@@ -2395,11 +3116,12 @@ func (s *Service) populateHitTranslations(srcIdx *TextSearchIndex, items []TextS
 }
 
 func (s *Service) lookupParallelCellText(langCode, sheetName, sheetLower string, rowID, subRowID, colIdx int, colName string) string {
-	// 1. 若目标语言纯内存索引已存在于测试或会话缓存，且无真实客户端句柄，直接查询内存索引
-	reader, langEnum, normCode := s.textSearchReaderAndLang(langCode)
-	if reader == nil {
+	reqCode := strings.ToLower(strings.TrimSpace(langCode))
+	// 1. 仅当存在与目标语言精确匹配的客户端句柄时才走磁盘 EXH/EXD 点查；否则回退内存索引（单元测试或未挂载客户端场景）
+	reader, langEnum, normCode := s.textSearchReaderAndLang(reqCode)
+	if reader == nil || normCode != reqCode {
 		s.textIndexMu.RLock()
-		otherIdx := s.textIndices[strings.ToLower(langCode)]
+		otherIdx := s.textIndices[reqCode]
 		s.textIndexMu.RUnlock()
 		if otherIdx != nil {
 			if txt, ok := otherIdx.lookupExactCell(sheetLower, rowID, subRowID, colIdx); ok {

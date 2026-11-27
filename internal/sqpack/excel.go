@@ -265,11 +265,16 @@ func (r Row) StringDisplayAtLang(idx int, lang Language, resolve SeSheetResolver
 	}
 }
 
+type exdRowEntry struct {
+	rowID  uint32
+	offset uint32
+}
+
 // EXDReader 解析单个 .exd 分片文件。
 type EXDReader struct {
 	data        []byte
+	entries     []exdRowEntry
 	offsetMap   map[uint32]uint32
-	rowIDs      []uint32
 	rowDataSize int
 	variant     uint8
 	columns     []EXHColumn
@@ -288,44 +293,60 @@ func NewEXDReader(data []byte, exh *EXHHeader) (*EXDReader, error) {
 		return nil, errors.New("EXD 行索引表越界")
 	}
 	count := int(indexSize) / 8
-	offsetMap := make(map[uint32]uint32, count)
-	rowIDs := make([]uint32, 0, count)
+	entries := make([]exdRowEntry, count)
 	pos := 32
 	for i := 0; i < count; i++ {
-		rowID := binary.BigEndian.Uint32(data[pos : pos+4])
-		off := binary.BigEndian.Uint32(data[pos+4 : pos+8])
-		offsetMap[rowID] = off
-		rowIDs = append(rowIDs, rowID)
+		entries[i] = exdRowEntry{
+			rowID:  binary.BigEndian.Uint32(data[pos : pos+4]),
+			offset: binary.BigEndian.Uint32(data[pos+4 : pos+8]),
+		}
 		pos += 8
 	}
 	return &EXDReader{
 		data:        data,
-		offsetMap:   offsetMap,
-		rowIDs:      rowIDs,
+		entries:     entries,
 		rowDataSize: int(exh.DataOffset),
 		variant:     exh.Variant,
 		columns:     exh.Columns,
 	}, nil
 }
 
+func (r *EXDReader) ensureOffsetMap() {
+	if r.offsetMap != nil {
+		return
+	}
+	m := make(map[uint32]uint32, len(r.entries))
+	for _, e := range r.entries {
+		m[e.rowID] = e.offset
+	}
+	r.offsetMap = m
+}
+
 // ListRowIDs 返回当前分片内的全部行 ID 列表（升序）。
 func (r *EXDReader) ListRowIDs() []uint32 {
-	out := make([]uint32, len(r.rowIDs))
-	copy(out, r.rowIDs)
+	out := make([]uint32, len(r.entries))
+	for i, e := range r.entries {
+		out[i] = e.rowID
+	}
 	slices.Sort(out)
 	return out
 }
 
-func (r *EXDReader) readRowHeader(rowID uint32) (dataOffset int, rowCount int, err error) {
-	hdrOff, ok := r.offsetMap[rowID]
-	if !ok {
-		return 0, 0, fmt.Errorf("未找到行 ID %d", rowID)
-	}
+func (r *EXDReader) readRowHeaderAt(hdrOff uint32, rowID uint32) (dataOffset int, rowCount int, err error) {
 	if int(hdrOff)+6 > len(r.data) {
 		return 0, 0, fmt.Errorf("行头偏移越界: rowID=%d", rowID)
 	}
 	rc := int(binary.BigEndian.Uint16(r.data[hdrOff+4 : hdrOff+6]))
 	return int(hdrOff) + 6, rc, nil
+}
+
+func (r *EXDReader) readRowHeader(rowID uint32) (dataOffset int, rowCount int, err error) {
+	r.ensureOffsetMap()
+	hdrOff, ok := r.offsetMap[rowID]
+	if !ok {
+		return 0, 0, fmt.Errorf("未找到行 ID %d", rowID)
+	}
+	return r.readRowHeaderAt(hdrOff, rowID)
 }
 
 // ReadRow 读取 Variant=1 普通表的单行数据；可传 columnIndexes 仅解析部分列。
@@ -337,7 +358,7 @@ func (r *EXDReader) ReadRow(rowID uint32, columnIndexes []int) (Row, error) {
 	if rowCount != 1 {
 		return nil, fmt.Errorf("行 %d 包含 %d 条记录，期望 1 条", rowID, rowCount)
 	}
-	return r.readColumns(off, columnIndexes)
+	return r.readColumns(off, columnIndexes, maxColumnIndex(columnIndexes))
 }
 
 // GetSubRowCount 返回 Variant=2 子行表指定父行的子行数量。
@@ -360,21 +381,25 @@ func (r *EXDReader) ReadSubrow(rowID uint32, subIdx int, columnIndexes []int) (S
 		return SubRow{}, fmt.Errorf("子行头越界: row=%d sub=%d", rowID, subIdx)
 	}
 	subID := binary.BigEndian.Uint16(r.data[subOff : subOff+2])
-	cols, err := r.readColumns(subOff+2, columnIndexes)
+	cols, err := r.readColumns(subOff+2, columnIndexes, maxColumnIndex(columnIndexes))
 	if err != nil {
 		return SubRow{}, err
 	}
 	return SubRow{SubRowID: subID, Data: cols}, nil
 }
 
-func (r *EXDReader) readColumns(rowOffset int, columnIndexes []int) (Row, error) {
-	if len(columnIndexes) > 0 {
-		maxIdx := 0
-		for _, idx := range columnIndexes {
-			if idx > maxIdx {
-				maxIdx = idx
-			}
+func maxColumnIndex(columnIndexes []int) int {
+	maxIdx := -1
+	for _, idx := range columnIndexes {
+		if idx > maxIdx {
+			maxIdx = idx
 		}
+	}
+	return maxIdx
+}
+
+func (r *EXDReader) readColumns(rowOffset int, columnIndexes []int, maxIdx int) (Row, error) {
+	if len(columnIndexes) > 0 {
 		vals := make(Row, maxIdx+1)
 		for _, idx := range columnIndexes {
 			if idx < 0 || idx >= len(r.columns) {
@@ -405,14 +430,17 @@ func (r *EXDReader) readColumn(rowOffset int, col EXHColumn) (any, error) {
 	switch col.Type {
 	case 0: // String
 		if off+4 > len(r.data) {
-			return []byte(nil), nil
+			return nil, nil
 		}
 		strOff := int(binary.BigEndian.Uint32(r.data[off : off+4]))
 		start := rowOffset + r.rowDataSize + strOff
 		if start < 0 || start >= len(r.data) {
-			return []byte(nil), nil
+			return nil, nil
 		}
 		relEnd := bytes.IndexByte(r.data[start:], 0)
+		if relEnd == 0 {
+			return nil, nil
+		}
 		if relEnd < 0 {
 			out := make([]byte, len(r.data)-start)
 			copy(out, r.data[start:])
@@ -545,7 +573,53 @@ func LoadSheetRows(reader FileReader, sheetName string, preferredLang Language, 
 	if err != nil {
 		return nil, err
 	}
+	return loadSheetRowsWithEXH(reader, lower, exh, preferredLang, columnIndexes)
+}
+
+func loadSheetRowsWithEXH(reader FileReader, lower string, exh *EXHHeader, preferredLang Language, columnIndexes []int) (map[int]Row, error) {
 	langSuffix := ResolveLanguageSuffix(exh, preferredLang)
+	if len(columnIndexes) > 0 {
+		filtered := make([]int, 0, len(columnIndexes))
+		for _, idx := range columnIndexes {
+			if idx >= 0 && idx < len(exh.Columns) {
+				filtered = append(filtered, idx)
+			}
+		}
+		columnIndexes = filtered
+		if len(columnIndexes) == 0 {
+			return make(map[int]Row), nil
+		}
+	}
+	maxColIdx := maxColumnIndex(columnIndexes)
+
+	// 单分页表免去额外 goroutine 调度和二次 map 合并拷贝
+	if len(exh.Paginations) == 1 {
+		exdPath := fmt.Sprintf("exd/%s_%d%s.exd", lower, exh.Paginations[0].StartID, langSuffix)
+		exdBuf, rerr := reader.ReadFile(exdPath)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if exdBuf == nil {
+			return make(map[int]Row), nil
+		}
+		exd, perr := NewEXDReader(exdBuf, exh)
+		if perr != nil {
+			return nil, perr
+		}
+		out := make(map[int]Row, len(exd.entries))
+		for _, e := range exd.entries {
+			off, rowCount, herr := exd.readRowHeaderAt(e.offset, e.rowID)
+			if herr != nil || rowCount != 1 {
+				continue
+			}
+			row, rrErr := exd.readColumns(off, columnIndexes, maxColIdx)
+			if rrErr != nil {
+				continue
+			}
+			out[int(e.rowID)] = row
+		}
+		return out, nil
+	}
 
 	type pageResult struct {
 		rows map[int]Row
@@ -572,13 +646,17 @@ func LoadSheetRows(reader FileReader, sheetName string, preferredLang Language, 
 				results[i].err = perr
 				return
 			}
-			local := make(map[int]Row, len(exd.rowIDs))
-			for _, rowID := range exd.rowIDs {
-				row, rrErr := exd.ReadRow(rowID, columnIndexes)
+			local := make(map[int]Row, len(exd.entries))
+			for _, e := range exd.entries {
+				off, rowCount, herr := exd.readRowHeaderAt(e.offset, e.rowID)
+				if herr != nil || rowCount != 1 {
+					continue
+				}
+				row, rrErr := exd.readColumns(off, columnIndexes, maxColIdx)
 				if rrErr != nil {
 					continue
 				}
-				local[int(rowID)] = row
+				local[int(e.rowID)] = row
 			}
 			results[i].rows = local
 		}(idx, page.StartID)
@@ -614,7 +692,60 @@ func LoadSubrowSheet(reader FileReader, sheetName string, preferredLang Language
 	if err != nil {
 		return nil, err
 	}
+	return loadSubrowSheetWithEXH(reader, lower, exh, preferredLang, nil)
+}
+
+func loadSubrowSheetWithEXH(reader FileReader, lower string, exh *EXHHeader, preferredLang Language, columnIndexes []int) (map[int][]SubRow, error) {
 	langSuffix := ResolveLanguageSuffix(exh, preferredLang)
+	maxColIdx := maxColumnIndex(columnIndexes)
+
+	readPage := func(startID uint32) (map[int][]SubRow, error) {
+		exdPath := fmt.Sprintf("exd/%s_%d%s.exd", lower, startID, langSuffix)
+		exdBuf, rerr := reader.ReadFile(exdPath)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if exdBuf == nil {
+			return nil, nil
+		}
+		exd, perr := NewEXDReader(exdBuf, exh)
+		if perr != nil {
+			return nil, perr
+		}
+		local := make(map[int][]SubRow, len(exd.entries))
+		for _, e := range exd.entries {
+			off, cnt, herr := exd.readRowHeaderAt(e.offset, e.rowID)
+			if herr != nil {
+				continue
+			}
+			subs := make([]SubRow, 0, cnt)
+			for s := 0; s < cnt; s++ {
+				subOff := off + s*(exd.rowDataSize+2)
+				if subOff+2 > len(exd.data) {
+					continue
+				}
+				subID := binary.BigEndian.Uint16(exd.data[subOff : subOff+2])
+				cols, serr := exd.readColumns(subOff+2, columnIndexes, maxColIdx)
+				if serr != nil {
+					continue
+				}
+				subs = append(subs, SubRow{SubRowID: subID, Data: cols})
+			}
+			local[int(e.rowID)] = subs
+		}
+		return local, nil
+	}
+
+	if len(exh.Paginations) == 1 {
+		out, err := readPage(exh.Paginations[0].StartID)
+		if err != nil {
+			return nil, err
+		}
+		if out == nil {
+			return make(map[int][]SubRow), nil
+		}
+		return out, nil
+	}
 
 	type pageResult struct {
 		rows map[int][]SubRow
@@ -627,37 +758,9 @@ func LoadSubrowSheet(reader FileReader, sheetName string, preferredLang Language
 		wg.Add(1)
 		go func(i int, startID uint32) {
 			defer wg.Done()
-			exdPath := fmt.Sprintf("exd/%s_%d%s.exd", lower, startID, langSuffix)
-			exdBuf, rerr := reader.ReadFile(exdPath)
-			if rerr != nil {
-				results[i].err = rerr
-				return
-			}
-			if exdBuf == nil {
-				return
-			}
-			exd, perr := NewEXDReader(exdBuf, exh)
-			if perr != nil {
-				results[i].err = perr
-				return
-			}
-			local := make(map[int][]SubRow, len(exd.rowIDs))
-			for _, rowID := range exd.rowIDs {
-				cnt, cerr := exd.GetSubRowCount(rowID)
-				if cerr != nil {
-					continue
-				}
-				subs := make([]SubRow, 0, cnt)
-				for s := 0; s < cnt; s++ {
-					sr, serr := exd.ReadSubrow(rowID, s, nil)
-					if serr != nil {
-						continue
-					}
-					subs = append(subs, sr)
-				}
-				local[int(rowID)] = subs
-			}
+			local, err := readPage(startID)
 			results[i].rows = local
+			results[i].err = err
 		}(idx, page.StartID)
 	}
 	wg.Wait()

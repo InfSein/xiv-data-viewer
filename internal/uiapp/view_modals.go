@@ -30,7 +30,7 @@ func (a *App) renderMapModal(c *ui.Context) {
 			ui.Column(c).Gap(2).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 				area := fmt.Sprintf("%s · %s", m.RegionName, m.ZoneName)
 				if m.PlaceName != "" && m.PlaceName != m.ZoneName {
-					area += fmt.Sprintf("（%s）", m.PlaceName)
+					area += formatParenMeta(a.Language(), m.PlaceName)
 				}
 				ui.Text(c, area).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
 				numText(c, a.tf("map.subtitle_coords",
@@ -213,12 +213,7 @@ func (a *App) renderExportModal(c *ui.Context) {
 							ui.Text(c, statusTxt).FontSize(t.text.xs).FontWeight(500).TextColor(statusCol).SingleLine().Grow(1).Shrink(1)
 							numTextf(c, "%d%%", p.Percent).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground).Shrink(0)
 						})
-						done := float32(p.Percent)
-						ui.Row(c).FillWidth().Height(4).Radius(t.radius.full).Background(t.border).Clip().
-							AlignItems(ui.Stretch).Children(func() {
-							ui.Box(c).Grow(done).FillHeight().Background(t.primary)
-							ui.Box(c).Grow(max(0, 100-done)).FillHeight()
-						})
+						kitProgressBar(c, float32(p.Percent))
 						ui.Row(c).FillWidth().Justify(ui.SpaceBetween).Children(func() {
 							numText(c, a.tf("export.processed", "done", formatInt(p.ProcessedTasks), "total", formatInt(p.TotalTasks))).FontSize(t.text.micro).TextColor(t.muted)
 							if p.ErrorCount > 0 {
@@ -485,12 +480,7 @@ func (a *App) renderUpdateModal(c *ui.Context) {
 							ui.Text(c, phaseText).FontSize(t.text.xs).FontWeight(500).TextColor(t.subdued).SingleLine().Grow(1).Shrink(1)
 							numTextf(c, "%d%%", pct).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground).Shrink(0)
 						})
-						done := float32(max(4, pct))
-						ui.Row(c).FillWidth().Height(4).Radius(t.radius.full).Background(t.border).Clip().
-							AlignItems(ui.Stretch).Children(func() {
-							ui.Box(c).Grow(done).FillHeight().Background(t.primary)
-							ui.Box(c).Grow(max(0, 100-done)).FillHeight()
-						})
+						kitProgressBar(c, float32(max(4, pct)))
 						if a.updateDownTotal > 0 {
 							numText(c, a.tf("update.download_progress_bytes",
 								"done", formatByteSize(a.updateDownBytes),

@@ -143,6 +143,98 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 		return strings.TrimSpace(in.leveStrings.Str(row, "Objective"))
 	}
 
+	// 预解析循环内高频访问的列序号，避免重复 fmt.Sprintf 与 map 查表
+	var (
+		craftItemCols [4]int
+		craftCntCols  [4]int
+		gathObjCols   [2]int
+		gathReqCols   [4]int
+		gathQtyCols   [4]int
+		gathRouteCols [4]int
+		routePopCols  [12]int
+		batObjCols    [3]int
+		batNpcCols    [8]int
+		batLvlCols    [8]int
+		batAppCols    [8][8]int
+		batTodoCols   [8]int
+		batItemCols   [8]int
+		batQtyCols    [8]int
+		batDropCols   [8]int
+		compNpcCols   [8]int
+		compLvlCols   [8]int
+		compAppCols   [8][8]int
+		compItemCols  [8]int
+		compQtyCols   [8]int
+		compDropCols  [8]int
+		rewGrpCols    [8]int
+		rewProbCols   [8]int
+		grpItemCols   [9]int
+		grpCntCols    [9]int
+		grpHQCols     [9]int
+	)
+	if in.craftLeves != nil {
+		for idx := 0; idx < 4; idx++ {
+			craftItemCols[idx] = in.craftLeves.Col(fmt.Sprintf("Item[%d]", idx))
+			craftCntCols[idx] = in.craftLeves.Col(fmt.Sprintf("ItemCount[%d]", idx))
+		}
+	}
+	if in.gatheringLeves != nil {
+		for idx := 0; idx < 2; idx++ {
+			gathObjCols[idx] = in.gatheringLeves.Col(fmt.Sprintf("Objective[%d]", idx))
+		}
+		for idx := 0; idx < 4; idx++ {
+			gathReqCols[idx] = in.gatheringLeves.Col(fmt.Sprintf("RequiredItem[%d]", idx))
+			gathQtyCols[idx] = in.gatheringLeves.Col(fmt.Sprintf("RequiredItemQuantity[%d]", idx))
+			gathRouteCols[idx] = in.gatheringLeves.Col(fmt.Sprintf("Route[%d]", idx))
+		}
+	}
+	if in.gatheringLeveRoutes != nil {
+		for pIdx := 0; pIdx < 12; pIdx++ {
+			routePopCols[pIdx] = in.gatheringLeveRoutes.Col(fmt.Sprintf("PopRange[%d]", pIdx))
+		}
+	}
+	if in.battleLeves != nil {
+		for idx := 0; idx < 3; idx++ {
+			batObjCols[idx] = in.battleLeves.Col(fmt.Sprintf("Objectives[%d]", idx))
+		}
+		for idx := 0; idx < 8; idx++ {
+			batNpcCols[idx] = in.battleLeves.Col(fmt.Sprintf("LeveData[%d].BNpcName", idx))
+			batLvlCols[idx] = in.battleLeves.Col(fmt.Sprintf("LeveData[%d].EnemyLevel", idx))
+			batTodoCols[idx] = in.battleLeves.Col(fmt.Sprintf("LeveData[%d].ToDoNumberInvolved", idx))
+			batItemCols[idx] = in.battleLeves.Col(fmt.Sprintf("LeveData[%d].ItemsInvolved", idx))
+			batQtyCols[idx] = in.battleLeves.Col(fmt.Sprintf("LeveData[%d].ItemsInvolvedQty", idx))
+			batDropCols[idx] = in.battleLeves.Col(fmt.Sprintf("LeveData[%d].ItemDropRate", idx))
+			for a := 0; a < 8; a++ {
+				batAppCols[idx][a] = in.battleLeves.Col(fmt.Sprintf("LeveData[%d].NumOfAppearance[%d]", idx, a))
+			}
+		}
+	}
+	if in.companyLeves != nil {
+		for idx := 0; idx < 8; idx++ {
+			compNpcCols[idx] = in.companyLeves.Col(fmt.Sprintf("CompanyLeveStruct[%d].BNpcName", idx))
+			compLvlCols[idx] = in.companyLeves.Col(fmt.Sprintf("CompanyLeveStruct[%d].EnemyLevel", idx))
+			compItemCols[idx] = in.companyLeves.Col(fmt.Sprintf("CompanyLeveStruct[%d].ItemsInvolved", idx))
+			compQtyCols[idx] = in.companyLeves.Col(fmt.Sprintf("CompanyLeveStruct[%d].ItemsInvolvedQty", idx))
+			compDropCols[idx] = in.companyLeves.Col(fmt.Sprintf("CompanyLeveStruct[%d].ItemDropRate", idx))
+			for a := 0; a < 8; a++ {
+				compAppCols[idx][a] = in.companyLeves.Col(fmt.Sprintf("CompanyLeveStruct[%d].NumOfAppearance[%d]", idx, a))
+			}
+		}
+	}
+	if in.leveRewardItems != nil {
+		for gIdx := 0; gIdx < 8; gIdx++ {
+			rewGrpCols[gIdx] = in.leveRewardItems.Col(fmt.Sprintf("LeveRewardItemGroup[%d]", gIdx))
+			rewProbCols[gIdx] = in.leveRewardItems.Col(fmt.Sprintf("ProbabilityPercent[%d]", gIdx))
+		}
+	}
+	if in.leveRewardItemGroups != nil {
+		for iIdx := 0; iIdx < 9; iIdx++ {
+			grpItemCols[iIdx] = in.leveRewardItemGroups.Col(fmt.Sprintf("Item[%d]", iIdx))
+			grpCntCols[iIdx] = in.leveRewardItemGroups.Col(fmt.Sprintf("Count[%d]", iIdx))
+			grpHQCols[iIdx] = in.leveRewardItemGroups.Col(fmt.Sprintf("IsHQ[%d]", iIdx))
+		}
+	}
+
 	out.leves = make([]LeveEntry, 0, len(in.leves.Rows))
 	for leveID, row := range in.leves.Rows {
 		if leveID <= 0 {
@@ -278,11 +370,11 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 					entry.CraftRepeats = max(0, in.craftLeves.Int(cRow, "Repeats"))
 					turnInSeen := make(map[int]bool)
 					for idx := 0; idx < 4; idx++ {
-						itemID := in.craftLeves.Int(cRow, fmt.Sprintf("Item[%d]", idx))
+						itemID := cRow.IntAt(craftItemCols[idx])
 						if itemID <= 0 {
 							continue
 						}
-						cnt := max(1, in.craftLeves.Int(cRow, fmt.Sprintf("ItemCount[%d]", idx)))
+						cnt := max(1, cRow.IntAt(craftCntCols[idx]))
 						it := in.itemSummaryByID[itemID]
 						itemName := it.NameCn
 						if itemName == "" {
@@ -320,13 +412,13 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 					entry.GatheringItemNumber = in.gatheringLeves.Int(gRow, "ItemNumber")
 					entry.GatheringUseSecondary = in.gatheringLeves.Bool(gRow, "UseSecondaryTool")
 					for idx := 0; idx < 2; idx++ {
-						if obj := readLeveStr(in.gatheringLeves.Int(gRow, fmt.Sprintf("Objective[%d]", idx))); obj != "" {
+						if obj := readLeveStr(gRow.IntAt(gathObjCols[idx])); obj != "" {
 							entry.Objectives = append(entry.Objectives, obj)
 						}
 					}
 					for idx := 0; idx < 4; idx++ {
-						evName := readEventItemName(in.gatheringLeves.Int(gRow, fmt.Sprintf("RequiredItem[%d]", idx)))
-						qty := in.gatheringLeves.Int(gRow, fmt.Sprintf("RequiredItemQuantity[%d]", idx))
+						evName := readEventItemName(gRow.IntAt(gathReqCols[idx]))
+						qty := gRow.IntAt(gathQtyCols[idx])
 						if evName != "" {
 							entry.RequiredObjectiveItems = append(entry.RequiredObjectiveItems, LeveObjectiveItem{
 								ItemName: evName,
@@ -335,7 +427,7 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 						}
 					}
 					for idx := 0; idx < 4 && entry.GatheringTargetLocation == nil && in.gatheringLeveRoutes != nil; idx++ {
-						routeID := in.gatheringLeves.Int(gRow, fmt.Sprintf("Route[%d]", idx))
+						routeID := gRow.IntAt(gathRouteCols[idx])
 						if routeID <= 0 {
 							continue
 						}
@@ -344,7 +436,7 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 							continue
 						}
 						for pIdx := 0; pIdx < 12; pIdx++ {
-							if loc := resolveMap(in.gatheringLeveRoutes.Int(rRow, fmt.Sprintf("PopRange[%d]", pIdx))); loc != nil {
+							if loc := resolveMap(rRow.IntAt(routePopCols[pIdx])); loc != nil {
 								entry.GatheringTargetLocation = loc
 								break
 							}
@@ -362,22 +454,22 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 						}
 					}
 					for idx := 0; idx < 3; idx++ {
-						if obj := readLeveStr(in.battleLeves.Int(bRow, fmt.Sprintf("Objectives[%d]", idx))); obj != "" {
+						if obj := readLeveStr(bRow.IntAt(batObjCols[idx])); obj != "" {
 							entry.Objectives = append(entry.Objectives, obj)
 						}
 					}
 					seenTargets := make(map[string]bool)
 					seenObjItems := make(map[string]bool)
 					for idx := 0; idx < 8; idx++ {
-						bName := readBNpcName(in.battleLeves.Int(bRow, fmt.Sprintf("LeveData[%d].BNpcName", idx)))
-						eLvl := in.battleLeves.Int(bRow, fmt.Sprintf("LeveData[%d].EnemyLevel", idx))
+						bName := readBNpcName(bRow.IntAt(batNpcCols[idx]))
+						eLvl := bRow.IntAt(batLvlCols[idx])
 						if bName != "" {
 							cnt := 0
 							for a := 0; a < 8; a++ {
-								cnt += in.battleLeves.Int(bRow, fmt.Sprintf("LeveData[%d].NumOfAppearance[%d]", idx, a))
+								cnt += bRow.IntAt(batAppCols[idx][a])
 							}
 							if cnt <= 0 {
-								cnt = in.battleLeves.Int(bRow, fmt.Sprintf("LeveData[%d].ToDoNumberInvolved", idx))
+								cnt = bRow.IntAt(batTodoCols[idx])
 							}
 							tKey := fmt.Sprintf("%s#%d#%d", bName, eLvl, cnt)
 							if !seenTargets[tKey] {
@@ -389,14 +481,14 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 								})
 							}
 						}
-						evName := readEventItemName(in.battleLeves.Int(bRow, fmt.Sprintf("LeveData[%d].ItemsInvolved", idx)))
-						qty := in.battleLeves.Int(bRow, fmt.Sprintf("LeveData[%d].ItemsInvolvedQty", idx))
+						evName := readEventItemName(bRow.IntAt(batItemCols[idx]))
+						qty := bRow.IntAt(batQtyCols[idx])
 						if evName != "" && !seenObjItems[evName] {
 							seenObjItems[evName] = true
 							entry.RequiredObjectiveItems = append(entry.RequiredObjectiveItems, LeveObjectiveItem{
 								ItemName: evName,
 								Count:    max(1, qty),
-								DropRate: in.battleLeves.Int(bRow, fmt.Sprintf("LeveData[%d].ItemDropRate", idx)),
+								DropRate: bRow.IntAt(batDropCols[idx]),
 							})
 						}
 					}
@@ -417,12 +509,12 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 					seenTargets := make(map[string]bool)
 					seenObjItems := make(map[string]bool)
 					for idx := 0; idx < 8; idx++ {
-						bName := readBNpcName(in.companyLeves.Int(cRow, fmt.Sprintf("CompanyLeveStruct[%d].BNpcName", idx)))
-						eLvl := in.companyLeves.Int(cRow, fmt.Sprintf("CompanyLeveStruct[%d].EnemyLevel", idx))
+						bName := readBNpcName(cRow.IntAt(compNpcCols[idx]))
+						eLvl := cRow.IntAt(compLvlCols[idx])
 						if bName != "" {
 							cnt := 0
 							for a := 0; a < 8; a++ {
-								cnt += in.companyLeves.Int(cRow, fmt.Sprintf("CompanyLeveStruct[%d].NumOfAppearance[%d]", idx, a))
+								cnt += cRow.IntAt(compAppCols[idx][a])
 							}
 							tKey := fmt.Sprintf("%s#%d#%d", bName, eLvl, cnt)
 							if !seenTargets[tKey] {
@@ -434,14 +526,14 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 								})
 							}
 						}
-						evName := readEventItemName(in.companyLeves.Int(cRow, fmt.Sprintf("CompanyLeveStruct[%d].ItemsInvolved", idx)))
-						qty := in.companyLeves.Int(cRow, fmt.Sprintf("CompanyLeveStruct[%d].ItemsInvolvedQty", idx))
+						evName := readEventItemName(cRow.IntAt(compItemCols[idx]))
+						qty := cRow.IntAt(compQtyCols[idx])
 						if evName != "" && !seenObjItems[evName] {
 							seenObjItems[evName] = true
 							entry.RequiredObjectiveItems = append(entry.RequiredObjectiveItems, LeveObjectiveItem{
 								ItemName: evName,
 								Count:    max(1, qty),
-								DropRate: in.companyLeves.Int(cRow, fmt.Sprintf("CompanyLeveStruct[%d].ItemDropRate", idx)),
+								DropRate: cRow.IntAt(compDropCols[idx]),
 							})
 						}
 					}
@@ -455,8 +547,8 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 		if rewID := in.leves.Int(row, "LeveRewardItem"); rewID > 0 && in.leveRewardItems != nil && in.leveRewardItemGroups != nil {
 			if lrRow, ok := in.leveRewardItems.Rows[rewID]; ok {
 				for gIdx := 0; gIdx < 8; gIdx++ {
-					grpID := in.leveRewardItems.Int(lrRow, fmt.Sprintf("LeveRewardItemGroup[%d]", gIdx))
-					prob := in.leveRewardItems.Int(lrRow, fmt.Sprintf("ProbabilityPercent[%d]", gIdx))
+					grpID := lrRow.IntAt(rewGrpCols[gIdx])
+					prob := lrRow.IntAt(rewProbCols[gIdx])
 					if grpID <= 0 || prob <= 0 {
 						continue
 					}
@@ -467,12 +559,12 @@ func buildLeveData(in leveLoaderInput) leveIndices {
 					var grpEntries []LeveRewardEntry
 					seenInGroup := make(map[int]bool)
 					for iIdx := 0; iIdx < 9; iIdx++ {
-						itemID := in.leveRewardItemGroups.Int(grpRow, fmt.Sprintf("Item[%d]", iIdx))
+						itemID := grpRow.IntAt(grpItemCols[iIdx])
 						if itemID <= 0 {
 							continue
 						}
-						cnt := max(1, in.leveRewardItemGroups.Int(grpRow, fmt.Sprintf("Count[%d]", iIdx)))
-						isHQ := in.leveRewardItemGroups.Bool(grpRow, fmt.Sprintf("IsHQ[%d]", iIdx))
+						cnt := max(1, grpRow.IntAt(grpCntCols[iIdx]))
+						isHQ := grpRow.BoolAt(grpHQCols[iIdx])
 						it := in.itemSummaryByID[itemID]
 						itemName := it.NameCn
 						if itemName == "" {

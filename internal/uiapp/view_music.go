@@ -63,7 +63,8 @@ func (a *App) hasMusicFilter() bool {
 		(a.musicQuery.Kind != "" && a.musicQuery.Kind != "all") ||
 		a.musicQuery.ExpansionID >= 0 ||
 		a.musicQuery.CategoryID > 0 ||
-		a.musicQuery.WithUsageOnly
+		a.musicQuery.WithUsageOnly ||
+		a.musicQuery.NewOnly
 }
 
 func (a *App) resetMusicFilters() {
@@ -478,12 +479,19 @@ func (a *App) renderMusicListPane(c *ui.Context) {
 				a.refreshMusicList()
 			}
 
-			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
-				if kitToggleChip(c, "music-usage-only", a.t("music.filter_usage_only"), "", a.musicQuery.WithUsageOnly, nil) {
-					a.musicQuery.WithUsageOnly = !a.musicQuery.WithUsageOnly
-					a.musicQuery.Page = 1
-					a.refreshMusicList()
-				}
+			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Wrap().Children(func() {
+				ui.Row(c).Gap(4).AlignItems(ui.Center).Wrap().Children(func() {
+					if kitToggleChip(c, "music-usage-only", a.t("music.filter_usage_only"), "", a.musicQuery.WithUsageOnly, nil) {
+						a.musicQuery.WithUsageOnly = !a.musicQuery.WithUsageOnly
+						a.musicQuery.Page = 1
+						a.refreshMusicList()
+					}
+					if a.renderLatestFilterChip(c, "music-latest-new", a.latestMusicCount(), a.musicQuery.NewOnly) {
+						a.musicQuery.NewOnly = !a.musicQuery.NewOnly
+						a.musicQuery.Page = 1
+						a.refreshMusicList()
+					}
+				})
 				if a.musicQuery.Kind != gamedata.MusicKindBGM && a.status != nil && len(a.status.MusicCategories) > 0 {
 					catOpts := []selectOption[int]{{value: 0, label: a.t("music.cat_all")}}
 					for _, cat := range a.status.MusicCategories {
@@ -501,14 +509,12 @@ func (a *App) renderMusicListPane(c *ui.Context) {
 		})
 
 		if len(a.musicRes.Items) == 0 {
-			ui.Column(c).Grow(1).Shrink(1).Center().Children(func() {
-				kitEmpty(c, icoMusic, a.t("music.empty_title"), a.t("music.empty_desc"), func() {
-					if a.hasMusicFilter() {
-						if kitButton(c, "music-empty-reset", a.t("common.reset_filters"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
-							a.resetMusicFilters()
-						}
+			kitEmpty(c, icoMusic, a.t("music.empty_title"), a.t("music.empty_desc"), func() {
+				if a.hasMusicFilter() {
+					if kitButton(c, "music-empty-reset", a.t("common.reset_filters"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
+						a.resetMusicFilters()
 					}
-				})
+				}
 			})
 		} else {
 			var snap musicPlayerSnapshot
@@ -548,9 +554,12 @@ func (a *App) renderMusicListRow(c *ui.Context, key string, m gamedata.MusicEntr
 	row := ui.ButtonBase(c.Key(key)).
 		FillWidth().Padding(8, 10).Gap(10).Radius(t.radius.lg).
 		AlignItems(ui.Center).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-	if isSel {
-		row.Background(t.tint(2))
-	} else if row.Hovered() {
+	switch {
+	case isSel && row.Hovered():
+		row.Background(t.tint(2.25))
+	case isSel:
+		row.Background(t.tint(1.75))
+	case row.Hovered():
 		row.Background(t.tint(1))
 	}
 
@@ -559,10 +568,10 @@ func (a *App) renderMusicListRow(c *ui.Context, key string, m gamedata.MusicEntr
 			a.drawGameIcon(c, m.ItemIconID, false, 32, t.radius.md)
 		} else {
 			icoCol := t.muted
-			bg := t.tint(1)
+			bg := t.card
 			if isSel || isPlaying {
 				icoCol = t.primary
-				bg = t.tint(2)
+				bg = t.accentSoft
 			}
 			ui.Box(c).Size(32, 32).Radius(t.radius.md).Background(bg).Border(hairline, t.border).Center().Shrink(0).Children(func() {
 				ui.Icon(c, icoMusic).Size(15, 15).TextColor(icoCol)
@@ -576,25 +585,30 @@ func (a *App) renderMusicListRow(c *ui.Context, key string, m gamedata.MusicEntr
 					fw = 600
 				}
 				title := nonEmptyMusicText(m.Title, m.FileStem, fmt.Sprintf("#%d", m.ID))
-				ui.Text(c, title).FontSize(t.text.sm).FontWeight(fw).TextColor(t.foreground).SingleLine().Shrink(1)
+				ui.Text(c, title).FontSize(t.text.sm).FontWeight(fw).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
 				ui.Row(c).Gap(4).AlignItems(ui.Center).Shrink(0).Children(func() {
+					if a.isNewMusic(m.Kind, m.ID) {
+						a.drawLatestBadge(c)
+					}
 					if favorited {
 						ui.Icon(c, icoStarFill).Size(11, 11).TextColor(t.attention)
 					}
 					if isPlaying {
 						drawStatusDot(c, t.primary)
 					}
-					if m.Kind == gamedata.MusicKindOrchestrion {
-						drawPill(c, a.t("music.kind_orch"), pillAccent)
-					} else {
-						drawPill(c, a.t("music.kind_bgm"), pillNeutral)
-					}
+					numText(c, fmt.Sprintf("#%d", m.ID)).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 				})
 			})
-			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
+			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
 				sub := a.formatMusicRowSubtitle(m)
-				ui.Text(c, sub).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(1)
-				numText(c, fmt.Sprintf("#%d", m.ID)).FontSize(t.text.micro).TextColor(t.muted).SingleLine().Shrink(0)
+				ui.Text(c, sub).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
+				kindLbl := a.t("music.kind_bgm")
+				kindCol := t.muted
+				if m.Kind == gamedata.MusicKindOrchestrion {
+					kindLbl = a.t("music.kind_orch")
+					kindCol = t.infoText
+				}
+				ui.Text(c, kindLbl).FontSize(t.text.micro).TextColor(kindCol).SingleLine().Shrink(0)
 			})
 		})
 	})
@@ -641,9 +655,7 @@ func (a *App) renderMusicDetailWithOpts(c *ui.Context, opts musicDetailPaneOpts)
 	kitPanel(c, a.panelRadius(c)).Grow(1).Shrink(1).FillHeight().Children(func() {
 		m := opts.entry
 		if m == nil {
-			ui.Column(c).Fill().Center().Children(func() {
-				kitEmpty(c, icoMusic, a.t("music.detail_empty_title"), a.t("music.detail_empty_desc"), nil)
-			})
+			kitEmpty(c, icoMusic, a.t("music.detail_empty_title"), a.t("music.detail_empty_desc"), nil)
 			return
 		}
 
@@ -729,38 +741,48 @@ func (a *App) renderMusicHero(c *ui.Context, slot *musicAudioSlot, m *gamedata.M
 		ui.Column(c).Gap(6).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 			ui.Row(c).Gap(8).AlignItems(ui.Baseline).Wrap().Children(func() {
 				ui.Text(c, title).FontSize(t.text.xl).FontWeight(600).LetterSpacing(-0.3).TextColor(t.foreground).Selectable()
-				numText(c, fmt.Sprintf("#%d", m.ID)).FontSize(t.text.xs).TextColor(t.muted)
+				if a.isNewMusic(m.Kind, m.ID) {
+					a.drawLatestBadge(c)
+				}
+				numText(c, fmt.Sprintf("#%d", m.ID)).FontSize(t.text.xs).TextColor(t.muted).Selectable()
 			})
 			if m.FileStem != "" && m.FileStem != title {
 				ui.Text(c, m.FileStem).FontSize(t.text.xs).TextColor(t.subdued).Selectable()
 			}
-			for _, sec := range a.secondaryDataLines(title, m.NameJa, m.NameEn) {
-				ui.Text(c, sec.badge+" "+sec.text).FontSize(t.text.xs).TextColor(t.muted).Selectable()
+			if secLines := a.secondaryDataLines(title, m.NameJa, m.NameEn); len(secLines) > 0 {
+				ui.Row(c).Gap(12).Wrap().Children(func() {
+					for _, sec := range secLines {
+						ui.Textf(c, "%s  %s", sec.badge, sec.text).FontSize(t.text.xs).TextColor(t.muted).Selectable()
+					}
+				})
 			}
-			ui.Row(c).Gap(6).Wrap().AlignItems(ui.Center).Children(func() {
-				if m.Kind == gamedata.MusicKindOrchestrion {
-					drawPill(c, a.t("music.kind_orch"), pillAccent)
-				} else {
-					drawPill(c, a.t("music.kind_bgm"), pillNeutral)
-				}
-				if m.ExpansionName != "" {
-					drawPill(c, m.ExpansionName, pillOutline)
-				}
-				if m.CategoryName != "" {
-					drawPill(c, m.CategoryName, pillOutline)
-				}
-				if len(m.Usages) > 0 {
-					drawPill(c, a.tf("music.usage_count", "count", formatInt(len(m.Usages))), pillPositive)
-				}
-				if slot != nil && !slot.questsLoading && slot.questsKey == m.Key && len(slot.quests) > 0 {
-					drawPill(c, a.tf("music.quest_count", "count", formatInt(len(slot.quests))), pillAccent)
-				}
-				if m.IsPlaceholder {
-					drawPill(c, a.t("music.audio_placeholder"), pillNeutral)
-				} else if !m.FileExists {
-					drawPill(c, a.t("music.audio_missing"), pillWarning)
-				}
-			})
+
+			// 内联排版元数据替代多枚彩色胶囊堆叠，胶囊仅保留给异常或特殊状态
+			var metaParts []string
+			if m.ExpansionName != "" {
+				metaParts = append(metaParts, m.ExpansionName)
+			}
+			if m.CategoryName != "" {
+				metaParts = append(metaParts, m.CategoryName)
+			}
+			if len(m.Usages) > 0 {
+				metaParts = append(metaParts, a.tf("music.usage_count", "count", formatInt(len(m.Usages))))
+			}
+			if slot != nil && !slot.questsLoading && slot.questsKey == m.Key && len(slot.quests) > 0 {
+				metaParts = append(metaParts, a.tf("music.quest_count", "count", formatInt(len(slot.quests))))
+			}
+			if len(metaParts) > 0 || m.IsPlaceholder || !m.FileExists {
+				ui.Row(c).Gap(6).Wrap().AlignItems(ui.Center).Children(func() {
+					if len(metaParts) > 0 {
+						numText(c, strings.Join(metaParts, " · ")).FontSize(t.text.xs).TextColor(t.subdued)
+					}
+					if m.IsPlaceholder {
+						drawPill(c, a.t("music.audio_placeholder"), pillNeutral)
+					} else if !m.FileExists {
+						drawPill(c, a.t("music.audio_missing"), pillWarning)
+					}
+				})
+			}
 		})
 	})
 }
@@ -795,7 +817,7 @@ func (a *App) renderMusicPlayerSection(c *ui.Context, keyPrefix string, slot *mu
 			return
 		}
 
-		kitCard(c, ui.Column(c).FillWidth().Padding(14, 16).Gap(12), toneCard).Children(func() {
+		kitBlock(c, ui.Column(c).FillWidth().Padding(14, 16).Gap(12), toneCard).Children(func() {
 			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Wrap().Gap(8).Children(func() {
 				ui.Row(c).Gap(6).AlignItems(ui.Center).Wrap().Children(func() {
 					canPlay := !audioReady || slot.detail.Playable
@@ -907,7 +929,7 @@ func (a *App) renderMusicPlayerSection(c *ui.Context, keyPrefix string, slot *mu
 							ratio = 1
 						}
 						trackY := r.Y + (r.H-4)/2
-						p.Fill(ui.Rect{X: r.X + 8, Y: trackY, W: trackW, H: 4}, t.tint(2), 2)
+						p.Fill(ui.Rect{X: r.X + 8, Y: trackY, W: trackW, H: 4}, t.border, 2)
 						if ratio > 0 {
 							p.Fill(ui.Rect{X: r.X + 8, Y: trackY, W: trackW * ratio, H: 4}, t.primary, 2)
 						}
@@ -952,7 +974,7 @@ func (a *App) renderMusicPlayerSection(c *ui.Context, keyPrefix string, slot *mu
 							ratio = 1
 						}
 						trackY := r.Y + (r.H-4)/2
-						p.Fill(ui.Rect{X: r.X + 7, Y: trackY, W: trackW, H: 4}, t.tint(2), 2)
+						p.Fill(ui.Rect{X: r.X + 7, Y: trackY, W: trackW, H: 4}, t.border, 2)
 						if ratio > 0 {
 							p.Fill(ui.Rect{X: r.X + 7, Y: trackY, W: trackW * ratio, H: 4}, t.primary, 2)
 						}
@@ -984,17 +1006,15 @@ func (a *App) renderMusicPlayerSection(c *ui.Context, keyPrefix string, slot *mu
 func (a *App) renderMusicOrchestrionSection(c *ui.Context, keyPrefix string, m *gamedata.MusicEntry) {
 	t := themeOf(c)
 	drawDetailSection(c, a.t("music.orch_section"), "", nil, func() {
-		kitCard(c, ui.Column(c).FillWidth().Padding(14, 16).Gap(10), toneCard).Children(func() {
+		ui.Column(c).FillWidth().Gap(10).Children(func() {
 			if m.Description != "" {
-				ui.Text(c, m.Description).FontSize(t.text.sm).TextColor(t.subdued).LineHeight(1.5).Selectable()
+				kitBlock(c, ui.Box(c).FillWidth().Padding(10, 14), toneCard).Children(func() {
+					ui.Text(c, m.Description).FontSize(t.text.sm).TextColor(t.subdued).LineHeight(lineProse).Selectable()
+				})
 			}
 			if m.ItemID > 0 {
-				row := ui.ButtonBase(c.Key(keyPrefix+"-orch-item")).
-					FillWidth().Padding(8, 10).Gap(10).Radius(t.radius.md).
-					Background(t.tint(1)).AlignItems(ui.Center).Cursor(ui.CursorPointer)
-				if row.Hovered() {
-					row.Background(t.tint(2))
-				}
+				row := kitLinkSurface(c, ui.ButtonBase(c.Key(keyPrefix+"-orch-item")).
+					FillWidth().Padding(8, 12).Gap(10).Radius(t.radius.lg).AlignItems(ui.Center))
 				row.Children(func() {
 					a.drawGameIcon(c, m.ItemIconID, false, 28, t.radius.md)
 					ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
@@ -1068,12 +1088,12 @@ func (a *App) renderMusicMetadataSection(c *ui.Context, slot *musicAudioSlot, m 
 	}
 
 	drawDetailSection(c, a.t("music.meta_section"), "", nil, func() {
-		kitCard(c, ui.Column(c).FillWidth().Padding(12, 16).Gap(8), toneCard).Children(func() {
+		ui.Column(c).FillWidth().Children(func() {
 			for i, kv := range kvs {
 				if i > 0 {
 					kitSeparator(c, false)
 				}
-				ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(12).Children(func() {
+				ui.Row(c).FillWidth().Padding(8, 2).Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(12).Children(func() {
 					ui.Text(c, kv.label).FontSize(t.text.xs).TextColor(t.muted).Shrink(0)
 					numText(c, kv.val).FontSize(t.text.xs).TextColor(t.foreground).Selectable()
 				})
@@ -1113,13 +1133,11 @@ func (a *App) renderMusicUsagesSection(c *ui.Context, keyPrefix string, slot *mu
 
 	renderBody := func() {
 		if len(m.Usages) == 0 {
-			kitCard(c, ui.Column(c).FillWidth().Padding(14, 16), toneCard).Children(func() {
-				ui.Text(c, a.t("music.usages_empty")).FontSize(t.text.xs).TextColor(t.muted).LineHeight(1.5)
-			})
+			ui.Text(c, a.t("music.usages_empty")).FontSize(t.text.xs).TextColor(t.muted).LineHeight(lineProse)
 			return
 		}
 
-		kitCard(c, ui.Column(c).FillWidth().Padding(8, 12).Gap(4), toneCard).Children(func() {
+		ui.Column(c).FillWidth().Children(func() {
 			for i, u := range m.Usages {
 				if i > 0 {
 					kitSeparator(c, false)
@@ -1128,8 +1146,8 @@ func (a *App) renderMusicUsagesSection(c *ui.Context, keyPrefix string, slot *mu
 				canJumpLeve := u.Kind == "leve" && u.RefID > 0
 				if canJumpLeve {
 					btn := ui.ButtonBase(c.Key(rowKey)).
-						FillWidth().Padding(6, 4).Gap(8).Radius(t.radius.md).
-						AlignItems(ui.Center).Cursor(ui.CursorPointer)
+						FillWidth().Padding(8, 4).Gap(8).Radius(t.radius.md).
+						AlignItems(ui.Center).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 					if btn.Hovered() {
 						btn.Background(t.tint(1))
 					}
@@ -1140,7 +1158,7 @@ func (a *App) renderMusicUsagesSection(c *ui.Context, keyPrefix string, slot *mu
 						a.inspectLeveFromOtherTab(u.RefID)
 					}
 				} else {
-					ui.Row(c).FillWidth().Padding(6, 4).Gap(8).AlignItems(ui.Center).Children(func() {
+					ui.Row(c).FillWidth().Padding(8, 4).Gap(8).AlignItems(ui.Center).Children(func() {
 						a.renderMusicUsageRowContent(c, u, false)
 					})
 				}
@@ -1161,7 +1179,7 @@ func (a *App) renderMusicQuestsSection(c *ui.Context, keyPrefix string, slot *mu
 	loading := slot != nil && slot.questsLoading && slot.questsKey == m.Key
 	if loading {
 		drawDetailSection(c, a.t("music.quests_title_loading"), "", nil, func() {
-			kitCard(c, ui.Row(c).FillWidth().Padding(10, 14).Gap(8).AlignItems(ui.Center), toneCard).Children(func() {
+			ui.Row(c).FillWidth().Padding(4, 0).Gap(8).AlignItems(ui.Center).Children(func() {
 				ui.Spinner(c).FontSize(13).TextColor(t.primary).Label(a.t("music.quests_loading"))
 				ui.Text(c, a.t("music.quests_loading")).FontSize(t.text.xs).TextColor(t.muted)
 			})
@@ -1176,9 +1194,7 @@ func (a *App) renderMusicQuestsSection(c *ui.Context, keyPrefix string, slot *mu
 	title := a.tf("music.quests_section", "count", formatInt(len(quests)))
 	renderBody := func() {
 		if len(quests) == 0 {
-			kitCard(c, ui.Column(c).FillWidth().Padding(14, 16), toneCard).Children(func() {
-				ui.Text(c, a.t("music.quests_empty")).FontSize(t.text.xs).TextColor(t.muted).LineHeight(1.5)
-			})
+			ui.Text(c, a.t("music.quests_empty")).FontSize(t.text.xs).TextColor(t.muted).LineHeight(lineProse)
 			return
 		}
 
@@ -1188,15 +1204,10 @@ func (a *App) renderMusicQuestsSection(c *ui.Context, keyPrefix string, slot *mu
 				if qTitle == "" {
 					qTitle = fmt.Sprintf("#%d", qr.QuestID)
 				}
-				btn := ui.ButtonBase(c.Key(fmt.Sprintf("%s-mq-%d-%d", keyPrefix, qr.QuestID, idx))).
+				btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("%s-mq-%d-%d", keyPrefix, qr.QuestID, idx))).
 					Label(fmt.Sprintf("%s #%d", qTitle, qr.QuestID)).
 					MinWidth(260).Grow(1).Shrink(1).Padding(8, 12).Radius(t.radius.lg).
-					Background(t.card).Border(hairline, t.border).
-					Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).
-					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-				if btn.Hovered() {
-					btn.Background(t.tint(1.5))
-				}
+					Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8))
 				btn.Children(func() {
 					ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 						if qr.TypeIconID > 0 {

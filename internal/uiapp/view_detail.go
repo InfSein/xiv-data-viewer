@@ -221,6 +221,9 @@ func (a *App) renderDetailHero(c *ui.Context, item *gamedata.ItemDetail, isHQ bo
 			ui.Column(c).Gap(6).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 				ui.Row(c).Gap(8).AlignItems(ui.Baseline).Wrap().Children(func() {
 					ui.Text(c, item.NameCn).FontSize(t.text.xl).FontWeight(600).LetterSpacing(-0.3).TextColor(t.foreground).Selectable()
+					if a.isNewItem(item.ID) {
+						a.drawLatestBadge(c)
+					}
 					if isHQ {
 						drawPill(c, "HQ", pillWarning)
 					}
@@ -304,7 +307,7 @@ func (a *App) renderDetailHero(c *ui.Context, item *gamedata.ItemDetail, isHQ bo
 			thirdLabel = a.t("detail.repair_job")
 			thirdValue = item.RepairClassJobName
 			if item.RepairItemName != "" {
-				thirdValue += fmt.Sprintf("（%s）", item.RepairItemName)
+				thirdValue += formatParenMeta(a.Language(), item.RepairItemName)
 			}
 		} else {
 			var srcParts []string
@@ -668,13 +671,9 @@ func (a *App) renderShopsSection(c *ui.Context, itemName string, shops []gamedat
 									})
 									continue
 								}
-								btn := ui.ButtonBase(c.Key(fmt.Sprintf("cost-%d-%d-%d", shop.ShopID, sIdx, cIdx))).
+								btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("cost-%d-%d-%d", shop.ShopID, sIdx, cIdx))).
 									Label(a.tf("common.view_item", "name", cost.NameCn)).
-									Padding(3, 8).Radius(t.radius.md).Background(t.card).Border(hairline, t.border).
-									Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-								if btn.Hovered() {
-									btn.Background(t.tint(1.5))
-								}
+									Padding(3, 8).Radius(t.radius.md))
 								btn.Children(func() {
 									ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
 										if cost.IconID > 0 {
@@ -710,13 +709,9 @@ func (a *App) renderMapLocationBtn(c *ui.Context, key, title, subtitle string, l
 	}
 	if loc.MapPath != "" {
 		coordLbl := fmt.Sprintf("%s (%.1f, %.1f)", locTxt, loc.CoordX, loc.CoordY)
-		btn := ui.ButtonBase(c.Key(key)).Label(a.tf("common.view_map", "coord", coordLbl)).
+		btn := kitLinkSurface(c, ui.ButtonBase(c.Key(key)).Label(a.tf("common.view_map", "coord", coordLbl)).
 			Height(24).Padding(0, 8).Radius(t.radius.md).Gap(5).
-			Background(t.card).Border(hairline, t.border).AlignItems(ui.Center).
-			Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-		if btn.Hovered() {
-			btn.Background(t.tint(1.5))
-		}
+			AlignItems(ui.Center))
 		btn.Children(func() {
 			ui.Icon(c, icoMapPin).Size(iconXs, iconXs).Shrink(0).TextColor(t.infoText)
 			ui.Text(c, locTxt).FontSize(t.text.xs).TextColor(t.subdued).SingleLine()
@@ -758,14 +753,10 @@ func (a *App) renderVendorNpcChips(c *ui.Context, keyPrefix, subtitle, emptyHint
 			}
 			if npc.MapPath != "" {
 				coordLbl := fmt.Sprintf("%s  (%.1f, %.1f)", txt, npc.CoordX, npc.CoordY)
-				btn := ui.ButtonBase(c.Key(fmt.Sprintf("%s-%d", keyPrefix, npc.NpcID))).
+				btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("%s-%d", keyPrefix, npc.NpcID))).
 					Label(a.tf("common.view_map", "coord", coordLbl)).
 					Height(24).Padding(0, 8).Radius(t.radius.md).Gap(5).
-					Background(t.card).AlignItems(ui.Center).
-					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-				if btn.Hovered() {
-					btn.Background(t.tint(1.5))
-				}
+					AlignItems(ui.Center))
 				btn.Children(func() {
 					ui.Icon(c, icoMapPin).Size(iconXs, iconXs).Shrink(0).TextColor(t.infoText)
 					ui.Text(c, txt).FontSize(t.text.xs).TextColor(t.subdued).SingleLine()
@@ -917,13 +908,9 @@ func (a *App) renderCollectableRewardsSection(c *ui.Context, itemName string, li
 	drawDetailSection(c, a.t("detail.col_reward_title"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(list))), nil, func() {
 		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 			for idx, rew := range list {
-				btn := ui.ButtonBase(c.Key(fmt.Sprintf("colrew-%d-%d", rew.TurnInItemID, idx))).
+				btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("colrew-%d-%d", rew.TurnInItemID, idx))).
 					Label(a.tf("common.view_item", "name", rew.TurnInItemName)).MinWidth(250).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
-					Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
-					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-				if btn.Hovered() {
-					btn.Background(t.tint(1.5))
-				}
+					Justify(ui.SpaceBetween).AlignItems(ui.Center))
 				btn.Children(func() {
 					ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 						a.drawGameIcon(c, rew.TurnInItemIconID, false, 26, t.radius.md)
@@ -955,13 +942,9 @@ func (a *App) renderQuestSourcesSection(c *ui.Context, quests []gamedata.ItemQue
 	drawDetailSection(c, a.t("detail.quest_rewards"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(quests))), nil, func() {
 		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 			for idx, qs := range quests {
-				btn := ui.ButtonBase(c.Key(fmt.Sprintf("item-qsrc-%d-%d", qs.QuestID, idx))).
+				btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("item-qsrc-%d-%d", qs.QuestID, idx))).
 					Label(a.tf("common.view_quest", "name", qs.NameCn)).MinWidth(240).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
-					Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
-					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-				if btn.Hovered() {
-					btn.Background(t.tint(1.5))
-				}
+					Justify(ui.SpaceBetween).AlignItems(ui.Center))
 				btn.Children(func() {
 					ui.Column(c).Gap(2).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 						ui.Text(c, gamedata.CleanQuestTitle(qs.NameCn)).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
@@ -989,13 +972,9 @@ func (a *App) renderLeveSourcesSection(c *ui.Context, title string, leves []game
 	drawDetailSection(c, title, a.tf("common.items_count", "count", fmt.Sprintf("%d", len(leves))), nil, func() {
 		ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 			for idx, ls := range leves {
-				btn := ui.ButtonBase(c.Key(fmt.Sprintf("item-lsrc-%t-%d-%d", isTurnIn, ls.LeveID, idx))).
+				btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("item-lsrc-%t-%d-%d", isTurnIn, ls.LeveID, idx))).
 					Label(a.tf("common.view_leve", "name", ls.NameCn)).MinWidth(240).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
-					Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
-					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-				if btn.Hovered() {
-					btn.Background(t.tint(1.5))
-				}
+					Justify(ui.SpaceBetween).AlignItems(ui.Center))
 				btn.Children(func() {
 					ui.Column(c).Gap(2).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 						ui.Text(c, ls.NameCn).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine()
@@ -1461,13 +1440,9 @@ func (a *App) renderUsedInRecipesSection(c *ui.Context, used []gamedata.UsedInRe
 	drawDetailSection(c, a.t("detail.used_in"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(used))), nil, func() {
 		ui.Row(c).FillWidth().Gap(6).Wrap().Children(func() {
 			for _, u := range used {
-				btn := ui.ButtonBase(c.Key(fmt.Sprintf("used-%d", u.RecipeID))).Label(u.ResultNameCn).
+				btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("used-%d", u.RecipeID))).Label(u.ResultNameCn).
 					MinWidth(210).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
-					Background(t.card).Justify(ui.SpaceBetween).AlignItems(ui.Center).
-					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-				if btn.Hovered() {
-					btn.Background(t.tint(1.5))
-				}
+					Justify(ui.SpaceBetween).AlignItems(ui.Center))
 				btn.Children(func() {
 					ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 						a.drawGameIcon(c, u.ResultIconID, false, 26, t.radius.md)

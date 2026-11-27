@@ -29,7 +29,8 @@ func (a *App) renderLevesView(c *ui.Context) {
 func (a *App) hasLeveFilter() bool {
 	return strings.TrimSpace(a.leveQuery.Q) != "" ||
 		a.leveQuery.Kind != "all" ||
-		a.leveQuery.AssignmentTypeID > 0
+		a.leveQuery.AssignmentTypeID > 0 ||
+		a.leveQuery.NewOnly
 }
 
 func (a *App) resetLeveFilters() {
@@ -87,6 +88,11 @@ func (a *App) renderLeveListPane(c *ui.Context) {
 						a.leveQuery.Page = 1
 						a.refreshLeves()
 					}
+				}
+				if a.renderLatestFilterChip(c, "l-scope-latest-new", a.latestLeveCount(), a.leveQuery.NewOnly) {
+					a.leveQuery.NewOnly = !a.leveQuery.NewOnly
+					a.leveQuery.Page = 1
+					a.refreshLeves()
 				}
 			})
 		})
@@ -166,6 +172,9 @@ func (a *App) renderLeveListRow(c *ui.Context, key string, lv gamedata.LeveEntry
 				}
 				ui.Text(c, lv.NameCn).FontSize(t.text.sm).FontWeight(fw).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
 				ui.Row(c).Gap(4).AlignItems(ui.Center).Shrink(0).Children(func() {
+					if a.isNewLeve(lv.ID) {
+						a.drawLatestBadge(c)
+					}
 					if favorited {
 						ui.Icon(c, icoStarFill).Size(11, 11).TextColor(t.attention)
 					}
@@ -258,6 +267,9 @@ func (a *App) renderLeveDetailWithOpts(c *ui.Context, opts leveDetailPaneOpts) {
 						ui.Column(c).Gap(6).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 							ui.Row(c).Gap(8).AlignItems(ui.Baseline).Wrap().Children(func() {
 								ui.Text(c, lv.NameCn).FontSize(t.text.xl).FontWeight(600).LetterSpacing(-0.3).TextColor(t.foreground).Selectable()
+								if a.isNewLeve(lv.ID) {
+									a.drawLatestBadge(c)
+								}
 								numTextf(c, "#%d", lv.ID).FontSize(t.text.xs).TextColor(t.muted).Selectable()
 							})
 							if secLines := a.secondaryDataLines(lv.NameCn, lv.NameJa, lv.NameEn); len(secLines) > 0 {
@@ -352,13 +364,9 @@ func (a *App) renderLeveDetailWithOpts(c *ui.Context, opts leveDetailPaneOpts) {
 						drawDetailSection(c, a.t("leves.turnin_title"), meta, nil, func() {
 							ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 								for idx, ti := range lv.TurnInItems {
-									btn := ui.ButtonBase(c.Key(fmt.Sprintf("lv-turn-%d-%d", lv.ID, idx))).Label(a.tf("common.view_item", "name", ti.ItemName)).
+									btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("lv-turn-%d-%d", lv.ID, idx))).Label(a.tf("common.view_item", "name", ti.ItemName)).
 										MinWidth(240).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
-										Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
-										Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-									if btn.Hovered() {
-										btn.Background(t.tint(1.5))
-									}
+										Justify(ui.SpaceBetween).AlignItems(ui.Center))
 									btn.Children(func() {
 										ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 											a.drawGameIcon(c, ti.IconID, false, 26, t.radius.md)
@@ -398,7 +406,7 @@ func (a *App) renderLeveDetailWithOpts(c *ui.Context, opts leveDetailPaneOpts) {
 									ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 										for idx, ct := range lv.CombatTargets {
 											ui.Row(c.Key(fmt.Sprintf("lv-bnpc-%d-%d", lv.ID, idx))).Padding(5, 9).Radius(t.radius.md).
-												Background(t.card).Border(hairline, t.border).Gap(6).AlignItems(ui.Center).Children(func() {
+												Background(t.card).Gap(6).AlignItems(ui.Center).Children(func() {
 												ui.Text(c, ct.BNpcName).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground)
 												if ct.Level > 0 {
 													numTextf(c, "Lv.%d", ct.Level).FontSize(t.text.micro).TextColor(t.muted)
@@ -414,7 +422,7 @@ func (a *App) renderLeveDetailWithOpts(c *ui.Context, opts leveDetailPaneOpts) {
 									ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 										for idx, oi := range lv.RequiredObjectiveItems {
 											ui.Row(c.Key(fmt.Sprintf("lv-objitem-%d-%d", lv.ID, idx))).Padding(5, 9).Radius(t.radius.md).
-												Background(t.card).Border(hairline, t.border).Gap(6).AlignItems(ui.Center).Children(func() {
+												Background(t.card).Gap(6).AlignItems(ui.Center).Children(func() {
 												ui.Text(c, oi.ItemName).FontSize(t.text.xs).TextColor(t.foreground)
 												numTextf(c, "×%d", oi.Count).FontSize(t.text.xs).FontWeight(600).TextColor(t.infoText)
 												if oi.DropRate > 0 {
@@ -440,12 +448,8 @@ func (a *App) renderLeveDetailWithOpts(c *ui.Context, opts leveDetailPaneOpts) {
 										numText(c, a.tf("leves.drop_prob", "pct", fmt.Sprintf("%d", grp.ProbabilityPercent))).FontSize(t.text.xs).FontWeight(600).TextColor(t.foreground)
 										ui.Row(c).FillWidth().Gap(6).Wrap().Children(func() {
 											for iIdx, ri := range grp.Items {
-												btn := ui.ButtonBase(c.Key(fmt.Sprintf("lv-ritem-%d-%d-%d", lv.ID, gIdx, iIdx))).Label(a.tf("common.view_item", "name", ri.ItemName)).
-													Padding(4, 8).Radius(t.radius.md).Background(t.card).Border(hairline, t.border).
-													Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-												if btn.Hovered() {
-													btn.Background(t.tint(1.5))
-												}
+												btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("lv-ritem-%d-%d-%d", lv.ID, gIdx, iIdx))).Label(a.tf("common.view_item", "name", ri.ItemName)).
+													Padding(4, 8).Radius(t.radius.md))
 												btn.Children(func() {
 													ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
 														a.drawGameIcon(c, ri.IconID, ri.IsHQ, 18, 3)

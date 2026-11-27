@@ -12,15 +12,15 @@ import (
 )
 
 const (
-	diffTextColSourceW  float32 = 212
-	diffTextColTypeW    float32 = 76
-	diffTextColActionsW float32 = 76
-	diffTextColDiffMin  float32 = 240
+	diffTextColSourceW  float32 = 184
+	diffTextColTypeW    float32 = 66
+	diffTextColActionsW float32 = 68
+	diffTextColSideMin  float32 = 150
 	diffTextSnipLimit   int     = 220
 )
 
 // renderTextDiffPartition 绘制「版本对比 → 文本」独立分区：仅呈现变更与移除记录（不含新增），
-// 支持旧/新文本字符级差异高亮、长文本折叠展开、一键复制与关联实体详情直跳。
+// 采用一列旧文本、一列新文本的双列并排布局，支持精确多段差异高亮、长文本展开、一键复制与关联实体直跳。
 func (a *App) renderTextDiffPartition(c *ui.Context) {
 	t := themeOf(c)
 	if a.diffRes == nil {
@@ -47,12 +47,15 @@ func (a *App) renderTextDiffPartition(c *ui.Context) {
 		})
 	})
 
-	// 表头
+	// 双列表头：来源表 | 类型 | 旧文本 | 新文本 | 操作
 	ui.Row(c).FillWidth().Padding(8, 16).Background(t.card).
 		BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Gap(10).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, a.t("diff.text_col_source")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffTextColSourceW).Shrink(0)
 		ui.Text(c, a.t("diff.text_col_type")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffTextColTypeW).Shrink(0).TextAlign(ui.Center)
-		ui.Text(c, a.t("diff.text_col_diff")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(diffTextColDiffMin)
+		ui.Row(c).Grow(1).Shrink(1).MinWidth(diffTextColSideMin*2 + 10).Gap(10).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, a.t("diff.text_before_label")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(diffTextColSideMin)
+			ui.Text(c, a.t("diff.text_after_label")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(diffTextColSideMin)
+		})
 		ui.Text(c, a.t("text_search.col_actions")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(diffTextColActionsW).Shrink(0).TextAlign(ui.End)
 	})
 
@@ -95,30 +98,37 @@ func (a *App) renderTextDiffPartition(c *ui.Context) {
 						}
 					})
 
-					// 3. 文本变动对比详情（支持行内差异高亮与长文本展开）
+					// 3. 左旧右新双列文本比对（支持精确多段差异高亮与长文本展开）
 					expanded := a.diffTextExpanded[entryKey]
-					ui.Column(c).Grow(1).Shrink(1).MinWidth(diffTextColDiffMin).Gap(6).Children(func() {
+					ui.Column(c).Grow(1).Shrink(1).MinWidth(diffTextColSideMin*2 + 10).Gap(5).Children(func() {
 						truncated := false
 						if entry.ChangeType == "modified" {
-							bStart, bEnd, aStart, aEnd := backup.ComputeInlineTextDiffBounds(entry.TextBefore, entry.TextAfter)
-							var bSpans, aSpans []gamedata.TextMatchSpan
-							if bEnd > bStart {
-								bSpans = []gamedata.TextMatchSpan{{Start: bStart, End: bEnd}}
-							}
-							if aEnd > aStart {
-								aSpans = []gamedata.TextMatchSpan{{Start: aStart, End: aEnd}}
-							}
-
+							bSpans, aSpans := backup.ComputeInlineTextDiffSpans(entry.TextBefore, entry.TextAfter)
 							dispB, dispBSpans, truncB := sliceTextSnippet(entry.TextBefore, bSpans, diffTextSnipLimit, expanded)
 							dispA, dispASpans, truncA := sliceTextSnippet(entry.TextAfter, aSpans, diffTextSnipLimit, expanded)
 							truncated = truncB || truncA
 
-							renderTextDiffBlock(c, a.t("diff.text_before_label"), dispB, dispBSpans, true, t)
-							renderTextDiffBlock(c, a.t("diff.text_after_label"), dispA, dispASpans, false, t)
+							ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Stretch).Children(func() {
+								ui.Box(c).Grow(1).Shrink(1).MinWidth(diffTextColSideMin).Children(func() {
+									renderTextDiffCell(c, dispB, dispBSpans, true, t)
+								})
+								ui.Box(c).Grow(1).Shrink(1).MinWidth(diffTextColSideMin).Children(func() {
+									renderTextDiffCell(c, dispA, dispASpans, false, t)
+								})
+							})
 						} else {
 							dispB, _, truncB := sliceTextSnippet(entry.TextBefore, nil, diffTextSnipLimit, expanded)
 							truncated = truncB
-							renderTextDiffBlock(c, a.t("diff.text_removed_label"), dispB, nil, true, t)
+
+							ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Stretch).Children(func() {
+								ui.Box(c).Grow(1).Shrink(1).MinWidth(diffTextColSideMin).Children(func() {
+									renderTextDiffCell(c, dispB, nil, true, t)
+								})
+								ui.Box(c).Grow(1).Shrink(1).MinWidth(diffTextColSideMin).Padding(6, 9).Radius(t.radius.md).
+									Background(t.card).AlignItems(ui.Start).Children(func() {
+									ui.Text(c, a.t("diff.change_removed")).FontSize(t.text.xs).TextColor(t.muted)
+								})
+							})
 						}
 
 						if truncated || expanded {
@@ -171,53 +181,46 @@ func (a *App) renderTextDiffPartition(c *ui.Context) {
 	})
 }
 
-func renderTextDiffBlock(c *ui.Context, label, text string, diffSpans []gamedata.TextMatchSpan, isDeletion bool, t uiTokens) {
+func renderTextDiffCell(c *ui.Context, text string, diffSpans []gamedata.TextMatchSpan, isDeletion bool, t uiTokens) {
 	boxBg := t.insBg.Alpha(0.45)
-	badgeKind := pillPositive
 	hlBg := t.insBg
 	hlFg := t.insText
 	if isDeletion {
 		boxBg = t.delBg.Alpha(0.60)
-		badgeKind = pillNegative
 		hlBg = t.delBg
 		hlFg = t.delText
 	}
 
-	ui.Row(c).FillWidth().Padding(6, 9).Radius(t.radius.md).Background(boxBg).Gap(8).AlignItems(ui.Start).Children(func() {
-		ui.Box(c).Padding(1, 0, 0, 0).Shrink(0).Children(func() {
-			drawPill(c, label, badgeKind)
-		})
-		ui.Box(c).Grow(1).Shrink(1).MinWidth(0).Children(func() {
-			if len(diffSpans) == 0 || !utf8.ValidString(text) {
-				txtEl := ui.Text(c, text).FontSize(t.text.xs).LineHeight(lineProse).TextColor(t.foreground).Selectable().FillWidth()
-				if isDeletion {
-					txtEl.TextColor(t.subdued)
-				}
-				return
+	ui.Box(c).FillWidth().FillHeight().Padding(6, 9).Radius(t.radius.md).Background(boxBg).Children(func() {
+		if len(diffSpans) == 0 || !utf8.ValidString(text) {
+			txtEl := ui.Text(c, text).FontSize(t.text.xs).LineHeight(lineProse).TextColor(t.foreground).Selectable().FillWidth()
+			if isDeletion {
+				txtEl.TextColor(t.subdued)
 			}
-			uiSpans := make([]ui.Span, 0, len(diffSpans)*2+1)
-			cursor := 0
-			for _, sp := range diffSpans {
-				if sp.Start < cursor || sp.End <= sp.Start || sp.End > len(text) {
-					continue
-				}
-				if sp.Start > cursor {
-					uiSpans = append(uiSpans, ui.Span{Text: text[cursor:sp.Start]})
-				}
-				uiSpans = append(uiSpans, ui.Span{
-					Text:       text[sp.Start:sp.End],
-					Weight:     600,
-					Color:      hlFg,
-					Background: hlBg,
-					Radius:     t.radius.xs,
-				})
-				cursor = sp.End
+			return
+		}
+		uiSpans := make([]ui.Span, 0, len(diffSpans)*2+1)
+		cursor := 0
+		for _, sp := range diffSpans {
+			if sp.Start < cursor || sp.End <= sp.Start || sp.End > len(text) {
+				continue
 			}
-			if cursor < len(text) {
-				uiSpans = append(uiSpans, ui.Span{Text: text[cursor:]})
+			if sp.Start > cursor {
+				uiSpans = append(uiSpans, ui.Span{Text: text[cursor:sp.Start]})
 			}
-			ui.RichText(c, uiSpans...).FontSize(t.text.xs).FontWeight(400).TextColor(t.foreground).
-				LineHeight(lineProse).Selectable().FillWidth()
-		})
+			uiSpans = append(uiSpans, ui.Span{
+				Text:       text[sp.Start:sp.End],
+				Weight:     600,
+				Color:      hlFg,
+				Background: hlBg,
+				Radius:     t.radius.xs,
+			})
+			cursor = sp.End
+		}
+		if cursor < len(text) {
+			uiSpans = append(uiSpans, ui.Span{Text: text[cursor:]})
+		}
+		ui.RichText(c, uiSpans...).FontSize(t.text.xs).FontWeight(400).TextColor(t.foreground).
+			LineHeight(lineProse).Selectable().FillWidth()
 	})
 }

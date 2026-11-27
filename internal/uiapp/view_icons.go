@@ -362,9 +362,22 @@ func formatIconBytes(size int) string {
 
 // renderIconsView 绘制【资源 -> 图标】浏览、属性预览与 SaintCoinach 规范导出工作台。
 func (a *App) renderIconsView(c *ui.Context) {
-	t := themeOf(c)
-	ui.Column(c).Fill().Children(func() {
+	kitPanel(c, a.panelRadius(c)).Fill().Children(func() {
 		a.renderIconsHeader(c)
+
+		// 若后台全量图标索引仍在静默扫描中（或失败），向用户展示清晰加载状态提示
+		if a.isIconIndexPending() {
+			if a.iconIndexError != "" && !a.iconIndexLoading {
+				kitEmpty(c, icoAlertCircle, a.t("icons.title"), a.tf("icons.loading_error", "err", a.iconIndexError), func() {
+					if kitButton(c, "icons-retry-load-btn", a.t("icons.retry_load"), btnOpts{variant: btnOutline, size: btnSizeSm}) {
+						a.startBackgroundIconIndexLoad()
+					}
+				})
+			} else {
+				kitLoading(c, a.t("icons.loading_title"), a.t("icons.loading_desc"))
+			}
+			return
+		}
 
 		ui.Row(c).Grow(1).Shrink(1).MinHeight(0).FillWidth().Children(func() {
 			kitResizer(c, "icons-group-split", &a.iconGroupListW, iconGroupListMinWidth, iconGroupListMaxWidth, 0, a.t("shell.resize_icon_groups"),
@@ -378,11 +391,11 @@ func (a *App) renderIconsView(c *ui.Context) {
 			)
 		})
 	})
-	_ = t
 }
 
 func (a *App) renderIconsHeader(c *ui.Context) {
 	t := themeOf(c)
+	pending := a.isIconIndexPending()
 	totalIcons := 0
 	totalGroups := 0
 	if a.status != nil {
@@ -390,32 +403,38 @@ func (a *App) renderIconsHeader(c *ui.Context) {
 		totalGroups = a.status.Stats.TotalIconGroups
 	}
 
-	ui.Column(c).FillWidth().Padding(14, 20, 12, 20).Gap(10).
+	ui.Column(c).FillWidth().Padding(12, 16, 10, 16).Gap(8).
 		BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Children(func() {
 		// 顶栏：页面标题、有效总量统计、导出弹窗入口
 		ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(12).Wrap().Children(func() {
 			ui.Row(c).Gap(10).AlignItems(ui.Baseline).Wrap().Children(func() {
 				ui.Text(c, a.t("icons.title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
-				numText(c, a.tf("icons.summary_stats",
-					"groups", formatInt(totalGroups),
-					"icons", formatInt(totalIcons),
-				)).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+				if pending {
+					ui.Text(c, a.t("icons.loading_badge")).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+				} else {
+					numText(c, a.tf("icons.summary_stats",
+						"groups", formatInt(totalGroups),
+						"icons", formatInt(totalIcons),
+					)).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
+				}
 			})
 
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 				if a.iconQuery.GroupID >= 0 {
 					if kitButton(c, "icons-export-group-btn", a.t("icons.export_group_btn"), btnOpts{
-						variant: btnOutline,
-						size:    btnSizeSm,
-						icon:    icoFolder,
+						variant:  btnOutline,
+						size:     btnSizeSm,
+						icon:     icoFolder,
+						disabled: pending,
 					}) {
 						a.openIconExportModal(true)
 					}
 				}
 				if kitButton(c, "icons-export-all-btn", a.t("icons.export_btn"), btnOpts{
-					variant: btnDefault,
-					size:    btnSizeSm,
-					icon:    icoDownload,
+					variant:  btnDefault,
+					size:     btnSizeSm,
+					icon:     icoDownload,
+					disabled: pending,
 				}) {
 					a.openIconExportModal(false)
 				}
@@ -447,6 +466,10 @@ func (a *App) renderIconsHeader(c *ui.Context) {
 						a.iconQuery.VariantFilter = flt.id
 						a.refreshIcons(true)
 					}
+				}
+				if a.renderLatestFilterChip(c, "icons-flt-latest-new", a.latestIconCount(), a.iconQuery.NewOnly) {
+					a.iconQuery.NewOnly = !a.iconQuery.NewOnly
+					a.refreshIcons(true)
 				}
 			})
 		})
@@ -512,27 +535,33 @@ func (a *App) renderIconGroupPane(c *ui.Context) {
 
 func (a *App) renderIconGroupRow(c *ui.Context, key, title, subtitle, countText string, selected bool) bool {
 	t := themeOf(c)
-	row := ui.ButtonBase(c.Key(key)).FillWidth().Padding(7, 10).Radius(t.radius.md).
+	row := ui.ButtonBase(c.Key(key)).FillWidth().Padding(7, 10).Radius(t.radius.lg).
 		Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 	switch {
+	case selected && row.Hovered():
+		row.Background(t.tint(2.25))
 	case selected:
-		row.Background(t.accentSoft).Border(hairline, t.accentBorder)
+		row.Background(t.tint(1.75))
 	case row.Hovered():
-		row.Background(t.card)
+		row.Background(t.tint(1))
 	}
-	titleCol := t.foreground
+	titleCol := t.subdued
+	fw := 500
 	if selected {
-		titleCol = t.primary
+		titleCol = t.foreground
+		fw = 600
+	} else if row.Hovered() {
+		titleCol = t.foreground
 	}
 	row.Children(func() {
 		ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).Children(func() {
 			ui.Column(c).Gap(1).Grow(1).Shrink(1).MinWidth(0).Children(func() {
-				numText(c, title).FontSize(t.text.xs).FontWeight(600).TextColor(titleCol).SingleLine()
+				numText(c, title).FontSize(t.text.xs).FontWeight(fw).TextColor(titleCol).SingleLine()
 				if subtitle != "" {
 					numText(c, subtitle).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 				}
 			})
-			numText(c, countText).FontSize(t.text.micro).FontWeight(500).TextColor(t.subdued).SingleLine().Shrink(0)
+			numText(c, countText).FontSize(t.text.micro).FontWeight(500).TextColor(t.muted).SingleLine().Shrink(0)
 		})
 	})
 	return row.Clicked()
@@ -567,10 +596,11 @@ func (a *App) renderIconGridPane(c *ui.Context) {
 							a.selectIconGroup(-1)
 						}
 					}
-					if a.iconQuery.Q != "" || (a.iconQuery.VariantFilter != "" && a.iconQuery.VariantFilter != "all") {
+					if a.iconQuery.Q != "" || (a.iconQuery.VariantFilter != "" && a.iconQuery.VariantFilter != "all") || a.iconQuery.NewOnly {
 						if kitButton(c, "icons-empty-reset", a.t("icons.empty_reset"), btnOpts{variant: btnDefault, size: btnSizeSm}) {
 							a.iconQuery.Q = ""
 							a.iconQuery.VariantFilter = "all"
+							a.iconQuery.NewOnly = false
 							a.refreshIcons(true)
 						}
 					}
@@ -605,7 +635,7 @@ func (a *App) renderIconGridPane(c *ui.Context) {
 				codeWeight := 500
 				if isSel {
 					codeCol = t.primary
-					codeWeight = 700
+					codeWeight = 600
 				}
 
 				ui.Column(c).Fill().Padding(6, 4).Gap(3).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
@@ -623,7 +653,11 @@ func (a *App) renderIconGridPane(c *ui.Context) {
 					})
 
 					numText(c, ic.Code).FontSize(t.text.micro).FontWeight(codeWeight).TextColor(codeCol).SingleLine()
-					numText(c, a.iconCellMetaTag(ic)).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+					if a.isNewIcon(ic.ID) {
+						ui.Text(c, a.latestCompactBadgeLabel()).FontSize(t.text.micro).FontWeight(600).TextColor(t.successText).SingleLine()
+					} else {
+						numText(c, a.iconCellMetaTag(ic)).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
+					}
 				})
 			}).Fill()
 
@@ -687,7 +721,10 @@ func (a *App) renderIconInspectorPane(c *ui.Context) {
 
 					ui.Column(c).Gap(5).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 						ui.Row(c).Gap(6).AlignItems(ui.Center).Wrap().Children(func() {
-							numTextf(c, "#%s", detail.Code).FontSize(t.text.xl).FontWeight(700).TextColor(t.foreground).SingleLine()
+							numTextf(c, "#%s", detail.Code).FontSize(t.text.xl).FontWeight(600).TextColor(t.foreground).SingleLine()
+							if a.isNewIcon(detail.ID) {
+								a.drawLatestBadge(c)
+							}
 							if a.iconInspectorHR1 {
 								drawPill(c, "HD _hr1", pillAccent)
 							} else {
@@ -1130,6 +1167,10 @@ func (a *App) renderIconExportModal(c *ui.Context) {
 
 		// 可滚动设置区（保证 640px 窗口高度下底栏不裁切）
 		ui.Scroll(c.Key("icon-exp-body-scroll")).FillWidth().MaxHeight(430).Children(func() {
+			if a.isIconIndexPending() {
+				kitLoading(c, a.t("icons.loading_title"), a.t("icons.loading_desc"))
+				return
+			}
 			ui.Column(c).FillWidth().Padding(4, 20, 16, 20).Gap(14).Children(func() {
 				// 1. 导出范围
 				if a.iconQuery.GroupID >= 0 {
@@ -1279,16 +1320,11 @@ func (a *App) renderIconExportModal(c *ui.Context) {
 				if pct > 100 {
 					pct = 100
 				}
-				// 进度条轨道必须显式 Stretch + FillHeight，避免 Row 默认居中导致子填充框高度坍缩为 0
 				done := float32(pct)
 				if p.IsRunning && done < 2 {
 					done = 2
 				}
-				ui.Row(c).FillWidth().Height(5).Radius(t.radius.full).Background(t.border).Clip().
-					AlignItems(ui.Stretch).Children(func() {
-					ui.Box(c).Grow(done).FillHeight().Background(t.primary)
-					ui.Box(c).Grow(max(0, 100-done)).FillHeight()
-				})
+				kitProgressBar(c, done)
 
 				if p.CurrentFile != "" {
 					ui.Text(c, p.CurrentFile).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
@@ -1522,7 +1558,7 @@ func (a *App) renderIconLightboxModal(c *ui.Context) {
 		ui.Row(c).FillWidth().Padding(16, 20, 12, 20).Justify(ui.SpaceBetween).AlignItems(ui.Start).Gap(12).Children(func() {
 			ui.Column(c).Gap(3).Grow(1).Shrink(1).Children(func() {
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Wrap().Children(func() {
-					numText(c, a.iconLightboxTitle).FontSize(t.text.base).FontWeight(700).TextColor(t.foreground)
+					numText(c, a.iconLightboxTitle).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground)
 					if detail != nil {
 						if a.iconLightboxHR1 {
 							drawPill(c, "HD _hr1", pillAccent)

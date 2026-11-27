@@ -514,11 +514,7 @@ func (a *App) renderDiffExportModal(c *ui.Context) {
 				if p.IsRunning && done < 2 {
 					done = 2
 				}
-				ui.Row(c).FillWidth().Height(5).Radius(t.radius.full).Background(t.border).Clip().
-					AlignItems(ui.Stretch).Children(func() {
-					ui.Box(c).Grow(done).FillHeight().Background(t.primary)
-					ui.Box(c).Grow(max(0, 100-done)).FillHeight()
-				})
+				kitProgressBar(c, done)
 
 				if p.IsRunning && p.CurrentFile != "" {
 					ui.Text(c, p.CurrentFile).FontSize(t.text.micro).TextColor(t.muted).SingleLine()

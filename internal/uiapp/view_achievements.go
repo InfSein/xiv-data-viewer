@@ -21,11 +21,11 @@ func (a *App) achFilterLabels() []string {
 
 const (
 	achColIDW     float32 = 50
-	achColNameW   float32 = 208
+	achColNameW   float32 = 198
 	achColCatW    float32 = 104
-	achColPointsW float32 = 64
+	achColPointsW float32 = 84
 	achColCondMin float32 = 88
-	achColRewardW float32 = 148
+	achColRewardW float32 = 142
 	achColFavW    float32 = 34
 )
 
@@ -33,7 +33,8 @@ func (a *App) hasAchievementFilter() bool {
 	return strings.TrimSpace(a.achQuery.Q) != "" ||
 		a.achQuery.KindID != 0 ||
 		a.achQuery.CategoryID != 0 ||
-		a.achQuery.Filter != "all"
+		a.achQuery.Filter != "all" ||
+		a.achQuery.NewOnly
 }
 
 func (a *App) resetAchievementFilters() {
@@ -154,12 +155,8 @@ func (a *App) renderAchievementRewardCell(c *ui.Context, ach gamedata.Achievemen
 			}
 		}
 		if hasItem {
-			btn := ui.ButtonBase(c.Key(fmt.Sprintf("ach-rew-%d", ach.ID))).Label(a.tf("common.view_item", "name", ach.RewardItemNameCn)).
-				FillWidth().Padding(4, 7).Radius(t.radius.md).
-				Background(t.card).Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-			if btn.Hovered() {
-				btn.Background(t.tint(1.5))
-			}
+			btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("ach-rew-%d", ach.ID))).Label(a.tf("common.view_item", "name", ach.RewardItemNameCn)).
+				FillWidth().Padding(4, 7).Radius(t.radius.md))
 			btn.Children(func() {
 				ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 					a.drawGameIcon(c, ach.RewardItemIconID, false, 18, 3)
@@ -218,18 +215,25 @@ func (a *App) renderAchievementsView(c *ui.Context) {
 					})
 				})
 
-				curIdx := 0
-				for i, m := range achFilterModes {
-					if m == a.achQuery.Filter {
-						curIdx = i
-						break
+				ui.Row(c).Gap(8).AlignItems(ui.Center).Wrap().Children(func() {
+					curIdx := 0
+					for i, m := range achFilterModes {
+						if m == a.achQuery.Filter {
+							curIdx = i
+							break
+						}
 					}
-				}
-				if nextIdx, chg := kitSegmentedTabs(c, "ach-flt", curIdx, a.achFilterLabels()); chg {
-					a.achQuery.Filter = achFilterModes[nextIdx]
-					a.achQuery.Page = 1
-					a.refreshAchievements()
-				}
+					if nextIdx, chg := kitSegmentedTabs(c, "ach-flt", curIdx, a.achFilterLabels()); chg {
+						a.achQuery.Filter = achFilterModes[nextIdx]
+						a.achQuery.Page = 1
+						a.refreshAchievements()
+					}
+					if a.renderLatestFilterChip(c, "ach-flt-latest-new", a.latestAchievementCount(), a.achQuery.NewOnly) {
+						a.achQuery.NewOnly = !a.achQuery.NewOnly
+						a.achQuery.Page = 1
+						a.refreshAchievements()
+					}
+				})
 			})
 		})
 
@@ -304,7 +308,12 @@ func (a *App) renderAchievementTableRows(
 					ui.Row(c).Width(achColNameW).Shrink(0).Gap(8).AlignItems(ui.Center).Children(func() {
 						a.drawGameIcon(c, ach.IconID, false, 28, t.radius.md)
 						ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
-							ui.Text(c, ach.NameCn).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground).SingleLine()
+							ui.Row(c).FillWidth().Gap(5).AlignItems(ui.Center).Children(func() {
+								ui.Text(c, ach.NameCn).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground).SingleLine().Shrink(1)
+								if a.isNewAchievement(ach.ID) {
+									a.drawLatestBadge(c)
+								}
+							})
 							for _, sec := range a.secondaryDataLines(ach.NameCn, ach.NameJa, ach.NameEn) {
 								ui.Text(c, sec.text).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 							}

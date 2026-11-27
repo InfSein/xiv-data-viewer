@@ -98,13 +98,7 @@ func (s *IconService) collectTasks(opts IconExportOptions) []iconExportTask {
 		return nil
 	}
 	store := s.gameSvc.Store()
-
-	var sourceIcons []gamedata.IconEntry
-	if opts.GroupID >= 0 {
-		sourceIcons = store.IconsByGroup[sqpack.IconGroupID(opts.GroupID)]
-	} else {
-		sourceIcons = store.Icons
-	}
+	sourceIcons := store.SnapshotIconsForExport(opts.GroupID)
 	if len(sourceIcons) == 0 {
 		return nil
 	}

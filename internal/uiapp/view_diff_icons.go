@@ -62,7 +62,32 @@ func (a *App) loadDiffNewIconBitmap(entry backup.DiffItemEntry) *ui.Bitmap {
 // renderIconDiffPartition 以独立分区平铺展示图标新增/移除及新旧对比卡片（不复用逐行文字表格）。
 func (a *App) renderIconDiffPartition(c *ui.Context) {
 	t := themeOf(c)
+	if a.diffRes == nil {
+		kitEmpty(c, icoImage, a.t("diff.empty_title"), a.t("diff.empty_desc"), nil)
+		return
+	}
 	sum := a.diffRes.Summary
+	if !sum.IconDiffAvailable {
+		fromName := nonEmptyStr(a.diffRes.FromDisplayName, a.diffRes.FromID)
+		toName := nonEmptyStr(a.diffRes.ToDisplayName, a.diffRes.ToID)
+		var desc string
+		switch {
+		case sum.IconMissingFrom && sum.IconMissingTo:
+			desc = a.tf("diff.icon_missing_both_desc", "from", fromName, "to", toName)
+		case sum.IconMissingFrom:
+			desc = a.tf("diff.icon_missing_from_desc", "ver", fromName)
+		case sum.IconMissingTo:
+			desc = a.tf("diff.icon_missing_to_desc", "ver", toName)
+		default:
+			desc = a.t("diff.icon_missing_generic_desc")
+		}
+		kitEmpty(c, icoImage, a.t("diff.icon_missing_title"), desc, nil)
+		return
+	}
+	if len(a.diffRes.Items) == 0 {
+		kitEmpty(c, icoImage, a.t("diff.empty_title"), a.t("diff.empty_desc"), nil)
+		return
+	}
 
 	var modified, added, removed []backup.DiffItemEntry
 	for _, entry := range a.diffRes.Items {
@@ -196,13 +221,11 @@ func (a *App) renderTiledIconDiffCard(c *ui.Context, entry backup.DiffItemEntry,
 	t := themeOf(c)
 	code := fmt.Sprintf("%06d", entry.IconID)
 	keyPrefix := "df-ic-rem-"
-	borderCol := t.dangerBorder
 	tagTxt := "-" + a.t("diff.change_removed")
 	tagCol := t.dangerText
 	var bmp *ui.Bitmap
 	if isAdded {
 		keyPrefix = "df-ic-add-"
-		borderCol = t.successBorder
 		tagTxt = "+" + a.t("diff.change_added")
 		tagCol = t.successText
 		bmp = a.loadDiffNewIconBitmap(entry)
@@ -210,26 +233,20 @@ func (a *App) renderTiledIconDiffCard(c *ui.Context, entry backup.DiffItemEntry,
 		bmp = a.loadDiffIconBitmap(entry.OldBlobKey, entry.OldThumbPNG)
 	}
 
-	tile := ui.ButtonBase(c.Key(fmt.Sprintf("%s%d", keyPrefix, entry.ID))).
-		Label("#"+code).Width(86).Padding(8, 6).Radius(t.radius.md).
-		Background(t.card).Border(hairline, borderCol).
-		Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-	if tile.Hovered() {
-		tile.Background(t.accentSoft).Border(hairline, t.accentBorder)
-	}
+	tile := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("%s%d", keyPrefix, entry.ID))).
+		Label("#"+code).Width(84).Padding(8, 6).Radius(t.radius.lg))
 
 	tile.Children(func() {
 		ui.Column(c).FillWidth().Gap(3).AlignItems(ui.Center).Children(func() {
-			ui.Box(c).Size(48, 48).Radius(t.radius.sm).Background(t.background).
-				Border(hairline, t.border).Center().Clip().Children(func() {
+			ui.Box(c).Size(48, 48).Radius(t.radius.md).Background(t.card).Center().Clip().Children(func() {
 				if bmp != nil {
 					ui.Image(c, bmp).Size(42, 42).Fit(ui.Contain)
 				} else {
 					ui.Icon(c, icoImage).Size(18, 18).TextColor(t.muted)
 				}
 			})
-			numText(c, code).FontSize(t.text.micro).FontWeight(600).TextColor(t.foreground).SingleLine()
-			ui.Text(c, tagTxt).FontSize(t.text.micro).TextColor(tagCol).SingleLine()
+			numText(c, code).FontSize(t.text.micro).FontWeight(500).TextColor(t.foreground).SingleLine()
+			ui.Text(c, tagTxt).FontSize(t.text.micro).FontWeight(500).TextColor(tagCol).SingleLine()
 		})
 	})
 

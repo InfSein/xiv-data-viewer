@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
@@ -216,7 +217,11 @@ func buildIconIndex(in iconBuildInput) iconIndices {
 
 	// 构建图标编号到关联游戏条目的反向索引（去重并限定合理上限，避免极高频通用图标占用过多内存）
 	usagesByID := make(map[int][]IconUsageRef, len(in.itemSummaries)/2)
-	seenUsage := make(map[int]map[string]bool)
+	type usageKey struct {
+		kind string
+		id   int
+	}
+	seenUsage := make(map[int]map[usageKey]struct{})
 	addUsage := func(iconID int, kind string, refID int, name string) {
 		if iconID < 0 || refID <= 0 || strings.TrimSpace(name) == "" {
 			return
@@ -228,13 +233,13 @@ func buildIconIndex(in iconBuildInput) iconIndices {
 			return
 		}
 		if seenUsage[iconID] == nil {
-			seenUsage[iconID] = make(map[string]bool, 4)
+			seenUsage[iconID] = make(map[usageKey]struct{}, 4)
 		}
-		sig := fmt.Sprintf("%s:%d", kind, refID)
-		if seenUsage[iconID][sig] {
+		sig := usageKey{kind: kind, id: refID}
+		if _, dup := seenUsage[iconID][sig]; dup {
 			return
 		}
-		seenUsage[iconID][sig] = true
+		seenUsage[iconID][sig] = struct{}{}
 		usagesByID[iconID] = append(usagesByID[iconID], IconUsageRef{
 			Kind: kind,
 			ID:   refID,
@@ -273,6 +278,208 @@ func buildIconIndex(in iconBuildInput) iconIndices {
 	}
 }
 
+// IconsReady 返回当前 Store 的全量图标索引是否已完成构建。
+func (s *Store) IconsReady() bool {
+	if s == nil {
+		return true
+	}
+	s.iconMu.RLock()
+	ready := s.iconsReady
+	if !ready && (len(s.Icons) > 0 || (s.CNReader == nil && s.GlobalReader == nil)) {
+		ready = true
+	}
+	s.iconMu.RUnlock()
+	return ready
+}
+
+// IconsLoading 返回后台是否正在扫描并构建全量图标索引。
+func (s *Store) IconsLoading() bool {
+	if s == nil {
+		return false
+	}
+	s.iconMu.RLock()
+	loading := s.iconsLoading
+	s.iconMu.RUnlock()
+	return loading
+}
+
+// IconsError 返回最近一次图标扫描构建失败的错误信息（无错返回 nil）。
+func (s *Store) IconsError() error {
+	if s == nil {
+		return nil
+	}
+	s.iconMu.RLock()
+	err := s.iconsErr
+	s.iconMu.RUnlock()
+	return err
+}
+
+// SnapshotIconsForExport 并发安全地返回全部或指定分组的有效图标切片。
+func (s *Store) SnapshotIconsForExport(groupID int) []IconEntry {
+	if s == nil {
+		return nil
+	}
+	s.iconMu.RLock()
+	defer s.iconMu.RUnlock()
+	if groupID >= 0 {
+		return s.IconsByGroup[sqpack.IconGroupID(groupID)]
+	}
+	return s.Icons
+}
+
+// IconFilesForRegion 并发安全地返回指定区服已扫描的有效图标文件清单（"cn" | "global"）。
+func (s *Store) IconFilesForRegion(region string) []sqpack.IconFileEntry {
+	if s == nil {
+		return nil
+	}
+	s.iconMu.RLock()
+	defer s.iconMu.RUnlock()
+	if strings.EqualFold(strings.TrimSpace(region), "global") {
+		if len(s.globalIconFiles) > 0 {
+			return s.globalIconFiles
+		}
+		if s.PrimaryReader == s.GlobalReader {
+			return s.globalIconFiles
+		}
+		return s.cnIconFiles
+	}
+	if len(s.cnIconFiles) > 0 {
+		return s.cnIconFiles
+	}
+	return s.globalIconFiles
+}
+
+// EnsureIconsLoaded 幂等且并发安全地完成延迟图标扫描与全量图标索引构建。
+// 多个并发调用方会共享同一次扫描，不会重复访问磁盘。
+func (s *Store) EnsureIconsLoaded() error {
+	if s == nil || s.IconsReady() {
+		return nil
+	}
+	s.iconLoadMu.Lock()
+	defer s.iconLoadMu.Unlock()
+
+	if s.IconsReady() {
+		return nil
+	}
+
+	s.iconMu.Lock()
+	s.iconsLoading = true
+	s.iconsErr = nil
+	cnFiles := s.cnIconFiles
+	glFiles := s.globalIconFiles
+	cacheDir := s.iconCacheDir
+	s.iconMu.Unlock()
+
+	var (
+		scanWG   sync.WaitGroup
+		errMu    sync.Mutex
+		firstErr error
+	)
+	recordErr := func(err error) {
+		if err == nil {
+			return
+		}
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		errMu.Unlock()
+	}
+
+	if s.CNReader != nil && cnFiles == nil {
+		scanWG.Add(1)
+		go func() {
+			defer scanWG.Done()
+			files, err := sqpack.ScanIconFilesCached(s.CNReader, cacheDir)
+			if err != nil {
+				recordErr(err)
+				return
+			}
+			cnFiles = files
+		}()
+	}
+	if s.GlobalReader != nil && glFiles == nil {
+		scanWG.Add(1)
+		go func() {
+			defer scanWG.Done()
+			files, err := sqpack.ScanIconFilesCached(s.GlobalReader, cacheDir)
+			if err != nil {
+				recordErr(err)
+				return
+			}
+			glFiles = files
+		}()
+	}
+	scanWG.Wait()
+
+	if firstErr != nil {
+		s.iconMu.Lock()
+		s.iconsLoading = false
+		s.iconsErr = firstErr
+		s.iconMu.Unlock()
+		return firstErr
+	}
+
+	iconIdx := buildIconIndex(iconBuildInput{
+		primaryReader:   s.PrimaryReader,
+		cnReader:        s.CNReader,
+		globalReader:    s.GlobalReader,
+		cnIconFiles:     cnFiles,
+		globalIconFiles: glFiles,
+		itemSummaries:   s.ItemSummaries,
+		achievements:    s.Achievements,
+		quests:          s.Quests,
+		leves:           s.Leves,
+	})
+
+	s.iconMu.Lock()
+	s.cnIconFiles = cnFiles
+	s.globalIconFiles = glFiles
+	s.Icons = iconIdx.icons
+	s.IconByID = iconIdx.iconByID
+	s.IconGroups = iconIdx.groups
+	s.IconsByGroup = iconIdx.iconsByGroup
+	s.AvailableIconVariants = iconIdx.availableVariants
+	s.IconUsagesByID = iconIdx.usagesByID
+	s.iconsLoading = false
+	s.iconsReady = true
+	s.iconsErr = nil
+	s.iconMu.Unlock()
+	return nil
+}
+
+// IconsReady 返回当前服务的全量图标索引是否已加载完成。
+func (s *Service) IconsReady() bool {
+	if s == nil || s.store == nil {
+		return true
+	}
+	return s.store.IconsReady()
+}
+
+// IconsLoading 返回当前服务的全量图标索引是否正在后台加载中。
+func (s *Service) IconsLoading() bool {
+	if s == nil || s.store == nil {
+		return false
+	}
+	return s.store.IconsLoading()
+}
+
+// IconsError 返回最近一次后台图标索引加载错误。
+func (s *Service) IconsError() error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	return s.store.IconsError()
+}
+
+// EnsureIconsLoaded 确保当前服务的全量图标索引已构建完成。
+func (s *Service) EnsureIconsLoaded() error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	return s.store.EnsureIconsLoaded()
+}
+
 func (s *Service) readerForIconSource(src IconReaderSource) *sqpack.GameReader {
 	if s == nil || s.store == nil {
 		return nil
@@ -296,7 +503,10 @@ func (s *Service) ResolveIconVariantSource(iconID int, variant string, hr1 bool)
 		return nil
 	}
 	vNorm := strings.Trim(strings.ToLower(strings.TrimSpace(variant)), "/")
-	if entry, ok := s.store.IconByID[iconID]; ok {
+	s.store.iconMu.RLock()
+	entry, ok := s.store.IconByID[iconID]
+	s.store.iconMu.RUnlock()
+	if ok {
 		for _, v := range entry.Variants {
 			if v.Variant != vNorm {
 				continue
@@ -320,7 +530,10 @@ func (s *Service) GetIconGroups() []IconGroupInfo {
 	if s == nil || s.store == nil {
 		return nil
 	}
-	return s.store.IconGroups
+	s.store.iconMu.RLock()
+	groups := s.store.IconGroups
+	s.store.iconMu.RUnlock()
+	return groups
 }
 
 // GetIconDetail 返回指定编号图标的变体元数据；不存在有效资源时返回 nil。
@@ -328,7 +541,10 @@ func (s *Service) GetIconDetail(iconID int) *IconEntry {
 	if s == nil || s.store == nil || iconID < 0 {
 		return nil
 	}
-	if entry, ok := s.store.IconByID[iconID]; ok {
+	s.store.iconMu.RLock()
+	entry, ok := s.store.IconByID[iconID]
+	s.store.iconMu.RUnlock()
+	if ok {
 		cp := entry
 		return &cp
 	}
@@ -340,7 +556,10 @@ func (s *Service) GetIconUsages(iconID int) []IconUsageRef {
 	if s == nil || s.store == nil || iconID < 0 {
 		return nil
 	}
-	return s.store.IconUsagesByID[iconID]
+	s.store.iconMu.RLock()
+	usages := s.store.IconUsagesByID[iconID]
+	s.store.iconMu.RUnlock()
+	return usages
 }
 
 // GetIconVariantImage 读取并解码指定图标变体与分辨率；maxThumbSide > 0 时按比例缩放超大贴图以节省显存。
@@ -383,22 +602,27 @@ func (s *Service) SearchIcons(query IconSearchQuery) IconSearchResponse {
 	}
 
 	var src []IconEntry
+	var usagesByID map[int][]IconUsageRef
+	s.store.iconMu.RLock()
 	if query.GroupID >= 0 {
 		src = s.store.IconsByGroup[sqpack.IconGroupID(query.GroupID)]
 	} else {
 		src = s.store.Icons
 	}
+	usagesByID = s.store.IconUsagesByID
+	s.store.iconMu.RUnlock()
 	if len(src) == 0 {
 		return IconSearchResponse{}
 	}
 
-	if qLower == "" && flt == "all" {
+	if qLower == "" && flt == "all" && !query.NewOnly {
 		return IconSearchResponse{
 			Items: src,
 			Total: len(src),
 		}
 	}
 
+	latestAdd := s.LatestAdditions()
 	exactID := -1
 	if qTrim != "" {
 		if parsed, err := strconv.Atoi(qTrim); err == nil && parsed >= 0 {
@@ -408,6 +632,9 @@ func (s *Service) SearchIcons(query IconSearchQuery) IconSearchResponse {
 
 	out := make([]IconEntry, 0, min(len(src), 256))
 	for _, ic := range src {
+		if query.NewOnly && (latestAdd == nil || !latestAdd.HasIconBaseline || !latestAdd.Icons[ic.ID]) {
+			continue
+		}
 		switch flt {
 		case "hr1":
 			if !ic.HasHR1 {
@@ -429,7 +656,7 @@ func (s *Service) SearchIcons(query IconSearchQuery) IconSearchResponse {
 				strings.Contains(strconv.Itoa(ic.ID), qLower) ||
 				strings.Contains(sqpack.IconGroupCode(ic.GroupID), qLower)
 			if !matched {
-				for _, u := range s.store.IconUsagesByID[ic.ID] {
+				for _, u := range usagesByID[ic.ID] {
 					if strings.Contains(toLowerFast(u.Name), qLower) {
 						matched = true
 						break
@@ -454,24 +681,32 @@ func (s *Store) ComputeIconDigests() ([]sqpack.IconSnapshotRecord, []sqpack.Icon
 	if s == nil {
 		return nil, nil, nil
 	}
+	if err := s.EnsureIconsLoaded(); err != nil {
+		return nil, nil, err
+	}
+	s.iconMu.RLock()
+	cnFiles := s.cnIconFiles
+	glFiles := s.globalIconFiles
+	s.iconMu.RUnlock()
+
 	var sources []sqpack.IconDigestSource
 	switch {
 	case s.PrimaryReader != nil && s.PrimaryReader == s.CNReader:
-		sources = append(sources, sqpack.IconDigestSource{Reader: s.CNReader, Files: s.cnIconFiles})
+		sources = append(sources, sqpack.IconDigestSource{Reader: s.CNReader, Files: cnFiles})
 		if s.GlobalReader != nil && s.GlobalReader != s.PrimaryReader {
-			sources = append(sources, sqpack.IconDigestSource{Reader: s.GlobalReader, Files: s.globalIconFiles})
+			sources = append(sources, sqpack.IconDigestSource{Reader: s.GlobalReader, Files: glFiles})
 		}
 	case s.PrimaryReader != nil && s.PrimaryReader == s.GlobalReader:
-		sources = append(sources, sqpack.IconDigestSource{Reader: s.GlobalReader, Files: s.globalIconFiles})
+		sources = append(sources, sqpack.IconDigestSource{Reader: s.GlobalReader, Files: glFiles})
 		if s.CNReader != nil && s.CNReader != s.PrimaryReader {
-			sources = append(sources, sqpack.IconDigestSource{Reader: s.CNReader, Files: s.cnIconFiles})
+			sources = append(sources, sqpack.IconDigestSource{Reader: s.CNReader, Files: cnFiles})
 		}
 	default:
 		if s.CNReader != nil {
-			sources = append(sources, sqpack.IconDigestSource{Reader: s.CNReader, Files: s.cnIconFiles})
+			sources = append(sources, sqpack.IconDigestSource{Reader: s.CNReader, Files: cnFiles})
 		}
 		if s.GlobalReader != nil {
-			sources = append(sources, sqpack.IconDigestSource{Reader: s.GlobalReader, Files: s.globalIconFiles})
+			sources = append(sources, sqpack.IconDigestSource{Reader: s.GlobalReader, Files: glFiles})
 		}
 	}
 	return sqpack.ComputeIconDigests(sources)

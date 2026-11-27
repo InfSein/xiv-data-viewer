@@ -246,7 +246,7 @@ func (a *App) renderLanguageSegmentedBar(c *ui.Context, keyPrefix string, compac
 		h = 26
 		padX = 8
 	}
-	ui.Row(c.Key(keyPrefix + "-track")).Padding(3).Gap(3).Radius(t.radius.md).Background(t.tint(1.1)).AlignItems(ui.Center).Shrink(0).Children(func() {
+	ui.Row(c.Key(keyPrefix + "-track")).Padding(3).Gap(3).Radius(t.radius.md).Background(t.segTrack).AlignItems(ui.Center).Shrink(0).Children(func() {
 		for _, opt := range i18n.SupportedLangs {
 			active := curLang == opt.Code
 			btn := ui.ButtonBase(c.Key(keyPrefix + "-" + string(opt.Code))).Label(opt.Autonym).
@@ -254,7 +254,7 @@ func (a *App) renderLanguageSegmentedBar(c *ui.Context, keyPrefix string, compac
 				Justify(ui.Center).AlignItems(ui.Center).
 				Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 			if active {
-				btn.Background(t.background).Border(hairline, t.border)
+				btn.Background(t.segActive).Border(hairline, t.border)
 			} else if btn.Hovered() {
 				btn.Background(t.tint(0.75))
 			}
@@ -441,7 +441,7 @@ func (a *App) renderSetupModeSelector(c *ui.Context) {
 		ui.Text(c, a.t("setup.mode_heading")).FontSize(t.text.sm).FontWeight(500).TextColor(t.foreground)
 
 		ui.Row(c.Key("setup-mode-track")).FillWidth().Padding(3).Gap(3).
-			Radius(t.radius.lg).Background(t.tint(1.1)).AlignItems(ui.Center).Children(func() {
+			Radius(t.radius.lg).Background(t.segTrack).AlignItems(ui.Center).Children(func() {
 			for _, opt := range options {
 				active := a.setupMode == opt.mode
 				btn := ui.ButtonBase(c.Key(fmt.Sprintf("setup-mode-%d", opt.mode))).Label(opt.label).
@@ -449,7 +449,7 @@ func (a *App) renderSetupModeSelector(c *ui.Context) {
 					Justify(ui.Center).AlignItems(ui.Center).
 					Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
 				if active {
-					btn.Background(t.background).Border(hairline, t.border)
+					btn.Background(t.segActive).Border(hairline, t.border)
 				} else if btn.Hovered() {
 					btn.Background(t.tint(0.75))
 				}
@@ -676,11 +676,7 @@ func (a *App) renderLoadingView(c *ui.Context) {
 								numTextf(c, "%.0f%% · %.1fs", pct, elapsedSec).FontSize(t.text.xs).TextColor(t.muted).Shrink(0)
 							})
 
-							ui.Row(c).FillWidth().Height(4).Radius(t.radius.full).Background(t.border).Clip().
-								AlignItems(ui.Stretch).Children(func() {
-								ui.Box(c).Grow(pct).FillHeight().Background(t.primary)
-								ui.Box(c).Grow(max(0, 100-pct)).FillHeight()
-							})
+							kitProgressBar(c, pct)
 						})
 
 						// 3. 三阶段真实进度清单

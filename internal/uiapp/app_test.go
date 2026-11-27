@@ -876,7 +876,7 @@ func TestAchievementsViewFiltersAndColumns(t *testing.T) {
 	if !okHdr || !okVal {
 		t.Fatalf("未定位到点数表头或数值节点: hdr=%v val=%v", okHdr, okVal)
 	}
-	if hdrPts.W < 60 || math.Abs(float64((hdrPts.X+hdrPts.W/2)-(valPts.X+valPts.W/2))) > 1.0 {
+	if hdrPts.W < 80 || math.Abs(float64((hdrPts.X+hdrPts.W/2)-(valPts.X+valPts.W/2))) > 1.0 {
 		t.Fatalf("点数列宽度或水平居中未对齐: hdr=%+v val=%+v", hdrPts, valPts)
 	}
 

@@ -162,6 +162,8 @@ type uiTokens struct {
 	accentBorder ui.Color // 主色柔和描边
 	hover        ui.Color // 实底悬停色
 	hoverTint    ui.Color // 半透明叠加悬停基色
+	segTrack     ui.Color // 分段控件 recessed 轨道底色
+	segActive    ui.Color // 分段控件激活滑块底色（浅色白底、深色抬升石板底）
 	scrim        ui.Color // 模态遮罩底色
 
 	success       ui.Color
@@ -233,6 +235,8 @@ func lightTokens() uiTokens {
 		accentBorder: pAether200.color(),
 		hover:        pSlate100.color(),
 		hoverTint:    pSlate950.color().Alpha(0.042),
+		segTrack:     pSlate950.color().Alpha(0.055),
+		segActive:    pWhite.color(),
 		scrim:        pSlate950.color().Alpha(0.24),
 
 		success:       pGreen600.color(),
@@ -271,7 +275,7 @@ func darkTokens() uiTokens {
 		sidebar:      pSlate900.color(),
 		background:   pSlate950.color(),
 		card:         pSlate900.color(),
-		raised:       pSlate900.color(),
+		raised:       midOKLCH(pSlate900, pSlate800).color(),
 		foreground:   pSlate50.color(),
 		subdued:      pSlate300.color(),
 		muted:        pSlate400.color(),
@@ -285,6 +289,8 @@ func darkTokens() uiTokens {
 		accentBorder: pAether800.color(),
 		hover:        pSlate800.color(),
 		hoverTint:    pWhite.color().Alpha(0.075),
+		segTrack:     pBlack.color().Alpha(0.32),
+		segActive:    pSlate800.color(),
 		scrim:        pBlack.color().Alpha(0.48),
 
 		success:       pGreen500.color(),
@@ -513,6 +519,29 @@ func formatStarsForLang(lang i18n.Lang, stars int) string {
 	return i18n.Tf(lang, "common.star_suffix", "stars", strconv.Itoa(stars))
 }
 
+// formatParenMeta 按界面语言返回适配的括号附加说明（英文使用半角空格加括号，中日使用全角括号）。
+func formatParenMeta(lang i18n.Lang, text string) string {
+	if text == "" {
+		return ""
+	}
+	if i18n.NormalizeLang(string(lang)) == i18n.LangEN {
+		return " (" + text + ")"
+	}
+	return "（" + text + "）"
+}
+
+// formatQuotedQuery 按界面语言返回适配的引号包裹查询词。
+func formatQuotedQuery(lang i18n.Lang, q string) string {
+	switch i18n.NormalizeLang(string(lang)) {
+	case i18n.LangJA:
+		return "「" + q + "」"
+	case i18n.LangEN:
+		return `"` + q + `"`
+	default:
+		return "“" + q + "”"
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 精炼基础组件库（清晰边界、无幽灵卡、无嵌套套娃）
 // ---------------------------------------------------------------------------
@@ -710,6 +739,7 @@ const (
 	btnSecondary
 	btnOutline
 	btnGhost
+	btnDanger
 )
 
 type btnSize uint8
@@ -721,11 +751,12 @@ const (
 )
 
 type btnOpts struct {
-	variant  btnVariant
-	size     btnSize
-	disabled bool
-	flat     bool
-	icon     *ui.SVG
+	variant   btnVariant
+	size      btnSize
+	disabled  bool
+	flat      bool
+	fillWidth bool
+	icon      *ui.SVG
 }
 
 func kitButton(c *ui.Context, key any, label string, o btnOpts) bool {
@@ -749,6 +780,9 @@ func kitButton(c *ui.Context, key any, label string, o btnOpts) bool {
 		FontSize(fs).FontWeight(500).
 		Disabled(o.disabled).DimDisabled(false).
 		Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+	if o.fillWidth {
+		b.FillWidth()
+	}
 
 	hover := b.Hovered() && !o.disabled
 	pressed := hover && b.Pressed()
@@ -805,6 +839,21 @@ func kitButton(c *ui.Context, key any, label string, o btnOpts) bool {
 			fg = t.idle
 		}
 		b.TextColor(fg)
+	case btnDanger:
+		bg := t.dangerBg
+		fg = t.dangerText
+		border := t.dangerBorder
+		if pressed {
+			bg = t.dangerBg.Mix(t.danger, 0.22)
+		} else if hover {
+			bg = t.dangerBg.Mix(t.danger, 0.12)
+		}
+		if o.disabled {
+			bg = t.dangerBg.Alpha(0.50)
+			fg = t.dangerText.Alpha(0.45)
+			border = t.dangerBorder.Alpha(0.50)
+		}
+		b.Background(bg).Border(hairline, border).TextColor(fg)
 	}
 
 	b.Children(func() {
@@ -842,12 +891,46 @@ func kitIconButton(c *ui.Context, key any, ico *ui.SVG, tip string, o btnOpts) b
 	fg := t.muted
 
 	switch o.variant {
+	case btnDefault:
+		bg := t.primary
+		fg = t.primaryText
+		if pressed {
+			bg = t.primary.Mix(t.foreground, 0.16)
+		} else if hover {
+			bg = t.primary.Mix(t.foreground, 0.08)
+		}
+		if o.disabled {
+			bg = t.primary.Alpha(0.40)
+			fg = t.primaryText.Alpha(0.75)
+		}
+		b.Background(bg)
+	case btnDanger:
+		bg := t.dangerBg
+		fg = t.dangerText
+		border := t.dangerBorder
+		if pressed {
+			bg = t.dangerBg.Mix(t.danger, 0.22)
+		} else if hover {
+			bg = t.dangerBg.Mix(t.danger, 0.12)
+		}
+		if o.disabled {
+			bg = t.dangerBg.Alpha(0.50)
+			fg = t.dangerText.Alpha(0.45)
+			border = t.dangerBorder.Alpha(0.50)
+		}
+		b.Background(bg).Border(hairline, border)
 	case btnOutline:
 		fg = t.foreground
-		b.Background(t.background).Border(strokeWidth, t.input)
-		if hover {
-			b.Background(t.hover)
+		bg := t.background
+		if pressed {
+			bg = t.hover.Mix(t.foreground, 0.05)
+		} else if hover {
+			bg = t.hover
 		}
+		if o.disabled {
+			fg = t.idle
+		}
+		b.Background(bg).Border(strokeWidth, t.input)
 	default:
 		if pressed {
 			b.Background(t.tint(2))
@@ -856,9 +939,9 @@ func kitIconButton(c *ui.Context, key any, ico *ui.SVG, tip string, o btnOpts) b
 			b.Background(t.tint(1))
 			fg = t.foreground
 		}
-	}
-	if o.disabled {
-		fg = t.idle
+		if o.disabled {
+			fg = t.idle
+		}
 	}
 
 	if tip != "" {
@@ -1019,32 +1102,34 @@ func kitSidebarItem(c *ui.Context, key any, icoLine, icoFill *ui.SVG, label, rig
 	return b.Clicked()
 }
 
-// kitSegmentedTabs 绘制分段切换器（柔和轨道 + 干净实底激活滑块）。
+// kitSegmentedTabs 绘制分段切换器（柔和轨道 + 浅/深色一致抬升的激活滑块）。
 func kitSegmentedTabs(c *ui.Context, scope string, selected int, labels []string) (int, bool) {
 	t := themeOf(c)
 	next := selected
 	changed := false
 
-	ui.Row(c.Key("seg-" + scope)).Padding(2).Gap(2).Radius(t.radius.lg).Background(t.tint(1.1)).AlignItems(ui.Center).Children(func() {
+	ui.Row(c.Key("seg-" + scope)).Padding(2).Gap(2).Radius(t.radius.lg).Background(t.segTrack).AlignItems(ui.Center).Children(func() {
 		for i, lbl := range labels {
 			active := i == selected
 			tab := ui.ButtonBase(c.Key(fmt.Sprintf("seg-%s-%d", scope, i))).Label(lbl).
 				Height(24).PaddingX(10).Radius(t.radius.md).
 				Justify(ui.Center).AlignItems(ui.Center).Cursor(ui.CursorPointer)
 			if active {
-				tab.Background(t.background).Border(hairline, t.border)
+				tab.Background(t.segActive).Border(hairline, t.border)
 			} else if tab.Hovered() {
 				tab.Background(t.tint(0.75))
 			}
 			tab.Transition(colorTransition(motionFast))
 			tab.Children(func() {
 				fg := t.muted
+				fw := 500
 				if active {
 					fg = t.foreground
+					fw = 600
 				} else if tab.Hovered() {
 					fg = t.subdued
 				}
-				ui.Text(c, lbl).FontSize(t.text.xs).FontWeight(500).TextColor(fg).SingleLine()
+				ui.Text(c, lbl).FontSize(t.text.xs).FontWeight(fw).TextColor(fg).SingleLine()
 			})
 			if tab.Clicked() && !active {
 				next = i
@@ -1152,14 +1237,17 @@ func kitInputWithContainer(c *ui.Context, key any, val *string, o kitInputOpts) 
 
 	box := ui.Row(c.Key(fmt.Sprintf("inp-box-%v", key))).Height(h).Radius(rad).
 		AlignItems(ui.Center).Gap(7).Padding(0, padX).FocusRing(false)
-	if o.tintBg {
+	switch {
+	case o.disabled:
+		box.Background(t.card)
+	case o.tintBg:
 		box.Background(t.hoverTint)
-	} else {
+	default:
 		box.Background(t.background)
 	}
 
 	borderCol := t.input
-	if o.tintBg {
+	if o.tintBg || o.disabled {
 		borderCol = t.border
 	}
 	ringCol := c.Theme().Focus.Alpha(0)
@@ -1171,13 +1259,20 @@ func kitInputWithContainer(c *ui.Context, key any, val *string, o kitInputOpts) 
 	box.Border(strokeWidth, box.AnimateColor("b", borderCol, anim)).
 		Shadow(0, 0, 0, ringWidth, box.AnimateColor("r", ringCol, anim))
 
+	textCol := t.foreground
+	icoCol := t.muted
+	if o.disabled {
+		textCol = t.idle
+		icoCol = t.idle
+	}
+
 	var field ui.Element
 	box.Children(func() {
 		if o.leading != nil {
-			ui.Icon(c, o.leading).Size(iconSm, iconSm).Shrink(0).TextColor(t.muted)
+			ui.Icon(c, o.leading).Size(iconSm, iconSm).Shrink(0).TextColor(icoCol)
 		}
 		field = ui.TextInputBase(c.Key(key), val).Placeholder(o.placeholder).Label(o.label).
-			Disabled(o.disabled).FocusRing(false).FontSize(fs).TextColor(t.foreground).
+			Disabled(o.disabled).FocusRing(false).FontSize(fs).TextColor(textCol).
 			Grow(1).Shrink(1).MinWidth(0).AlignSelf(ui.Stretch).Padding(0)
 		if o.clearable && *val != "" && !o.disabled {
 			clr := ui.ButtonBase(c.Key(fmt.Sprintf("inp-clr-%v", key))).Label(i18n.T(t.lang, "common.clear")).
@@ -1231,7 +1326,9 @@ func kitSelect[T comparable](c *ui.Context, key any, val *T, opts []selectOption
 		Background(t.background).Border(strokeWidth, t.input).
 		Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(6).
 		Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-	if trig.Hovered() {
+	if trig.Hovered() && trig.Pressed() {
+		trig.Background(t.hover.Mix(t.foreground, 0.05))
+	} else if trig.Hovered() {
 		trig.Background(t.hover)
 	}
 	trig.Children(func() {
@@ -1308,6 +1405,46 @@ func kitAlert(c *ui.Context, tone surfaceTone, text string) {
 		ui.Icon(c, ico).Size(iconSm, iconSm).Shrink(0)
 		ui.Text(c, text).FontSize(t.text.xs).Grow(1).Shrink(1).Selectable()
 	})
+}
+
+// kitProgressBar 绘制统一 4px 细进度条（pct 范围 0~100）。
+func kitProgressBar(c *ui.Context, pct float32) {
+	t := themeOf(c)
+	p := min(max(pct, 0), 100)
+	ui.Row(c).FillWidth().Height(4).Radius(t.radius.full).Background(t.border).Clip().
+		AlignItems(ui.Stretch).Children(func() {
+		ui.Box(c).Grow(p).FillHeight().Background(t.primary)
+		ui.Box(c).Grow(max(0, 100-p)).FillHeight()
+	})
+}
+
+// kitLoading 绘制统一的居中异步加载指示块（供快照解析、图标扫描与弹窗加载共用）。
+func kitLoading(c *ui.Context, title, desc string) {
+	t := themeOf(c)
+	ui.Column(c).Grow(1).FillWidth().Center().Padding(32, 24).Gap(10).Children(func() {
+		ui.Spinner(c).FontSize(20).TextColor(t.primary).Label(title)
+		if title != "" {
+			ui.Text(c, title).FontSize(t.text.sm).FontWeight(600).TextColor(t.foreground).TextAlign(ui.Center)
+		}
+		if desc != "" {
+			ui.Text(c, desc).FontSize(t.text.xs).LineHeight(lineProse).TextColor(t.muted).TextAlign(ui.Center).MaxWidth(420)
+		}
+	})
+}
+
+// kitLinkSurface 为可点击实体跳转卡片/芯片应用统一的交互表面（清晰 1px 边框 + 悬停抬升，与无边框静态信息块形成明确区分）。
+func kitLinkSurface(c *ui.Context, btn ui.Element) ui.Element {
+	t := themeOf(c)
+	btn.Background(t.background).Border(hairline, t.border).
+		Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+	if btn.Hovered() {
+		if btn.Pressed() {
+			btn.Background(t.tint(1.75)).Border(hairline, t.input)
+		} else {
+			btn.Background(t.card).Border(hairline, t.input)
+		}
+	}
+	return btn
 }
 
 // kitEmpty 绘制居中空状态占位块。
@@ -1390,6 +1527,8 @@ var (
 	icoFolder = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6.5A2 2 0 0 1 5 4.5h4.2l2 2H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-11Z"/></svg>`))
 
 	icoDownload = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><polyline points="7.5 10.5 12 15 16.5 10.5"/><path d="M4 19h16"/></svg>`))
+
+	icoTrash = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>`))
 
 	icoCopy = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>`))
 

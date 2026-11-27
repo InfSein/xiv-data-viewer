@@ -31,7 +31,8 @@ func (a *App) hasQuestFilter() bool {
 	return strings.TrimSpace(a.questQuery.Q) != "" ||
 		a.questQuery.Filter != "all" ||
 		a.questQuery.SectionID >= 0 ||
-		a.questQuery.ExpansionID >= 0
+		a.questQuery.ExpansionID >= 0 ||
+		a.questQuery.NewOnly
 }
 
 func (a *App) resetQuestFilters() {
@@ -91,6 +92,11 @@ func (a *App) renderQuestListPane(c *ui.Context) {
 						a.questQuery.Page = 1
 						a.refreshQuests()
 					}
+				}
+				if a.renderLatestFilterChip(c, "q-scope-latest-new", a.latestQuestCount(), a.questQuery.NewOnly) {
+					a.questQuery.NewOnly = !a.questQuery.NewOnly
+					a.questQuery.Page = 1
+					a.refreshQuests()
 				}
 			})
 		})
@@ -191,6 +197,9 @@ func (a *App) renderQuestListRow(c *ui.Context, key string, q gamedata.QuestEntr
 				}
 				ui.Text(c, title).FontSize(t.text.sm).FontWeight(fw).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
 				ui.Row(c).Gap(4).AlignItems(ui.Center).Shrink(0).Children(func() {
+					if a.isNewQuest(q.ID) {
+						a.drawLatestBadge(c)
+					}
 					if favorited {
 						ui.Icon(c, icoStarFill).Size(11, 11).TextColor(t.attention)
 					}
@@ -346,6 +355,9 @@ func (a *App) renderQuestDetailHero(c *ui.Context, q *gamedata.QuestEntry) {
 		ui.Column(c).Gap(6).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 			ui.Row(c).Gap(8).AlignItems(ui.Baseline).Wrap().Children(func() {
 				ui.Text(c, title).FontSize(t.text.xl).FontWeight(600).LetterSpacing(-0.3).TextColor(t.foreground).Selectable()
+				if a.isNewQuest(q.ID) {
+					a.drawLatestBadge(c)
+				}
 				numTextf(c, "#%d", q.ID).FontSize(t.text.xs).TextColor(t.muted).Selectable()
 			})
 			if secLines := a.secondaryDataLines(title, q.NameJa, q.NameEn); len(secLines) > 0 {
@@ -469,13 +481,9 @@ func (a *App) renderQuestRewardsSection(c *ui.Context, q *gamedata.QuestEntry, o
 		drawDetailSection(c, a.t("quests.item_rewards"), a.tf("common.items_count", "count", fmt.Sprintf("%d", len(q.RewardItems))), nil, func() {
 			ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 				for rIdx, ri := range q.RewardItems {
-					btn := ui.ButtonBase(c.Key(fmt.Sprintf("qrew-%d-%d-%d", q.ID, ri.ItemID, rIdx))).Label(a.tf("common.view_item", "name", ri.ItemName)).
+					btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("qrew-%d-%d-%d", q.ID, ri.ItemID, rIdx))).Label(a.tf("common.view_item", "name", ri.ItemName)).
 						MinWidth(230).Grow(1).Shrink(1).Padding(7, 10).Radius(t.radius.lg).
-						Background(t.card).Border(hairline, t.border).Justify(ui.SpaceBetween).AlignItems(ui.Center).
-						Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-					if btn.Hovered() {
-						btn.Background(t.tint(1.5))
-					}
+						Justify(ui.SpaceBetween).AlignItems(ui.Center))
 					btn.Children(func() {
 						ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 							a.drawGameIcon(c, ri.IconID, ri.IsHQ, 26, t.radius.md)
@@ -508,7 +516,7 @@ func (a *App) renderQuestRewardsSection(c *ui.Context, q *gamedata.QuestEntry, o
 			ui.Row(c).FillWidth().Gap(8).Wrap().Children(func() {
 				for uIdx, u := range q.Unlocks {
 					ui.Row(c.Key(fmt.Sprintf("qunl-%d-%d", q.ID, uIdx))).Padding(6, 10).Radius(t.radius.md).
-						Background(t.card).Border(hairline, t.border).Gap(6).AlignItems(ui.Center).Children(func() {
+						Background(t.card).Gap(6).AlignItems(ui.Center).Children(func() {
 						if u.IconID > 0 {
 							a.drawGameIcon(c, u.IconID, false, 20, t.radius.sm)
 						}
@@ -579,12 +587,8 @@ func (a *App) renderQuestRequirementsSection(c *ui.Context, q *gamedata.QuestEnt
 					ui.Text(c, lbl).FontSize(t.text.xs).TextColor(t.muted)
 					for idx, pqID := range q.PreviousQuestIDs {
 						pqName := gamedata.CleanQuestTitle(q.PreviousQuestNames[idx])
-						btn := ui.ButtonBase(c.Key(fmt.Sprintf("pq-%d-%d", q.ID, pqID))).Label(a.tf("common.view_quest", "name", pqName)).
-							Padding(4, 9).Radius(t.radius.md).Background(t.card).Border(hairline, t.border).
-							Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-						if btn.Hovered() {
-							btn.Background(t.tint(1.5))
-						}
+						btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("pq-%d-%d", q.ID, pqID))).Label(a.tf("common.view_quest", "name", pqName)).
+							Padding(4, 9).Radius(t.radius.md))
 						btn.Children(func() {
 							ui.Text(c, pqName).FontSize(t.text.xs).FontWeight(500).TextColor(t.infoText)
 						})
@@ -599,7 +603,12 @@ func (a *App) renderQuestRequirementsSection(c *ui.Context, q *gamedata.QuestEnt
 					ui.Text(c, a.t("quests.lock_quests")).FontSize(t.text.xs).TextColor(t.muted)
 					for idx, lID := range q.QuestLockIDs {
 						lName := gamedata.CleanQuestTitle(q.QuestLockNames[idx])
-						if kitButton(c, fmt.Sprintf("qlock-%d-%d", q.ID, lID), lName, btnOpts{variant: btnOutline, size: btnSizeXs}) {
+						btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("qlock-%d-%d", q.ID, lID))).Label(a.tf("common.view_quest", "name", lName)).
+							Padding(4, 9).Radius(t.radius.md))
+						btn.Children(func() {
+							ui.Text(c, lName).FontSize(t.text.xs).FontWeight(500).TextColor(t.infoText)
+						})
+						if btn.Clicked() {
 							onJumpQuest(lID)
 						}
 					}
@@ -746,8 +755,7 @@ func (a *App) renderQuestCutscenesSection(c *ui.Context, keyPrefix string, q *ga
 	meta := a.tf("quests.cutscenes_meta", "count", formatInt(len(q.Cutscenes)))
 	drawDetailSection(c, a.t("quests.cutscenes_title"), meta, nil, func() {
 		if loading {
-			ui.Row(c).FillWidth().Padding(8, 12).Gap(8).AlignItems(ui.Center).
-				Radius(t.radius.lg).Background(t.card).Border(hairline, t.border).Children(func() {
+			ui.Row(c).FillWidth().Padding(4, 0).Gap(8).AlignItems(ui.Center).Children(func() {
 				ui.Spinner(c).FontSize(13).TextColor(t.primary).Label(a.t("quests.loading_cutscenes"))
 				ui.Text(c, a.t("quests.loading_cutscenes")).FontSize(t.text.xs).TextColor(t.muted)
 			})
@@ -768,7 +776,7 @@ func (a *App) renderQuestCutscenesSection(c *ui.Context, keyPrefix string, q *ga
 			}
 		}
 
-		kitCard(c, ui.Column(c).FillWidth().Padding(10, 14).Gap(10), toneCard).Children(func() {
+		ui.Column(c).FillWidth().Gap(10).Children(func() {
 			for idx, cs := range list {
 				if idx > 0 {
 					kitSeparator(c, false)
@@ -797,15 +805,10 @@ func (a *App) renderQuestCutscenesSection(c *ui.Context, keyPrefix string, q *ga
 
 					ui.Column(c).FillWidth().Gap(4).Children(func() {
 						for bIdx, bgm := range cs.BGMs {
-							btn := ui.ButtonBase(c.Key(fmt.Sprintf("%s-qcs-%d-%d-%d-%d", keyPrefix, q.ID, cs.CutsceneID, idx, bIdx))).
+							btn := kitLinkSurface(c, ui.ButtonBase(c.Key(fmt.Sprintf("%s-qcs-%d-%d-%d-%d", keyPrefix, q.ID, cs.CutsceneID, idx, bIdx))).
 								Label(fmt.Sprintf("%s #%d", bgm.Title, bgm.BGMID)).
 								FillWidth().Padding(6, 10).Radius(t.radius.md).
-								Background(t.tint(0.75)).Border(hairline, t.border).
-								Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).
-								Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-							if btn.Hovered() {
-								btn.Background(t.tint(1.75))
-							}
+								Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8))
 							btn.Children(func() {
 								ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 									ui.Icon(c, icoMusic).Size(iconXs, iconXs).Shrink(0).TextColor(t.primary)

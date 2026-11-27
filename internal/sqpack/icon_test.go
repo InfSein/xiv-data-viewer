@@ -106,6 +106,38 @@ func TestScanSyntheticIconArchiveSkipsEmpty(t *testing.T) {
 	if got[0].IconID != 0 || got[1].IconID != 37618 {
 		t.Fatalf("扫描图标顺序或 ID 不符: %+v", got)
 	}
+
+	// 验证版本指纹缓存写入、二次命中复用以及客户端更新后自动失效重扫
+	cacheDir := filepath.Join(tmp, "icon-cache")
+	cached1, err := ScanIconFilesCached(reader, cacheDir)
+	if err != nil {
+		t.Fatalf("首次 ScanIconFilesCached 失败: %v", err)
+	}
+	if len(cached1) != 2 || cached1[0].IconID != 0 || cached1[1].IconID != 37618 {
+		t.Fatalf("首次缓存扫描结果异常: %+v", cached1)
+	}
+	cacheEntries, err := os.ReadDir(cacheDir)
+	if err != nil || len(cacheEntries) != 1 {
+		t.Fatalf("期望写入 1 个图标缓存文件，实际 %d (err=%v)", len(cacheEntries), err)
+	}
+
+	cached2, err := ScanIconFilesCached(reader, cacheDir)
+	if err != nil || len(cached2) != 2 || cached2[1].Path != "ui/icon/037000/037618.tex" {
+		t.Fatalf("命中缓存读取异常: len=%d err=%v", len(cached2), err)
+	}
+
+	// 模拟游戏版本更新：更新 ffxivgame.ver 后应生成新指纹缓存而非误用旧缓存
+	if err := os.WriteFile(filepath.Join(tmp, "ffxivgame.ver"), []byte("2026.12.01.0000.0000"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cached3, err := ScanIconFilesCached(reader, cacheDir)
+	if err != nil || len(cached3) != 2 {
+		t.Fatalf("版本变更后重扫失败: len=%d err=%v", len(cached3), err)
+	}
+	cacheEntries2, err := os.ReadDir(cacheDir)
+	if err != nil || len(cacheEntries2) < 2 {
+		t.Fatalf("期望版本变更后生成新的指纹缓存文件，实际 %d", len(cacheEntries2))
+	}
 }
 
 func TestDownscaleAndPNGBestSpeed(t *testing.T) {

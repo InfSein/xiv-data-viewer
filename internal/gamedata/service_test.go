@@ -214,3 +214,62 @@ func TestRealGameDataService(t *testing.T) {
 		}
 	}
 }
+
+func TestRealGameDataDeferredIconsLoad(t *testing.T) {
+	cfg := config.LoadAppConfigFromEnv(filepath.Join("..", "..", ".env"))
+	resolved, err := config.ValidateAndResolve(cfg)
+	if err != nil {
+		t.Skipf("本地未配置可用 FF14 客户端，跳过延迟图标加载实测: %v", err)
+	}
+
+	schemasFS := os.DirFS(filepath.Join("..", "..", "schemas"))
+	cacheDir := t.TempDir()
+
+	t0 := time.Now()
+	store, err := LoadGameDataStoreWithOptions(resolved, schemasFS, StoreLoadOptions{
+		AppLang:      i18n.LangZH,
+		DeferIcons:   true,
+		IconCacheDir: cacheDir,
+	})
+	if err != nil {
+		t.Fatalf("延迟图标模式加载失败: %v", err)
+	}
+	defer store.Close()
+	bootElapsed := time.Since(t0)
+
+	if store.IconsReady() {
+		t.Fatalf("DeferIcons=true 刚加载完成时 IconsReady 应为 false")
+	}
+
+	t1 := time.Now()
+	if err := store.EnsureIconsLoaded(); err != nil {
+		t.Fatalf("首次 EnsureIconsLoaded 失败: %v", err)
+	}
+	firstIconElapsed := time.Since(t1)
+
+	if !store.IconsReady() || len(store.Icons) < 10000 {
+		t.Fatalf("EnsureIconsLoaded 完成后图标索引异常: ready=%v count=%d", store.IconsReady(), len(store.Icons))
+	}
+
+	// 二次打开并命中磁盘指纹缓存验证加速效果
+	store2, err := LoadGameDataStoreWithOptions(resolved, schemasFS, StoreLoadOptions{
+		AppLang:      i18n.LangZH,
+		DeferIcons:   true,
+		IconCacheDir: cacheDir,
+	})
+	if err != nil {
+		t.Fatalf("二次加载失败: %v", err)
+	}
+	defer store2.Close()
+
+	t2 := time.Now()
+	if err := store2.EnsureIconsLoaded(); err != nil {
+		t.Fatalf("命中缓存 EnsureIconsLoaded 失败: %v", err)
+	}
+	cachedIconElapsed := time.Since(t2)
+	if len(store2.Icons) != len(store.Icons) {
+		t.Fatalf("缓存加载图标数不一致: got=%d want=%d", len(store2.Icons), len(store.Icons))
+	}
+	t.Logf("延迟图标启动耗时=%s | 首次后台图标索引=%s | 命中指纹缓存图标索引=%s | 图标总数=%d",
+		bootElapsed, firstIconElapsed, cachedIconElapsed, len(store.Icons))
+}

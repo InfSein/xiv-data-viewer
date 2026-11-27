@@ -122,9 +122,18 @@ type DiffItemEntry struct {
 	IsPurchasable        bool              `json:"isPurchasable"`
 	HasCollectableChange bool              `json:"hasCollectableChange,omitempty"`
 	Points               int               `json:"points"`
+	DescriptionCn        string            `json:"descriptionCn,omitempty"`
+	AchKindName          string            `json:"achKindName,omitempty"`
+	AchCategoryName      string            `json:"achCategoryName,omitempty"`
+	TitleID              int               `json:"titleId,omitempty"`
 	TitleNameCn          string            `json:"titleNameCn"`
+	TitleMasculineCn     string            `json:"titleMasculineCn,omitempty"`
+	TitleFeminineCn      string            `json:"titleFeminineCn,omitempty"`
+	TitleNameJa          string            `json:"titleNameJa,omitempty"`
+	TitleNameEn          string            `json:"titleNameEn,omitempty"`
 	RewardItemID         int               `json:"rewardItemId"`
 	RewardItemNameCn     string            `json:"rewardItemNameCn"`
+	RewardItemIconID     int               `json:"rewardItemIconId,omitempty"`
 	IconVariantSummary   string            `json:"iconVariantSummary,omitempty"`
 	OldBlobKey           string            `json:"oldBlobKey,omitempty"`
 	NewBlobKey           string            `json:"newBlobKey,omitempty"`
@@ -168,6 +177,9 @@ type DiffSummary struct {
 	AddedIcons                int  `json:"addedIcons"`
 	ModifiedIcons             int  `json:"modifiedIcons"`
 	RemovedIcons              int  `json:"removedIcons"`
+	IconDiffAvailable         bool `json:"iconDiffAvailable"`
+	IconMissingFrom           bool `json:"iconMissingFrom,omitempty"`
+	IconMissingTo             bool `json:"iconMissingTo,omitempty"`
 	ModifiedTexts             int  `json:"modifiedTexts"`
 	RemovedTexts              int  `json:"removedTexts"`
 	TextDiffAvailable         bool `json:"textDiffAvailable"`
@@ -289,8 +301,11 @@ type compactAchievementRecord struct {
 	TitleID          int
 	TitleMasculineCn string
 	TitleFeminineCn  string
+	TitleNameJa      string
+	TitleNameEn      string
 	RewardItemID     int
 	RewardItemNameCn string
+	RewardItemIconID int
 }
 
 type compactBGMRecord struct {
@@ -349,6 +364,7 @@ type Service struct {
 	parsedSeq          uint64
 	liveIconCache      map[string][]compactIconRecord // key: region
 	liveIconComputedAt map[string]bool                // key: region
+	latestAddCache     *cachedLatestAdditions
 
 	textMu        sync.Mutex
 	textCache     map[string][]textSheetRows
@@ -424,6 +440,7 @@ func (s *Service) Close() {
 	}
 	clear(s.parsedCache)
 	clear(s.liveRegionStores)
+	s.latestAddCache = nil
 	s.mu.Unlock()
 
 	s.textMu.Lock()
@@ -644,6 +661,7 @@ func (s *Service) invalidateLiveRegionCacheLocked(region string) {
 	}
 	delete(s.liveIconCache, region)
 	delete(s.liveIconComputedAt, region)
+	s.latestAddCache = nil
 	s.textMu.Lock()
 	for k := range s.textCache {
 		if strings.HasPrefix(k, prefix) {
@@ -656,6 +674,7 @@ func (s *Service) invalidateLiveRegionCacheLocked(region string) {
 }
 
 func (s *Service) invalidatePatchCachesLocked(patch string) {
+	s.latestAddCache = nil
 	for _, reg := range []string{snapshot.RegionCN, snapshot.RegionGlobal} {
 		snapID := snapshot.MakeSnapshotID(reg, patch)
 		if arch, ok := s.archives[snapID]; ok {
@@ -714,6 +733,7 @@ func (s *Service) RefreshCatalog(ctx context.Context) (VersionStatusResponse, er
 	s.catalog = cat
 	s.catalogLoaded = true
 	s.catalogErr = ""
+	s.latestAddCache = nil
 	return s.statusLocked(), nil
 }
 
@@ -999,10 +1019,14 @@ func (s *Service) statusLocked() VersionStatusResponse {
 		}
 		defFrom := ""
 		for _, d := range downloaded {
-			if d.Version != liveVer && d.ID != defTo {
-				defFrom = d.ID
-				break
+			if d.ID == defTo {
+				continue
 			}
+			if isSameOrNewerThanLive(d, liveVer, livePatch) {
+				continue
+			}
+			defFrom = d.ID
+			break
 		}
 		if defFrom == "" {
 			for _, d := range downloaded {
@@ -1408,6 +1432,13 @@ func (s *Service) compareVersions(query VersionDiffQuery, paginate bool) (Versio
 	allEntries = append(allEntries, diffAchievements(lang, fromSnap, toSnap, &summary)...)
 	allEntries = append(allEntries, diffBGMs(lang, fromSnap, toSnap, &summary)...)
 	iconEntries := diffIcons(lang, fromSnap, toSnap, &summary)
+	if needIcons {
+		summary.IconMissingFrom = len(fromSnap.Icons) == 0
+		summary.IconMissingTo = len(toSnap.Icons) == 0
+		summary.IconDiffAvailable = !summary.IconMissingFrom && !summary.IconMissingTo
+	} else {
+		summary.IconDiffAvailable = len(fromSnap.Icons) > 0 && len(toSnap.Icons) > 0
+	}
 	summary.AddedRecipes = max(0, toSnap.RecipeCount-fromSnap.RecipeCount)
 
 	textEntries, textMod, textRem, textAvail := s.computeTextDiffLocked(region, lang, fromID, toID, entityType == "text")
@@ -1993,9 +2024,18 @@ func diffAchievements(lang i18n.Lang, fromSnap, toSnap *snapshotPayload, summary
 				ItemLevel:        toAch.Points,
 				CategoryName:     i18n.Tf(lang, "backup.ach_cat", "kind", toAch.KindName, "cat", toAch.CategoryName),
 				Points:           toAch.Points,
+				DescriptionCn:    toAch.DescriptionCn,
+				AchKindName:      toAch.KindName,
+				AchCategoryName:  toAch.CategoryName,
+				TitleID:          toAch.TitleID,
 				TitleNameCn:      titleDisp,
+				TitleMasculineCn: toAch.TitleMasculineCn,
+				TitleFeminineCn:  toAch.TitleFeminineCn,
+				TitleNameJa:      toAch.TitleNameJa,
+				TitleNameEn:      toAch.TitleNameEn,
 				RewardItemID:     toAch.RewardItemID,
 				RewardItemNameCn: toAch.RewardItemNameCn,
+				RewardItemIconID: toAch.RewardItemIconID,
 				Changes: []ItemFieldChange{{
 					Field:  "achievement",
 					Label:  i18n.T(lang, "backup.ach_added"),
@@ -2022,9 +2062,18 @@ func diffAchievements(lang i18n.Lang, fromSnap, toSnap *snapshotPayload, summary
 				ItemLevel:        toAch.Points,
 				CategoryName:     i18n.Tf(lang, "backup.ach_cat", "kind", toAch.KindName, "cat", toAch.CategoryName),
 				Points:           toAch.Points,
+				DescriptionCn:    toAch.DescriptionCn,
+				AchKindName:      toAch.KindName,
+				AchCategoryName:  toAch.CategoryName,
+				TitleID:          toAch.TitleID,
 				TitleNameCn:      titleDisp,
+				TitleMasculineCn: toAch.TitleMasculineCn,
+				TitleFeminineCn:  toAch.TitleFeminineCn,
+				TitleNameJa:      toAch.TitleNameJa,
+				TitleNameEn:      toAch.TitleNameEn,
 				RewardItemID:     toAch.RewardItemID,
 				RewardItemNameCn: toAch.RewardItemNameCn,
+				RewardItemIconID: toAch.RewardItemIconID,
 				Changes:          achChanges,
 			})
 		}
@@ -2033,17 +2082,33 @@ func diffAchievements(lang i18n.Lang, fromSnap, toSnap *snapshotPayload, summary
 	for _, fromAch := range fromSnap.Achievements {
 		if _, exists := toAchs[fromAch.ID]; !exists {
 			summary.RemovedAchievements++
+			fromTitle := fromAch.TitleMasculineCn
+			if fromAch.TitleMasculineCn != "" && fromAch.TitleFeminineCn != "" && fromAch.TitleMasculineCn != fromAch.TitleFeminineCn {
+				fromTitle = fromAch.TitleMasculineCn + " / " + fromAch.TitleFeminineCn
+			}
 			entries = append(entries, DiffItemEntry{
-				ID:           fromAch.ID,
-				EntityType:   "achievement",
-				ChangeType:   "removed",
-				NameCn:       fromAch.NameCn,
-				NameEn:       fromAch.NameEn,
-				NameJa:       fromAch.NameJa,
-				IconID:       fromAch.IconID,
-				ItemLevel:    fromAch.Points,
-				CategoryName: i18n.Tf(lang, "backup.ach_cat", "kind", fromAch.KindName, "cat", fromAch.CategoryName),
-				Points:       fromAch.Points,
+				ID:               fromAch.ID,
+				EntityType:       "achievement",
+				ChangeType:       "removed",
+				NameCn:           fromAch.NameCn,
+				NameEn:           fromAch.NameEn,
+				NameJa:           fromAch.NameJa,
+				IconID:           fromAch.IconID,
+				ItemLevel:        fromAch.Points,
+				CategoryName:     i18n.Tf(lang, "backup.ach_cat", "kind", fromAch.KindName, "cat", fromAch.CategoryName),
+				Points:           fromAch.Points,
+				DescriptionCn:    fromAch.DescriptionCn,
+				AchKindName:      fromAch.KindName,
+				AchCategoryName:  fromAch.CategoryName,
+				TitleID:          fromAch.TitleID,
+				TitleNameCn:      fromTitle,
+				TitleMasculineCn: fromAch.TitleMasculineCn,
+				TitleFeminineCn:  fromAch.TitleFeminineCn,
+				TitleNameJa:      fromAch.TitleNameJa,
+				TitleNameEn:      fromAch.TitleNameEn,
+				RewardItemID:     fromAch.RewardItemID,
+				RewardItemNameCn: fromAch.RewardItemNameCn,
+				RewardItemIconID: fromAch.RewardItemIconID,
 				Changes: []ItemFieldChange{{
 					Field:  "achievement",
 					Label:  i18n.T(lang, "backup.ach_removed"),
@@ -2604,8 +2669,11 @@ func buildPayloadFromStore(
 			TitleID:          a.TitleID,
 			TitleMasculineCn: a.TitleMasculineCn,
 			TitleFeminineCn:  a.TitleFeminineCn,
+			TitleNameJa:      a.TitleNameJa,
+			TitleNameEn:      a.TitleNameEn,
 			RewardItemID:     a.RewardItemID,
 			RewardItemNameCn: a.RewardItemNameCn,
+			RewardItemIconID: a.RewardItemIconID,
 		})
 	}
 

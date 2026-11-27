@@ -50,14 +50,24 @@ func (s *Service) loadLiveIconsForRegionLocked(region string, liveStore *gamedat
 		return s.liveIconCache[reg]
 	}
 	s.liveIconComputedAt[reg] = true
-	if liveStore == nil || len(liveStore.Icons) == 0 {
+	if liveStore == nil {
+		return nil
+	}
+
+	// 若启动阶段采用后台延迟加载图标索引，此处先等待完成并直接复用扫描结果，避免重复扫盘
+	if liveStore.CNReader != nil || liveStore.GlobalReader != nil || liveStore.PrimaryReader != nil {
+		_ = liveStore.EnsureIconsLoaded()
+	}
+
+	iconsSnap := liveStore.SnapshotIconsForExport(-1)
+	if len(iconsSnap) == 0 {
 		return nil
 	}
 
 	// 无底层客户端归档时（纯内存测试 Store）根据内存图标元数据生成轻量指纹
 	if liveStore.CNReader == nil && liveStore.GlobalReader == nil && liveStore.PrimaryReader == nil {
-		out := make([]compactIconRecord, 0, len(liveStore.Icons))
-		for _, ic := range liveStore.Icons {
+		out := make([]compactIconRecord, 0, len(iconsSnap))
+		for _, ic := range iconsSnap {
 			var parts []string
 			for _, v := range ic.Variants {
 				vn := v.Variant
@@ -101,9 +111,13 @@ func (s *Service) loadLiveIconsForRegionLocked(region string, liveStore *gamedat
 	if targetReader == nil {
 		return nil
 	}
-	files, err := sqpack.ScanIconFiles(targetReader)
-	if err != nil || len(files) == 0 {
-		return nil
+	files := liveStore.IconFilesForRegion(reg)
+	if len(files) == 0 {
+		var err error
+		files, err = sqpack.ScanIconFiles(targetReader)
+		if err != nil || len(files) == 0 {
+			return nil
+		}
 	}
 	snaps, _, err := sqpack.ComputeIconDigests([]sqpack.IconDigestSource{{
 		Reader: targetReader,

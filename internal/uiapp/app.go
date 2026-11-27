@@ -252,6 +252,10 @@ type App struct {
 	musicPlayer        *musicPlayer
 
 	// 「图标」视图与导出状态
+	iconIndexLoading       bool
+	iconIndexError         string
+	iconIndexSeq           uint64
+	pendingInspectIconID   int // < 0 表示无待跳转目标
 	iconGroupListW         float32
 	iconGroupFilterQ       string
 	iconQuery              gamedata.IconSearchQuery
@@ -384,6 +388,7 @@ type App struct {
 	diffTextCopiedKey        string
 	diffTextCopiedEnd        time.Time
 	snapMgrOpen              bool
+	snapMgrFilter            string // all|downloaded|not_downloaded
 	snapMgrScroll            ui.ScrollState
 	snapCatalogBusy          bool
 	snapCatalogTried         bool
@@ -394,6 +399,8 @@ type App struct {
 	snapDownCancel           context.CancelFunc
 	snapMgrNotice            string
 	snapMgrError             string
+	latestAdd                *gamedata.LatestPatchAdditions
+	latestAddSeq             uint64
 	diffExportOpen           bool
 	diffExportKind           exporter.DiffExportKind
 	diffExportPreferHR1      bool
@@ -405,7 +412,6 @@ type App struct {
 	diffExportError          string
 
 	// 全量文本检索视图状态
-	textSearchLang      string
 	textSearchQ         string
 	textSearchScope     gamedata.TextSearchScope
 	textSearchSheet     string
@@ -423,8 +429,6 @@ type App struct {
 	textSearchRunCancel context.CancelFunc
 	textSearchBusy      bool
 	textSearchExpanded  map[uint32]bool
-	textSearchCopiedDoc uint32
-	textSearchCopiedEnd time.Time
 	textIndexCache      map[string]*gamedata.TextSearchIndex
 
 	// 更新日志视图状态
@@ -566,6 +570,7 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 		diffPageStr:        "1",
 		diffIconCache:      make(map[string]*ui.Bitmap),
 		diffTextExpanded:   make(map[string]bool),
+		snapMgrFilter:      "all",
 		textSearchScope:    gamedata.TextScopeAll,
 		textSearchPage:     1,
 		textSearchPageSize: 50,
@@ -583,6 +588,7 @@ func NewApp(appVersion, dataDir string, schemasFS fs.FS) *App {
 			"fr":  true,
 		},
 		exportDirDraft:        cfg.ExportOutputDir,
+		pendingInspectIconID:  -1,
 		iconGroupListW:        iconGroupListDefWidth,
 		iconQuery:             gamedata.IconSearchQuery{GroupID: -1, VariantFilter: "all"},
 		iconGridSelIdx:        -1,
@@ -935,16 +941,17 @@ func (a *App) SetThemeMode(mode string) {
 	a.saveConfigAsync()
 }
 
-// AttachWindow 绑定主窗口实例与窗口材质状态，预热三语字体、触发启动静默更新并在已有有效路径配置时启动异步加载。
+// AttachWindow 绑定主窗口实例与窗口材质状态，触发启动静默更新并在已有有效路径配置时启动异步加载。
 func (a *App) AttachWindow(win *mygo.Window, vibrancy bool) {
 	a.win = win
 	a.vibrancy = vibrancy
 	if win != nil {
-		prewarmLanguageFonts()
 		a.StartStartupUpdateCheck()
 	}
 	if a.mode == modeLoading {
 		a.startAsyncLoad(a.cfg)
+	} else if win != nil {
+		prewarmLanguageFonts()
 	}
 }
 
@@ -1013,6 +1020,10 @@ func (a *App) switchTabSideEffects(next activeTab) {
 		a.ensureRecentSelection()
 	case tabFavorites:
 		a.ensureFavoriteSelection()
+	case tabIcons:
+		if a.service != nil && !a.service.IconsReady() && !a.iconIndexLoading {
+			a.startBackgroundIconIndexLoad()
+		}
 	case tabTextSearch:
 		a.ensureTextSearchReady()
 	}
@@ -1052,7 +1063,8 @@ func (a *App) View(c *ui.Context) {
 			(a.exportProgress != nil && a.exportProgress.IsRunning) ||
 			(a.diffExportProgress != nil && a.diffExportProgress.IsRunning)
 		snapActive := a.diffBusy || a.snapCatalogBusy || a.snapDownID != ""
-		if musicPlaying || exportRunning || a.textSearchIdxBusy || a.textSearchBusy || snapActive {
+		iconLoadingActive := a.iconIndexLoading && (a.tab == tabIcons || a.iconExportOpen)
+		if musicPlaying || exportRunning || a.textSearchIdxBusy || a.textSearchBusy || snapActive || iconLoadingActive {
 			c.After(120 * time.Millisecond)
 		} else {
 			c.After(time.Second)
@@ -1165,6 +1177,71 @@ func (a *App) snapshotDir() string {
 	return filepath.Join(a.dataDir, "snapshots")
 }
 
+func (a *App) iconCacheDir() string {
+	if strings.TrimSpace(a.dataDir) == "" {
+		return ""
+	}
+	return filepath.Join(a.dataDir, "cache")
+}
+
+func (a *App) isIconIndexPending() bool {
+	return a.service != nil && !a.service.IconsReady()
+}
+
+// startBackgroundIconIndexLoad 在进入主界面后于后台静默扫描并构建全量图标索引，不阻塞应用启动。
+func (a *App) startBackgroundIconIndexLoad() {
+	svc := a.service
+	if svc == nil || svc.IconsReady() || a.iconIndexLoading {
+		return
+	}
+	a.iconIndexSeq++
+	seq := a.iconIndexSeq
+	a.iconIndexLoading = true
+	a.iconIndexError = ""
+
+	applyDone := func(err error) {
+		if a.iconIndexSeq != seq || a.service != svc {
+			return
+		}
+		a.iconIndexLoading = false
+		if err != nil {
+			a.iconIndexError = err.Error()
+			return
+		}
+		a.iconIndexError = ""
+		st := svc.GetSystemStatus()
+		a.status = &st
+		if cached, ok := a.langCache[a.Language()]; ok && cached != nil && cached.service == svc {
+			cached.status = st
+		}
+		a.syncAvailableIconExportVariants()
+
+		pendingID := a.pendingInspectIconID
+		a.pendingInspectIconID = -1
+		if pendingID >= 0 && a.tab == tabIcons {
+			a.inspectIconFromOtherTab(pendingID)
+		} else {
+			a.refreshIcons(a.selectedIconID < 0)
+		}
+		if a.backupSvc != nil {
+			a.refreshLatestAdditions()
+		}
+	}
+
+	if a.win == nil {
+		err := svc.EnsureIconsLoaded()
+		applyDone(err)
+		return
+	}
+
+	go func() {
+		err := svc.EnsureIconsLoaded()
+		a.dispatchUI(func() {
+			applyDone(err)
+		})
+	}()
+}
+
 // resetLangCacheAndReaders 释放已缓存的多语言数据仓库与共享只读 SqPack 句柄，并清空贴图缓存。
 // 仅在客户端路径变更或应用退出时调用，常规切换语言不调用以保留图标与会话缓存。
 func (a *App) resetLangCacheAndReaders() {
@@ -1173,7 +1250,6 @@ func (a *App) resetLangCacheAndReaders() {
 	clear(a.textIndexCache)
 	a.textSearchRes = gamedata.TextSearchResponse{}
 	a.textSearchIdxErr = ""
-	a.textSearchLang = ""
 	if a.exporterSvc != nil {
 		a.exporterSvc.Cancel()
 	}
@@ -1220,6 +1296,8 @@ func (a *App) resetLangCacheAndReaders() {
 	a.diffExporterSvc = nil
 	a.status = nil
 	a.versionStatus = nil
+	a.latestAdd = nil
+	a.latestAddSeq++
 
 	if a.sharedCNReader != nil {
 		_ = a.sharedCNReader.Close()
@@ -1238,6 +1316,10 @@ func (a *App) resetLangCacheAndReaders() {
 	clear(a.iconPreviewCache)
 	clear(a.diffIconCache)
 	a.iconExportTaskCountKey = ""
+	a.iconIndexLoading = false
+	a.iconIndexError = ""
+	a.iconIndexSeq++
+	a.pendingInspectIconID = -1
 	a.iconLightboxOpen = false
 	a.diffExportOpen = false
 	a.diffExportProgress = nil
@@ -1254,6 +1336,8 @@ func (a *App) buildLangSessionState(
 		AppLang:       loadLang,
 		BaseStore:     baseStore,
 		SharedReaders: true,
+		DeferIcons:    a.win != nil,
+		IconCacheDir:  a.iconCacheDir(),
 		OnProgress:    onProgress,
 	})
 	if err != nil {
@@ -1322,9 +1406,12 @@ func (a *App) activateLangState(state *langSessionCache, preserveSelection bool)
 	a.exportTotalShts = state.exportTotalShts
 	if a.backupSvc != nil {
 		a.backupSvc.SetLang(a.Language())
-		freshStatus := a.backupSvc.ReloadLocalSnapshots()
-		a.versionStatus = &freshStatus
-		vst = freshStatus
+		// 仅在切换语言复用已缓存会话时重新扫描本地快照，避免刚建完服务立即重复读盘
+		if preserveSelection {
+			freshStatus := a.backupSvc.ReloadLocalSnapshots()
+			a.versionStatus = &freshStatus
+			vst = freshStatus
+		}
 	}
 	a.syncAvailableExportLangs()
 	a.syncAvailableIconExportVariants()
@@ -1370,17 +1457,27 @@ func (a *App) activateLangState(state *langSessionCache, preserveSelection bool)
 		a.musicDetail = nil
 	}
 
+	a.iconIndexLoading = false
+	a.iconIndexError = ""
+	a.iconIndexSeq++
 	if !preserveSelection {
+		a.pendingInspectIconID = -1
 		a.iconQuery.GroupID = -1
-	} else if a.iconQuery.GroupID >= 0 && !a.hasIconGroup(a.iconQuery.GroupID) {
-		a.iconQuery.GroupID = -1
-	}
-	if !preserveSelection {
 		a.selectedIconID = -1
 	} else {
+		if a.iconQuery.GroupID >= 0 && a.service.IconsReady() && !a.hasIconGroup(a.iconQuery.GroupID) {
+			a.iconQuery.GroupID = -1
+		}
 		a.selectedIconID = prevIconID
 	}
-	a.refreshIcons(!preserveSelection)
+	if a.service.IconsReady() {
+		a.refreshIcons(!preserveSelection)
+	} else {
+		a.iconRes = gamedata.IconSearchResponse{}
+		a.iconGridSelIdx = -1
+		a.selectedIconDetail = nil
+		a.startBackgroundIconIndexLoad()
+	}
 
 	if preserveSelection && prevItemID > 0 && a.service.GetItemDetail(prevItemID) != nil {
 		a.jumpToItemInternal(prevItemID, false)
@@ -1419,6 +1516,7 @@ func (a *App) activateLangState(state *langSessionCache, preserveSelection bool)
 	}
 	a.syncTextSearchOnLangChange()
 	a.refreshGlobalSearch()
+	a.refreshLatestAdditions()
 }
 
 func (a *App) startBackgroundLangSwitch(cfg config.AppConfig, resolved *config.ResolvedPaths, targetLang i18n.Lang) {
@@ -1566,6 +1664,10 @@ func (a *App) startAsyncLoadWithTarget(cfg config.AppConfig, returnTab activeTab
 			a.tab = tabSettings
 		} else {
 			a.tab = tabWorkbench
+		}
+		// 数据加载完成后再预热多语字体，避免启动加载页期间抢占 CPU
+		if a.win != nil {
+			prewarmLanguageFonts()
 		}
 	}
 
@@ -2011,15 +2113,21 @@ func (a *App) jumpToModuleSearch(target activeTab) {
 			a.musicQuery.ExpansionID = -1
 			a.musicQuery.CategoryID = 0
 			a.musicQuery.WithUsageOnly = false
+			a.musicQuery.NewOnly = false
 			a.refreshMusicList()
 		}
 	case tabIcons:
 		a.iconQuery.Q = q
-		a.refreshIcons(true)
-		if a.iconRes.Total == 0 && q != "" && (a.iconQuery.GroupID >= 0 || a.iconQuery.VariantFilter != "all") {
-			a.iconQuery.GroupID = -1
-			a.iconQuery.VariantFilter = "all"
+		if a.service != nil && a.service.IconsReady() {
 			a.refreshIcons(true)
+			if a.iconRes.Total == 0 && q != "" && (a.iconQuery.GroupID >= 0 || a.iconQuery.VariantFilter != "all" || a.iconQuery.NewOnly) {
+				a.iconQuery.GroupID = -1
+				a.iconQuery.VariantFilter = "all"
+				a.iconQuery.NewOnly = false
+				a.refreshIcons(true)
+			}
+		} else {
+			a.startBackgroundIconIndexLoad()
 		}
 	case tabDiff:
 		a.diffSearch = q
@@ -2062,10 +2170,18 @@ func (a *App) inspectIconFromOtherTab(iconID int) {
 	if a.service == nil || iconID < 0 {
 		return
 	}
+	if !a.service.IconsReady() {
+		a.pendingInspectIconID = iconID
+		a.selectedIconID = iconID
+		a.startBackgroundIconIndexLoad()
+		a.navigateTab(tabIcons)
+		return
+	}
 	detail := a.service.GetIconDetail(iconID)
 	if detail == nil {
 		return
 	}
+	a.pendingInspectIconID = -1
 	a.selectedIconID = iconID
 	if a.iconQuery.GroupID >= 0 && a.iconQuery.GroupID != sqpack.IconGroupID(iconID) {
 		a.iconQuery.GroupID = sqpack.IconGroupID(iconID)
@@ -2075,6 +2191,7 @@ func (a *App) inspectIconFromOtherTab(iconID int) {
 		a.iconQuery.Q = ""
 		a.iconQuery.VariantFilter = "all"
 		a.iconQuery.GroupID = -1
+		a.iconQuery.NewOnly = false
 		a.refreshIcons(false)
 	}
 	if a.iconGridSelIdx >= 0 {
@@ -2270,6 +2387,7 @@ func (a *App) refreshSnapshotCatalog(manual bool) {
 			return
 		}
 		a.snapMgrError = ""
+		a.refreshLatestAdditions()
 	}
 
 	if a.win == nil {
@@ -2343,6 +2461,7 @@ func (a *App) startSnapshotDownload(patch, displayName string) {
 			a.diffPage = 1
 			a.refreshDiff()
 		}
+		a.refreshLatestAdditions()
 	}
 
 	onProgress := func(down, total int64) {
@@ -2392,39 +2511,105 @@ func (a *App) deleteLocalSnapshot(patch, displayName string) {
 	a.syncVersionStatus(st)
 	a.diffPage = 1
 	a.refreshDiff()
+	a.refreshLatestAdditions()
 }
 
-func (a *App) selectSnapshotAsFrom(patch string) {
-	if patch == "" {
+// refreshLatestAdditions 根据本地已下载快照自动确定上一版本并后台更新全局「最新版本新增」标记索引。
+func (a *App) refreshLatestAdditions() {
+	if a.service == nil || a.backupSvc == nil {
+		a.latestAdd = nil
 		return
 	}
-	if a.versionStatus != nil {
-		inRegion := func(reg string) bool {
-			for _, b := range a.versionStatus.BackupsForRegion(reg) {
-				if b.ID == patch {
-					return true
-				}
-			}
-			return false
+	store := a.service.Store()
+	region := snapshot.RegionCN
+	if store != nil {
+		region = store.DataRegion()
+	}
+
+	a.latestAddSeq++
+	seq := a.latestAddSeq
+	svc := a.service
+	bSvc := a.backupSvc
+
+	apply := func(add *gamedata.LatestPatchAdditions, err error) {
+		if a.latestAddSeq != seq || a.service != svc || a.backupSvc != bSvc {
+			return
 		}
-		if !inRegion(a.diffRegion) {
-			other := snapshot.RegionGlobal
-			if a.diffRegion == snapshot.RegionGlobal {
-				other = snapshot.RegionCN
-			}
-			if inRegion(other) {
-				a.diffRegion = other
-			}
+		if err != nil {
+			add = nil
 		}
-		_, defTo := a.versionStatus.DefaultPairForRegion(a.diffRegion)
-		if a.diffToVer == "" {
-			a.diffToVer = defTo
+		a.latestAdd = add
+		svc.SetLatestAdditions(add)
+
+		// 若已无可用的上一版本快照或图标基线，清理对应页的「仅看新增」筛选以免列表意外变空
+		if add == nil {
+			if a.itemQuery.NewOnly {
+				a.itemQuery.NewOnly = false
+				a.itemQuery.Page = 1
+				a.refreshItemList()
+			}
+			if a.questQuery.NewOnly {
+				a.questQuery.NewOnly = false
+				a.questQuery.Page = 1
+				a.refreshQuests()
+			}
+			if a.leveQuery.NewOnly {
+				a.leveQuery.NewOnly = false
+				a.leveQuery.Page = 1
+				a.refreshLeves()
+			}
+			if a.achQuery.NewOnly {
+				a.achQuery.NewOnly = false
+				a.achQuery.Page = 1
+				a.refreshAchievements()
+			}
+			if a.musicQuery.NewOnly {
+				a.musicQuery.NewOnly = false
+				a.musicQuery.Page = 1
+				a.refreshMusicList()
+			}
+			if a.iconQuery.NewOnly {
+				a.iconQuery.NewOnly = false
+				a.refreshIcons(true)
+			}
+			return
+		}
+
+		if a.itemQuery.NewOnly {
+			a.refreshItemList()
+		}
+		if a.questQuery.NewOnly {
+			a.refreshQuests()
+		}
+		if a.leveQuery.NewOnly {
+			a.refreshLeves()
+		}
+		if a.achQuery.NewOnly {
+			a.refreshAchievements()
+		}
+		if a.musicQuery.NewOnly {
+			a.refreshMusicList()
+		}
+		if a.iconQuery.NewOnly {
+			if !add.HasIconBaseline || len(add.Icons) == 0 {
+				a.iconQuery.NewOnly = false
+			}
+			a.refreshIcons(false)
 		}
 	}
-	a.diffFromVer = patch
-	a.diffPage = 1
-	a.snapMgrOpen = false
-	a.refreshDiff()
+
+	if a.win == nil {
+		add, err := bSvc.ComputeLatestAdditions(region)
+		apply(add, err)
+		return
+	}
+
+	go func() {
+		add, err := bSvc.ComputeLatestAdditions(region)
+		a.dispatchUI(func() {
+			apply(add, err)
+		})
+	}()
 }
 
 func (a *App) openMap(marker MapMarkerData) {

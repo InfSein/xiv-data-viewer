@@ -140,3 +140,39 @@ func TestComputeInlineTextDiffBounds(t *testing.T) {
 		t.Fatalf("相同文本差异区间应为全 0")
 	}
 }
+
+func TestComputeInlineTextDiffSpansMultiHunk(t *testing.T) {
+	before := "在指定地点设置象式浮空炮塔\n运转时间：10秒\n设置的象式浮空炮塔持续对周围的敌人发动范围魔法攻击\n威力：7500\n追加效果：为周围的队员附加能够抵御一定伤害的防护罩\n该防护罩能够抵消相当于恢复力7500的伤害量　持续时间：6秒"
+	after := "在指定地点设置象式浮空炮塔\n运转时间：10秒\n设置的象式浮空炮塔持续对周围的敌人发动范围魔法攻击\n威力：8000\n追加效果：为周围的队员附加能够抵御一定伤害的防护罩\n该防护罩能够抵消相当于恢复力8000的伤害量　持续时间：6秒"
+
+	bSpans, aSpans := ComputeInlineTextDiffSpans(before, after)
+	if len(bSpans) != 2 || len(aSpans) != 2 {
+		t.Fatalf("期望精确分离出 2 处数值变更，实际 before=%d after=%d", len(bSpans), len(aSpans))
+	}
+	for i := 0; i < 2; i++ {
+		gotB := before[bSpans[i].Start:bSpans[i].End]
+		gotA := after[aSpans[i].Start:aSpans[i].End]
+		if gotB != "7500" || gotA != "8000" {
+			t.Fatalf("第 %d 处差异片段不符合预期: before=%q after=%q（不应包含中间过渡文本）", i, gotB, gotA)
+		}
+	}
+
+	// 验证相同文本返回空切片
+	if bs, as := ComputeInlineTextDiffSpans("相同文本", "相同文本"); len(bs) != 0 || len(as) != 0 {
+		t.Fatalf("相同文本不应产生差异片段: bs=%v as=%v", bs, as)
+	}
+
+	// 验证英文词元与小数数值不会被拆成零散单字母
+	bEn := "Potency: 2.5s Fire spell"
+	aEn := "Potency: 2.0s Blizzard spell"
+	bs, as := ComputeInlineTextDiffSpans(bEn, aEn)
+	if len(bs) != 2 || len(as) != 2 {
+		t.Fatalf("期望 2 处英文/小数变更，实际 bs=%v as=%v", bs, as)
+	}
+	if bEn[bs[0].Start:bs[0].End] != "2.5" || aEn[as[0].Start:as[0].End] != "2.0" {
+		t.Fatalf("小数差异片段异常: %q -> %q", bEn[bs[0].Start:bs[0].End], aEn[as[0].Start:as[0].End])
+	}
+	if bEn[bs[1].Start:bs[1].End] != "Fire" || aEn[as[1].Start:as[1].End] != "Blizzard" {
+		t.Fatalf("英文词元差异片段异常: %q -> %q", bEn[bs[1].Start:bs[1].End], aEn[as[1].Start:as[1].End])
+	}
+}

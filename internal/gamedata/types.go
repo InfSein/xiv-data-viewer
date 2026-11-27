@@ -242,6 +242,20 @@ type QuestTextData struct {
 	Dialogues  []QuestDialogueLine
 }
 
+// LatestPatchAdditions 保存相较于上一版本快照新增的各模块条目 ID 集合，用于展示最新版本标记与快捷筛选。
+type LatestPatchAdditions struct {
+	PrevPatch       string // 上一版本快照版本号（如 "7.57"）
+	CurrentPatch    string // 当前客户端识别到的版本号（如 "7.58"；目录未更新时为空）
+	Items           map[int]bool
+	Quests          map[int]bool
+	Leves           map[int]bool
+	Achievements    map[int]bool
+	BGMs            map[int]bool
+	Orchestrions    map[int]bool
+	Icons           map[int]bool
+	HasIconBaseline bool
+}
+
 // QuestSearchQuery 任务检索与筛选参数。
 type QuestSearchQuery struct {
 	Q           string
@@ -250,6 +264,7 @@ type QuestSearchQuery struct {
 	Filter      string // all|msq|feature|repeatable|with_item|with_cutscene
 	MinLevel    int
 	MaxLevel    int
+	NewOnly     bool
 	Page        int
 	PageSize    int
 }
@@ -362,6 +377,7 @@ type LeveSearchQuery struct {
 	AssignmentTypeID int
 	MinLevel         int
 	MaxLevel         int
+	NewOnly          bool
 	Page             int
 	PageSize         int
 }
@@ -482,6 +498,7 @@ type AchievementSearchQuery struct {
 	KindID     int
 	CategoryID int
 	Filter     string // "all" | "with_title" | "with_item"
+	NewOnly    bool
 	Page       int
 	PageSize   int
 }
@@ -534,6 +551,7 @@ type ItemSearchQuery struct {
 	MinIlvl      int
 	MaxIlvl      int
 	TradableOnly bool
+	NewOnly      bool
 	Sort         string // id_asc|id_desc|ilvl_desc|ilvl_asc|level_desc
 	Page         int
 	PageSize     int
@@ -1037,6 +1055,7 @@ type MusicSearchQuery struct {
 	ExpansionID   int    // -1 表示全部资料片
 	CategoryID    int    // 0 表示全部分类
 	WithUsageOnly bool
+	NewOnly       bool
 	Page          int
 	PageSize      int
 }
@@ -1105,6 +1124,7 @@ type IconSearchQuery struct {
 	Q             string
 	GroupID       int    // < 0 表示跨全部分组检索，>= 0 表示限定分组
 	VariantFilter string // all|hr1|hq|localized
+	NewOnly       bool
 }
 
 // IconSearchResponse 表示「图标」工作台的筛选结果。

@@ -241,6 +241,76 @@ func buildQuestData(in questLoaderInput) questIndices {
 	out.questCutVars = cutLinks.questCutVars
 	out.questBGMVars = cutLinks.questBGMVars
 
+	// 预解析循环内高频访问的列序号，避免在万级任务循环中重复 fmt.Sprintf 与 map 查表
+	var (
+		prevQuestCols   [3]int
+		questLockCols   [2]int
+		instContentCols [3]int
+		scriptArgCols   [50]int
+		listenerCols    [64]int
+		rewardCols      [7]int
+		rewardCntCols   [7]int
+		optItemCols     [5]int
+		optCntCols      [5]int
+		optHQCols       [5]int
+		catItemCols     [3]int
+		catCntCols      [3]int
+		genActCols      [2]int
+		cjRewItemCols   [4]int
+		cjRewAmtCols    [4]int
+		brQtyCols       [8]int
+	)
+	for i := 0; i < 3; i++ {
+		prevQuestCols[i] = in.quests.Col(fmt.Sprintf("PreviousQuest[%d]", i))
+		instContentCols[i] = in.quests.Col(fmt.Sprintf("InstanceContent[%d]", i))
+		catItemCols[i] = in.quests.Col(fmt.Sprintf("ItemCatalyst[%d]", i))
+		catCntCols[i] = in.quests.Col(fmt.Sprintf("ItemCountCatalyst[%d]", i))
+	}
+	for i := 0; i < 2; i++ {
+		questLockCols[i] = in.quests.Col(fmt.Sprintf("QuestLock[%d]", i))
+		genActCols[i] = in.quests.Col(fmt.Sprintf("GeneralActionReward[%d]", i))
+	}
+	for i := 0; i < 50; i++ {
+		scriptArgCols[i] = in.quests.Col(fmt.Sprintf("QuestParams[%d].ScriptArg", i))
+	}
+	for i := 0; i < 64; i++ {
+		listenerCols[i] = in.quests.Col(fmt.Sprintf("QuestListenerParams[%d].Listener", i))
+	}
+	for i := 0; i < 7; i++ {
+		rewardCols[i] = in.quests.Col(fmt.Sprintf("Reward[%d]", i))
+		rewardCntCols[i] = in.quests.Col(fmt.Sprintf("ItemCountReward[%d]", i))
+	}
+	for i := 0; i < 5; i++ {
+		optItemCols[i] = in.quests.Col(fmt.Sprintf("OptionalItemReward[%d]", i))
+		optCntCols[i] = in.quests.Col(fmt.Sprintf("OptionalItemCountReward[%d]", i))
+		optHQCols[i] = in.quests.Col(fmt.Sprintf("OptionalItemIsHQReward[%d]", i))
+	}
+	cjCatCol := -1
+	if in.questClassJobRewards != nil {
+		cjCatCol = in.questClassJobRewards.Col("ClassJobCategory")
+		for i := 0; i < 4; i++ {
+			cjRewItemCols[i] = in.questClassJobRewards.Col(fmt.Sprintf("RewardItem[%d]", i))
+			cjRewAmtCols[i] = in.questClassJobRewards.Col(fmt.Sprintf("RewardAmount[%d]", i))
+		}
+	}
+	brItemCol := -1
+	if in.beastRankBonuses != nil {
+		brItemCol = in.beastRankBonuses.Col("Item")
+		for i := 0; i < 8; i++ {
+			brQtyCols[i] = in.beastRankBonuses.Col(fmt.Sprintf("ItemQuantity[%d]", i))
+		}
+	}
+
+	grpJob := i18n.T(in.appLang, "gamedata.quest.reward_job")
+	grpTribe := i18n.T(in.appLang, "gamedata.quest.reward_tribe")
+	grpFixed := i18n.T(in.appLang, "gamedata.quest.reward_fixed")
+	grpFixedMale := i18n.T(in.appLang, "gamedata.quest.reward_fixed_male")
+	grpFixedFemale := i18n.T(in.appLang, "gamedata.quest.reward_fixed_female")
+	grpOptional := i18n.T(in.appLang, "gamedata.quest.reward_optional")
+	grpCatalyst := i18n.T(in.appLang, "gamedata.quest.reward_catalyst")
+	grpCurrency := i18n.T(in.appLang, "gamedata.quest.reward_currency")
+	grpTomestone := i18n.T(in.appLang, "gamedata.quest.reward_tomestone")
+
 	sectionCount := make(map[int]int)
 	sectionNames := make(map[int]string)
 
@@ -353,7 +423,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 		var prevIDs []int
 		var prevNames []string
 		for i := 0; i < 3; i++ {
-			pqID := in.quests.Int(row, fmt.Sprintf("PreviousQuest[%d]", i))
+			pqID := row.IntAt(prevQuestCols[i])
 			if pqID > 0 {
 				prevIDs = append(prevIDs, pqID)
 				pName := readQuestName(pqID)
@@ -367,7 +437,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 		var lockIDs []int
 		var lockNames []string
 		for i := 0; i < 2; i++ {
-			lID := in.quests.Int(row, fmt.Sprintf("QuestLock[%d]", i))
+			lID := row.IntAt(questLockCols[i])
 			if lID > 0 {
 				lockIDs = append(lockIDs, lID)
 				lName := readQuestName(lID)
@@ -380,7 +450,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 
 		var instNames []string
 		for i := 0; i < 3; i++ {
-			if n := resolveInstanceName(in.quests.Int(row, fmt.Sprintf("InstanceContent[%d]", i))); n != "" {
+			if n := resolveInstanceName(row.IntAt(instContentCols[i])); n != "" {
 				instNames = append(instNames, n)
 			}
 		}
@@ -458,10 +528,14 @@ func buildQuestData(in questLoaderInput) questIndices {
 		addActor(issuerID)
 		addActor(targetID)
 		for i := 0; i < 50; i++ {
-			addActor(in.quests.Int(row, fmt.Sprintf("QuestParams[%d].ScriptArg", i)))
+			if col := scriptArgCols[i]; col >= 0 {
+				addActor(row.IntAt(col))
+			}
 		}
 		for i := 0; i < 64; i++ {
-			addActor(in.quests.Int(row, fmt.Sprintf("QuestListenerParams[%d].Listener", i)))
+			if col := listenerCols[i]; col >= 0 {
+				addActor(row.IntAt(col))
+			}
 		}
 		if len(actorIDs) > 0 {
 			out.questActorIDs[questID] = actorIDs
@@ -573,29 +647,21 @@ func buildQuestData(in questLoaderInput) questIndices {
 			})
 		}
 
-		grpJob := i18n.T(in.appLang, "gamedata.quest.reward_job")
-		grpTribe := i18n.T(in.appLang, "gamedata.quest.reward_tribe")
-		grpFixed := i18n.T(in.appLang, "gamedata.quest.reward_fixed")
-		grpFixedMale := i18n.T(in.appLang, "gamedata.quest.reward_fixed_male")
-		grpFixedFemale := i18n.T(in.appLang, "gamedata.quest.reward_fixed_female")
-		grpOptional := i18n.T(in.appLang, "gamedata.quest.reward_optional")
-		grpCatalyst := i18n.T(in.appLang, "gamedata.quest.reward_catalyst")
-
 		rewardType := in.quests.Int(row, "ItemRewardType")
 		for idx := 0; idx < 7; idx++ {
-			rewVal := in.quests.Int(row, fmt.Sprintf("Reward[%d]", idx))
+			rewVal := row.IntAt(rewardCols[idx])
 			if rewVal <= 0 {
 				continue
 			}
-			rewCnt := in.quests.Int(row, fmt.Sprintf("ItemCountReward[%d]", idx))
+			rewCnt := row.IntAt(rewardCntCols[idx])
 			switch rewardType {
 			case 6:
 				if in.questClassJobRewards != nil {
 					for _, sub := range in.questClassJobRewards.Rows[rewVal] {
-						subCJ := in.classJobCategories[in.questClassJobRewards.Int(sub.Data, "ClassJobCategory")]
+						subCJ := in.classJobCategories[sub.Data.IntAt(cjCatCol)]
 						for k := 0; k < 4; k++ {
-							itID := in.questClassJobRewards.Int(sub.Data, fmt.Sprintf("RewardItem[%d]", k))
-							itCnt := in.questClassJobRewards.Int(sub.Data, fmt.Sprintf("RewardAmount[%d]", k))
+							itID := sub.Data.IntAt(cjRewItemCols[k])
+							itCnt := sub.Data.IntAt(cjRewAmtCols[k])
 							if itID > 0 {
 								addRewardItem(itID, itCnt, false, grpJob, subCJ)
 							}
@@ -605,10 +671,10 @@ func buildQuestData(in questLoaderInput) questIndices {
 			case 7:
 				if in.beastRankBonuses != nil {
 					if brRow, ok := in.beastRankBonuses.Rows[rewVal]; ok {
-						itID := in.beastRankBonuses.Int(brRow, "Item")
+						itID := brRow.IntAt(brItemCol)
 						itCnt := 1
 						for k := 0; k < 8; k++ {
-							if q := in.beastRankBonuses.Int(brRow, fmt.Sprintf("ItemQuantity[%d]", k)); q > 0 {
+							if q := brRow.IntAt(brQtyCols[k]); q > 0 {
 								itCnt = q
 								break
 							}
@@ -630,21 +696,21 @@ func buildQuestData(in questLoaderInput) questIndices {
 		}
 
 		for idx := 0; idx < 5; idx++ {
-			optID := in.quests.Int(row, fmt.Sprintf("OptionalItemReward[%d]", idx))
+			optID := row.IntAt(optItemCols[idx])
 			if optID <= 0 {
 				continue
 			}
-			optCnt := in.quests.Int(row, fmt.Sprintf("OptionalItemCountReward[%d]", idx))
-			optHQ := in.quests.Bool(row, fmt.Sprintf("OptionalItemIsHQReward[%d]", idx))
+			optCnt := row.IntAt(optCntCols[idx])
+			optHQ := row.BoolAt(optHQCols[idx])
 			addRewardItem(optID, optCnt, optHQ, grpOptional, "")
 		}
 
 		for idx := 0; idx < 3; idx++ {
-			catID := in.quests.Int(row, fmt.Sprintf("ItemCatalyst[%d]", idx))
+			catID := row.IntAt(catItemCols[idx])
 			if catID <= 0 {
 				continue
 			}
-			catCnt := in.quests.Int(row, fmt.Sprintf("ItemCountCatalyst[%d]", idx))
+			catCnt := row.IntAt(catCntCols[idx])
 			addRewardItem(catID, catCnt, false, grpCatalyst, "")
 		}
 
@@ -655,7 +721,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 				GenreName:  genreName,
 				Level:      lvl,
 				Count:      currCount,
-				GroupLabel: i18n.T(in.appLang, "gamedata.quest.reward_currency"),
+				GroupLabel: grpCurrency,
 			})
 		}
 		if tomeItemID > 0 && tomeCount > 0 {
@@ -665,7 +731,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 				GenreName:  genreName,
 				Level:      lvl,
 				Count:      tomeCount,
-				GroupLabel: i18n.T(in.appLang, "gamedata.quest.reward_tomestone"),
+				GroupLabel: grpTomestone,
 			})
 		}
 
@@ -707,7 +773,7 @@ func buildQuestData(in questLoaderInput) questIndices {
 			}
 		}
 		for idx := 0; idx < 2; idx++ {
-			gaID := in.quests.Int(row, fmt.Sprintf("GeneralActionReward[%d]", idx))
+			gaID := row.IntAt(genActCols[idx])
 			if gaID > 0 && in.generalActions != nil {
 				if gRow, ok := in.generalActions.Rows[gaID]; ok {
 					if gName := strings.TrimSpace(in.generalActions.Str(gRow, "Name")); gName != "" {

@@ -1,8 +1,6 @@
 package sqpack
 
 import (
-	"bytes"
-	"compress/flate"
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
@@ -27,6 +25,9 @@ const (
 	uncompressedChunkSz = 32000
 	textureHeaderSize   = 80
 )
+
+// sharedFlatePool 复用 flate 解压器实例，避免每次解压分块都分配 64KB+ 字典内存。
+var sharedFlatePool sync.Pool
 
 type indexEntry struct {
 	dataFileID uint32
@@ -367,29 +368,35 @@ func readAtFull(f *os.File, buf []byte, off int64) error {
 }
 
 func readFileInfo(f *os.File, offset int64) (fileInfo, []byte, error) {
-	buf := make([]byte, 128)
-	if err := readAtFull(f, buf, offset); err != nil {
-		return fileInfo{}, nil, err
-	}
-	fi := fileInfo{
-		size:               binary.LittleEndian.Uint32(buf[0:4]),
-		fileType:           binary.LittleEndian.Uint32(buf[4:8]),
-		rawFileSize:        binary.LittleEndian.Uint32(buf[8:12]),
-		numberOfBlocks:     binary.LittleEndian.Uint32(buf[12:16]),
-		usedNumberOfBlocks: binary.LittleEndian.Uint32(buf[16:20]),
-	}
-	if fi.size == 128 {
-		return fi, buf, nil
-	}
-	if fi.size > 128 {
-		full := make([]byte, fi.size)
-		copy(full, buf)
-		if err := readAtFull(f, full[128:], offset+128); err != nil {
+	var stack [256]byte
+	n, err := f.ReadAt(stack[:], offset)
+	if n < 24 || (err != nil && !errors.Is(err, io.EOF)) {
+		if err != nil {
 			return fileInfo{}, nil, err
 		}
-		return fi, full, nil
+		return fileInfo{}, nil, fmt.Errorf("读取文件头字节数不足: 实际 %d", n)
 	}
-	return fi, buf[:fi.size], nil
+	fi := fileInfo{
+		size:               binary.LittleEndian.Uint32(stack[0:4]),
+		fileType:           binary.LittleEndian.Uint32(stack[4:8]),
+		rawFileSize:        binary.LittleEndian.Uint32(stack[8:12]),
+		numberOfBlocks:     binary.LittleEndian.Uint32(stack[12:16]),
+		usedNumberOfBlocks: binary.LittleEndian.Uint32(stack[16:20]),
+	}
+	if fi.size == 0 {
+		return fi, nil, nil
+	}
+	if int(fi.size) <= n {
+		out := make([]byte, fi.size)
+		copy(out, stack[:fi.size])
+		return fi, out, nil
+	}
+	full := make([]byte, fi.size)
+	copy(full, stack[:n])
+	if err := readAtFull(f, full[n:], offset+int64(n)); err != nil {
+		return fileInfo{}, nil, err
+	}
+	return fi, full, nil
 }
 
 func readDataChunk(f *os.File, offset int64) ([]byte, error) {
@@ -414,10 +421,8 @@ func readDataChunk(f *os.File, offset int64) ([]byte, error) {
 	if err := readAtFull(f, compressed, dataOffset); err != nil {
 		return nil, err
 	}
-	fr := flate.NewReader(bytes.NewReader(compressed))
-	defer fr.Close()
 	out := make([]byte, uncompSize)
-	if _, err := io.ReadFull(fr, out); err != nil {
+	if err := inflatePooled(&sharedFlatePool, compressed, out); err != nil {
 		return nil, fmt.Errorf("解压数据块失败: %w", err)
 	}
 	return out, nil
@@ -433,20 +438,78 @@ func readStandardFile(f *os.File, fileOffset int64, fi fileInfo, fiBuf []byte) (
 		return nil, errors.New("标准文件分块表越界")
 	}
 
-	chunks := make([]standardChunkInfo, chunkCount)
+	// 计算所有分块覆盖的连续区间，优先一次 ReadAt 读入内存并使用池化解压器直接写入输出缓冲区
+	var maxEnd uint64
+	scanPos := pos
 	for i := 0; i < chunkCount; i++ {
-		chunks[i] = standardChunkInfo{
-			offset:           binary.LittleEndian.Uint32(fiBuf[pos : pos+4]),
-			compressedSize:   binary.LittleEndian.Uint16(fiBuf[pos+4 : pos+6]),
-			uncompressedSize: binary.LittleEndian.Uint16(fiBuf[pos+6 : pos+8]),
+		off := binary.LittleEndian.Uint32(fiBuf[scanPos : scanPos+4])
+		comp := binary.LittleEndian.Uint16(fiBuf[scanPos+4 : scanPos+6])
+		if end := uint64(off) + uint64(comp); end > maxEnd {
+			maxEnd = end
 		}
-		pos += 8
+		scanPos += 8
 	}
 
 	baseOffset := fileOffset + int64(fi.size)
+	const maxSingleSpan = 32 << 20
+	if chunkCount > 0 && maxEnd > 0 && maxEnd <= maxSingleSpan {
+		span := make([]byte, maxEnd)
+		if err := readAtFull(f, span, baseOffset); err == nil {
+			out := make([]byte, 0, fi.rawFileSize)
+			curPos := pos
+			allOK := true
+			for i := 0; i < chunkCount; i++ {
+				ciOff := int(binary.LittleEndian.Uint32(fiBuf[curPos : curPos+4]))
+				curPos += 8
+				if ciOff+16 > len(span) {
+					allOK = false
+					break
+				}
+				hdrSize := int(binary.LittleEndian.Uint32(span[ciOff : ciOff+4]))
+				compSize := int(binary.LittleEndian.Uint32(span[ciOff+8 : ciOff+12]))
+				uncompSize := int(binary.LittleEndian.Uint32(span[ciOff+12 : ciOff+16]))
+				dataStart := ciOff + hdrSize
+				if hdrSize < 16 {
+					allOK = false
+					break
+				}
+				if compSize == uncompressedChunkSz {
+					if dataStart+uncompSize > len(span) {
+						allOK = false
+						break
+					}
+					out = append(out, span[dataStart:dataStart+uncompSize]...)
+					continue
+				}
+				if dataStart+compSize > len(span) {
+					allOK = false
+					break
+				}
+				curLen := len(out)
+				if cap(out)-curLen < uncompSize {
+					grown := make([]byte, curLen, curLen+uncompSize)
+					copy(grown, out)
+					out = grown
+				}
+				dst := out[curLen : curLen+uncompSize]
+				if err := inflatePooled(&sharedFlatePool, span[dataStart:dataStart+compSize], dst); err != nil {
+					allOK = false
+					break
+				}
+				out = out[:curLen+uncompSize]
+			}
+			if allOK && uint32(len(out)) == fi.rawFileSize {
+				return out, nil
+			}
+		}
+	}
+
+	// 回退到逐块读取路径（超大文件或非常规块布局）
 	out := make([]byte, 0, fi.rawFileSize)
-	for _, ci := range chunks {
-		chunk, err := readDataChunk(f, baseOffset+int64(ci.offset))
+	for i := 0; i < chunkCount; i++ {
+		off := binary.LittleEndian.Uint32(fiBuf[pos : pos+4])
+		pos += 8
+		chunk, err := readDataChunk(f, baseOffset+int64(off))
 		if err != nil {
 			return nil, err
 		}

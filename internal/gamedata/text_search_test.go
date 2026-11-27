@@ -374,8 +374,8 @@ func TestTextSearchParallelTranslations(t *testing.T) {
 		PrimaryLang:   sqpack.LangChineseSimplified,
 	}
 	realSvc := NewService(realStore)
-	if _, err := realSvc.BuildTextSearchIndex(context.Background(), "chs", nil); err != nil {
-		t.Fatalf("构建国服全文索引失败: %v", err)
+	if _, err := realSvc.BuildAllTextSearchIndices(context.Background(), nil); err != nil {
+		t.Fatalf("构建双服跨语言全文索引失败: %v", err)
 	}
 	tStart := time.Now()
 	realRes, err := realSvc.SearchTexts(context.Background(), TextSearchQuery{
@@ -397,5 +397,159 @@ func TestTextSearchParallelTranslations(t *testing.T) {
 		realRes.Total, withTrans, len(realRes.Items), time.Since(tStart))
 	if withTrans == 0 {
 		t.Fatalf("双服模式下应检索到真实日/英多语言对照译文")
+	}
+
+	// 验证不切换语言直接用中文、日文、英文检索同一条目（能工巧匠 / クラフター / Disciples of the Hand）
+	for _, q := range []string{`"能工巧匠"`, `"クラフター"`, `"Disciples of the Hand"`} {
+		qRes, err := realSvc.SearchTexts(context.Background(), TextSearchQuery{
+			LangCode: "chs",
+			Q:        q,
+			Page:     1,
+			PageSize: 30,
+		})
+		if err != nil {
+			t.Fatalf("双服跨语言检索 %s 失败: %v", q, err)
+		}
+		foundCraft := false
+		for _, it := range qRes.Items {
+			if strings.Contains(it.Text, "能工巧匠") {
+				foundCraft = true
+				break
+			}
+		}
+		t.Logf("双服跨语言检索 %s: total=%d cost=%.2fms found能工巧匠=%v", q, qRes.Total, qRes.ElapsedMs, foundCraft)
+		if !foundCraft {
+			t.Fatalf("双服跨语言检索 %s 应命中包含「能工巧匠」的条目，前 5 条: %+v", q, qRes.Items[:min(5, len(qRes.Items))])
+		}
+	}
+}
+
+func TestTextSearchCrossLanguageUnified(t *testing.T) {
+	store := &Store{
+		HasCN:       true,
+		HasGlobal:   true,
+		PrimaryLang: sqpack.LangChineseSimplified,
+	}
+	svc := NewService(store)
+
+	idxCN := NewTextSearchIndexFromRecords("chs",
+		[]TextIndexSheetInput{
+			{Name: "ClassJobCategory", IsLocalized: true, ColNames: []string{"Name"}},
+			{Name: "Item", IsLocalized: true, ColNames: []string{"Name"}},
+		},
+		[]TextIndexRowInput{
+			{SheetIdx: 0, RowID: 33, SubRowID: -1, ColIdx: 0, Text: "能工巧匠"},
+			{SheetIdx: 1, RowID: 100, SubRowID: -1, ColIdx: 0, Text: "光之战士之剑"},
+		},
+		nil, nil,
+	)
+	idxJA := NewTextSearchIndexFromRecords("ja",
+		[]TextIndexSheetInput{
+			{Name: "ClassJobCategory", IsLocalized: true, ColNames: []string{"Name"}},
+			{Name: "Item", IsLocalized: true, ColNames: []string{"Name"}},
+		},
+		[]TextIndexRowInput{
+			{SheetIdx: 0, RowID: 33, SubRowID: -1, ColIdx: 0, Text: "クラフター"},
+			{SheetIdx: 1, RowID: 100, SubRowID: -1, ColIdx: 0, Text: "光の戦士の剣"},
+			{SheetIdx: 1, RowID: 200, SubRowID: -1, ColIdx: 0, Text: "新パッチ専用装備"},
+		},
+		nil, nil,
+	)
+	idxEN := NewTextSearchIndexFromRecords("en",
+		[]TextIndexSheetInput{
+			{Name: "ClassJobCategory", IsLocalized: true, ColNames: []string{"Name"}},
+			{Name: "Item", IsLocalized: true, ColNames: []string{"Name"}},
+		},
+		[]TextIndexRowInput{
+			{SheetIdx: 0, RowID: 33, SubRowID: -1, ColIdx: 0, Text: "Disciples of the Hand"},
+			{SheetIdx: 1, RowID: 100, SubRowID: -1, ColIdx: 0, Text: "Sword of the Warrior of Light"},
+			{SheetIdx: 1, RowID: 200, SubRowID: -1, ColIdx: 0, Text: "New Patch Exclusive Gear"},
+		},
+		nil, nil,
+	)
+	svc.SetTextSearchIndex("chs", idxCN)
+	svc.SetTextSearchIndex("ja", idxJA)
+	svc.SetTextSearchIndex("en", idxEN)
+
+	// 1. 中文、日文、英文均能在主语言为 chs 时检索到 ClassJobCategory #33（能工巧匠）且对应语言准确高亮
+	cases := []struct {
+		query         string
+		expectMainHL  bool
+		expectHLBadge string
+	}{
+		{query: "能工巧匠", expectMainHL: true, expectHLBadge: ""},
+		{query: "クラフター", expectMainHL: false, expectHLBadge: "JA"},
+		{query: "Disciples of the Hand", expectMainHL: false, expectHLBadge: "EN"},
+	}
+	for _, tc := range cases {
+		res, err := svc.SearchTexts(context.Background(), TextSearchQuery{
+			LangCode: "chs",
+			Q:        tc.query,
+			Page:     1,
+			PageSize: 20,
+		})
+		if err != nil {
+			t.Fatalf("跨语言检索 %q 失败: %v", tc.query, err)
+		}
+		if res.Total != 1 || len(res.Items) != 1 {
+			t.Fatalf("跨语言检索 %q 期望命中 1 条，实际 total=%d items=%+v", tc.query, res.Total, res.Items)
+		}
+		hit := res.Items[0]
+		if hit.SheetName != "ClassJobCategory" || hit.RowID != 33 || hit.Text != "能工巧匠" {
+			t.Fatalf("跨语言检索 %q 命中条目异常: %+v", tc.query, hit)
+		}
+		if (len(hit.MatchSpans) > 0) != tc.expectMainHL {
+			t.Fatalf("跨语言检索 %q 主文本高亮状态异常: spans=%+v expect=%v", tc.query, hit.MatchSpans, tc.expectMainHL)
+		}
+		if len(hit.Translations) != 2 {
+			t.Fatalf("跨语言检索 %q 期望 2 条对照译文，实际: %+v", tc.query, hit.Translations)
+		}
+		for _, tr := range hit.Translations {
+			wantHL := tr.Badge == tc.expectHLBadge
+			if (len(tr.MatchSpans) > 0) != wantHL {
+				t.Fatalf("跨语言检索 %q 译文 %s 高亮状态异常: spans=%+v want=%v", tc.query, tr.Badge, tr.MatchSpans, wantHL)
+			}
+		}
+	}
+
+	// 2. 跨语言同时命中同一条记录（"光" 同时出现在中文与日文）时须去重为 1 条，且双语均高亮
+	resBoth, err := svc.SearchTexts(context.Background(), TextSearchQuery{
+		LangCode: "chs",
+		Q:        "光",
+		Page:     1,
+		PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("多语言同命检索失败: %v", err)
+	}
+	if resBoth.Total != 1 || len(resBoth.Items) != 1 || resBoth.Items[0].RowID != 100 {
+		t.Fatalf("多语言同命条目应去重为 1 条，实际: %+v", resBoth.Items)
+	}
+	if len(resBoth.Items[0].MatchSpans) == 0 {
+		t.Fatalf("多语言同命条目中文主文本应高亮")
+	}
+	if len(resBoth.Items[0].Translations) != 2 || len(resBoth.Items[0].Translations[0].MatchSpans) == 0 {
+		t.Fatalf("多语言同命条目日文对照译文应同步高亮: %+v", resBoth.Items[0].Translations)
+	}
+
+	// 3. 主语言缺失但国际服存在的独占条目，应能检索到并回退展示命中语言及剩余对照语言
+	resFallback, err := svc.SearchTexts(context.Background(), TextSearchQuery{
+		LangCode: "chs",
+		Q:        "Exclusive Gear",
+		Page:     1,
+		PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("国际服独占条目检索失败: %v", err)
+	}
+	if resFallback.Total != 1 || len(resFallback.Items) != 1 {
+		t.Fatalf("国际服独占条目期望命中 1 条，实际: %+v", resFallback.Items)
+	}
+	fbHit := resFallback.Items[0]
+	if fbHit.LangCode != "en" || fbHit.Text != "New Patch Exclusive Gear" || len(fbHit.MatchSpans) == 0 {
+		t.Fatalf("国际服独占条目回退展示异常: %+v", fbHit)
+	}
+	if len(fbHit.Translations) != 1 || fbHit.Translations[0].Badge != "JA" || fbHit.Translations[0].Text != "新パッチ専用装備" {
+		t.Fatalf("国际服独占条目其余对照语言异常: %+v", fbHit.Translations)
 	}
 }

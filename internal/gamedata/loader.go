@@ -217,7 +217,13 @@ type Store struct {
 	bgmDigestMu sync.Mutex
 	bgmDigests  map[int]BGMDigest
 
-	// 图标资源索引（ui/icon）与按客户端缓存的原始扫描结果
+	// 图标资源索引（ui/icon）与按客户端缓存的原始扫描结果（支持启动后后台延迟构建，并发安全读写）
+	iconMu                sync.RWMutex
+	iconLoadMu            sync.Mutex
+	iconCacheDir          string
+	iconsReady            bool
+	iconsLoading          bool
+	iconsErr              error
 	Icons                 []IconEntry
 	IconByID              map[int]IconEntry
 	IconGroups            []IconGroupInfo
@@ -380,6 +386,8 @@ type StoreLoadOptions struct {
 	AppLang       i18n.Lang
 	BaseStore     *Store
 	SharedReaders bool
+	DeferIcons    bool   // 为 true 时跳过启动阶段全量图标扫描，留待进入主界面后后台静默或按需加载
+	IconCacheDir  string // 可选本地图标扫描缓存目录（仅写入应用数据目录，按客户端版本指纹自动失效）
 	OnProgress    func(LoadProgress)
 }
 
@@ -556,6 +564,8 @@ type coreStoreLoadInput struct {
 	presetBGMDigests map[int]BGMDigest
 	presetFileExists map[string]bool
 	skipIcons        bool
+	deferIcons       bool
+	iconCacheDir     string
 	onProgress       func(LoadProgress)
 }
 
@@ -658,9 +668,48 @@ func LoadGameDataStoreWithOptions(resolved *config.ResolvedPaths, schemasFS fs.F
 		globalPath:    globalPath,
 		base:          base,
 		texCache:      texCache,
+		deferIcons:    opts.DeferIcons,
+		iconCacheDir:  opts.IconCacheDir,
 		onProgress:    opts.OnProgress,
 	})
 }
+
+// 宽表与字典表按需列裁剪列表：跳过大量未使用的单元格装箱，大幅降低加载期内存分配与 GC 压力。
+var (
+	colsENpcBase = func() []int {
+		cols := make([]int, 0, 32)
+		for i := 2; i <= 33; i++ {
+			cols = append(cols, i)
+		}
+		return cols
+	}()
+	colsSpecialShop = func() []int {
+		cols := make([]int, 0, 1+60*15+1)
+		cols = append(cols, 0)
+		blocks := []int{1, 61, 181, 241, 301, 421, 481, 541, 661, 721, 781, 901, 961, 1021, 1141}
+		for _, start := range blocks {
+			for slot := 0; slot < 60; slot++ {
+				cols = append(cols, start+slot)
+			}
+		}
+		cols = append(cols, 2041)
+		return cols
+	}()
+	colsLevel              = []int{0, 2, 5, 6, 7, 9}
+	colsENpcResident       = []int{0, 7, 8}
+	colsTopicSelect        = []int{0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
+	colsFccShop            = []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+	colsAchievementPrimary = []int{0, 1, 2, 5, 6, 7, 11}
+	colsTitlePrimary       = []int{0, 1, 2}
+	colsPlaceName          = []int{0}
+	colsCol0               = []int{0}
+	colsCol01              = []int{0, 1}
+	colsCol02              = []int{0, 2}
+	colsCol12              = []int{1, 2}
+	colsCol2               = []int{2}
+	colsCol45              = []int{4, 5}
+	colsAchCategory        = []int{0, 1, 4}
+)
 
 func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 	appLang := in.appLang
@@ -875,7 +924,7 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 		eventSystemDefines = bn.eventSystemDefines
 	} else {
 		loadSheet(primaryEXD, "EquipSlotCategory", sqpack.LangNone, nil, &rawEquipSlots)
-		loadSheet(primaryEXD, "ItemRepairResource", sqpack.LangNone, nil, &rawRepairResources)
+		loadSheet(primaryEXD, "ItemRepairResource", sqpack.LangNone, colsCol0, &rawRepairResources)
 		loadSheet(primaryEXD, "ItemAction", sqpack.LangNone, nil, &itemActions)
 		loadSheet(primaryEXD, "ItemFood", sqpack.LangNone, nil, &itemFoods)
 		loadSheet(primaryEXD, "Recipe", sqpack.LangNone, nil, &recipes)
@@ -887,20 +936,20 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 		loadSheet(primaryEXD, "ExportedGatheringPoint", sqpack.LangNone, nil, &exportedGatheringPoints)
 		loadSheet(primaryEXD, "GatheringPointTransient", sqpack.LangNone, nil, &gatheringPointTransients)
 		loadSheet(primaryEXD, "GatheringRarePopTimeTable", sqpack.LangNone, nil, &gatheringRarePopTimeTables)
-		loadSheet(primaryEXD, "GatheringItemLevelConvertTable", sqpack.LangNone, nil, &rawGatheringItemLevels)
+		loadSheet(primaryEXD, "GatheringItemLevelConvertTable", sqpack.LangNone, colsCol01, &rawGatheringItemLevels)
 		loadSheet(primaryEXD, "TerritoryType", sqpack.LangNone, nil, &territoryTypes)
 		loadSheet(primaryEXD, "Map", sqpack.LangNone, nil, &maps)
 		loadSheet(primaryEXD, "SpearfishingNotebook", sqpack.LangNone, nil, &spearfishingNotebooks)
 		loadSub(primaryEXD, "GilShopItem", sqpack.LangNone, &gilShopItems)
 		loadSub(primaryEXD, "GCScripShopItem", sqpack.LangNone, &gcScripShopItems)
-		loadSheet(primaryEXD, "TomestonesItem", sqpack.LangNone, nil, &tomestonesItems)
-		loadSheet(primaryEXD, "ENpcBase", sqpack.LangNone, nil, &enpcBases)
-		loadSheet(primaryEXD, "PreHandler", sqpack.LangNone, nil, &preHandlers)
+		loadSheet(primaryEXD, "TomestonesItem", sqpack.LangNone, colsCol02, &tomestonesItems)
+		loadSheet(primaryEXD, "ENpcBase", sqpack.LangNone, colsENpcBase, &enpcBases)
+		loadSheet(primaryEXD, "PreHandler", sqpack.LangNone, colsCol2, &preHandlers)
 		loadSheet(primaryEXD, "InclusionShop", sqpack.LangNone, nil, &inclusionShops)
 		loadSub(primaryEXD, "InclusionShopSeries", sqpack.LangNone, &inclusionSeries)
 		loadSheet(primaryEXD, "CustomTalk", sqpack.LangNone, nil, &customTalks)
-		loadSheet(primaryEXD, "Level", sqpack.LangNone, nil, &levels)
-		loadSheet(primaryEXD, "Cabinet", sqpack.LangNone, nil, &rawCabinets)
+		loadSheet(primaryEXD, "Level", sqpack.LangNone, colsLevel, &levels)
+		loadSheet(primaryEXD, "Cabinet", sqpack.LangNone, colsCol0, &rawCabinets)
 		loadSheet(primaryEXD, "RetainerTask", sqpack.LangNone, nil, &retainerTasks)
 		loadSheet(primaryEXD, "RetainerTaskNormal", sqpack.LangNone, nil, &retainerTaskNormals)
 		loadSheet(primaryEXD, "RetainerTaskParameter", sqpack.LangNone, nil, &retainerTaskParameters)
@@ -1035,26 +1084,26 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 			itemsJa = make(map[int]sqpack.Row)
 		}
 
-		loadSheet(primaryEXD, "ItemUICategory", primaryLang, nil, &rawCategories)
-		loadSheet(primaryEXD, "ClassJob", primaryLang, nil, &rawClassJobs)
-		loadSheet(primaryEXD, "ClassJobCategory", primaryLang, nil, &rawClassJobCategories)
-		loadSheet(primaryEXD, "BaseParam", primaryLang, nil, &rawBaseParams)
-		loadSheet(primaryEXD, "CraftType", primaryLang, nil, &rawCraftTypes)
-		loadSheet(primaryEXD, "SecretRecipeBook", primaryLang, nil, &rawSecretBooks)
-		loadSheet(primaryEXD, "GatheringType", primaryLang, nil, &rawGatheringTypes)
-		loadSheet(primaryEXD, "GatheringSubCategory", primaryLang, nil, &rawGatheringSubCategories)
-		loadSheet(primaryEXD, "PlaceName", primaryLang, nil, &rawPlaceNames)
+		loadSheet(primaryEXD, "ItemUICategory", primaryLang, colsCol01, &rawCategories)
+		loadSheet(primaryEXD, "ClassJob", primaryLang, colsCol01, &rawClassJobs)
+		loadSheet(primaryEXD, "ClassJobCategory", primaryLang, colsCol0, &rawClassJobCategories)
+		loadSheet(primaryEXD, "BaseParam", primaryLang, colsCol12, &rawBaseParams)
+		loadSheet(primaryEXD, "CraftType", primaryLang, colsCol2, &rawCraftTypes)
+		loadSheet(primaryEXD, "SecretRecipeBook", primaryLang, colsCol01, &rawSecretBooks)
+		loadSheet(primaryEXD, "GatheringType", primaryLang, colsCol01, &rawGatheringTypes)
+		loadSheet(primaryEXD, "GatheringSubCategory", primaryLang, colsCol45, &rawGatheringSubCategories)
+		loadSheet(primaryEXD, "PlaceName", primaryLang, colsPlaceName, &rawPlaceNames)
 		loadSheet(primaryEXD, "FishingSpot", primaryLang, nil, &fishingSpots)
 		loadSheet(primaryEXD, "FishParameter", primaryLang, nil, &fishParameters)
 		loadSheet(primaryEXD, "SpearfishingItem", primaryLang, nil, &spearfishingItems)
-		loadSheet(primaryEXD, "GilShop", primaryLang, nil, &gilShops)
-		loadSheet(primaryEXD, "SpecialShop", primaryLang, nil, &specialShops)
-		loadSheet(primaryEXD, "FccShop", primaryLang, nil, &fccShops)
-		loadSheet(primaryEXD, "ENpcResident", primaryLang, nil, &enpcResidents)
-		loadSheet(primaryEXD, "TopicSelect", primaryLang, nil, &topicSelects)
-		loadSheet(primaryEXD, "InclusionShopCategory", primaryLang, nil, &inclusionCategories)
+		loadSheet(primaryEXD, "GilShop", primaryLang, colsCol0, &gilShops)
+		loadSheet(primaryEXD, "SpecialShop", primaryLang, colsSpecialShop, &specialShops)
+		loadSheet(primaryEXD, "FccShop", primaryLang, colsFccShop, &fccShops)
+		loadSheet(primaryEXD, "ENpcResident", primaryLang, colsENpcResident, &enpcResidents)
+		loadSheet(primaryEXD, "TopicSelect", primaryLang, colsTopicSelect, &topicSelects)
+		loadSheet(primaryEXD, "InclusionShopCategory", primaryLang, colsCol02, &inclusionCategories)
 
-		loadSheet(primaryEXD, "Achievement", primaryLang, nil, &achievementsPrimary)
+		loadSheet(primaryEXD, "Achievement", primaryLang, colsAchievementPrimary, &achievementsPrimary)
 		if cnEXD != nil && primaryLang != sqpack.LangChineseSimplified {
 			loadSheet(cnEXD, "Achievement", sqpack.LangChineseSimplified, []int{1, 2}, &achievementsCn)
 		}
@@ -1069,9 +1118,9 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 			achievementsEn = make(map[int]sqpack.Row)
 			achievementsJa = make(map[int]sqpack.Row)
 		}
-		loadSheet(primaryEXD, "AchievementCategory", primaryLang, nil, &rawAchievementCategories)
-		loadSheet(primaryEXD, "AchievementKind", primaryLang, nil, &rawAchievementKinds)
-		loadSheet(primaryEXD, "Title", primaryLang, nil, &titlesPrimary)
+		loadSheet(primaryEXD, "AchievementCategory", primaryLang, colsAchCategory, &rawAchievementCategories)
+		loadSheet(primaryEXD, "AchievementKind", primaryLang, colsCol01, &rawAchievementKinds)
+		loadSheet(primaryEXD, "Title", primaryLang, colsTitlePrimary, &titlesPrimary)
 		if globalEXD != nil {
 			if primaryLang != sqpack.LangEnglish {
 				loadSheet(globalEXD, "Title", sqpack.LangEnglish, []int{0, 1}, &titlesEn)
@@ -1143,14 +1192,31 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 		}
 	}
 
-	// 3. 并发扫描客户端图标资源（语言无关，切换界面语言时直接按只读读取器复用；历史快照跳过）
+	// 3. 图标资源扫描（语言无关，切换界面语言时直接复用；支持 DeferIcons 延迟到进入主界面后后台静默扫描）
 	var cnIconFiles, globalIconFiles []sqpack.IconFileEntry
-	if !in.skipIcons && cnReader != nil {
-		if base != nil && base.CNReader == cnReader && base.cnIconFiles != nil {
+	var hasBaseCNIcons, hasBaseGlobalIcons bool
+	if !in.skipIcons && base != nil {
+		base.iconMu.RLock()
+		if cnReader != nil && base.CNReader == cnReader && base.cnIconFiles != nil {
 			cnIconFiles = base.cnIconFiles
-		} else {
-			tasks = append(tasks, func() {
-				files, err := sqpack.ScanIconFiles(cnReader)
+			hasBaseCNIcons = true
+		}
+		if globalReader != nil && base.GlobalReader == globalReader && base.globalIconFiles != nil {
+			globalIconFiles = base.globalIconFiles
+			hasBaseGlobalIcons = true
+		}
+		base.iconMu.RUnlock()
+	}
+
+	needCNIcons := !in.skipIcons && cnReader != nil && !hasBaseCNIcons
+	needGlobalIcons := !in.skipIcons && globalReader != nil && !hasBaseGlobalIcons
+	deferIconScan := in.deferIcons && (needCNIcons || needGlobalIcons)
+
+	var iconScanTasks []func()
+	if !deferIconScan {
+		if needCNIcons {
+			iconScanTasks = append(iconScanTasks, func() {
+				files, err := sqpack.ScanIconFilesCached(cnReader, in.iconCacheDir)
 				if err != nil {
 					setErr("ui/icon(CN)", err)
 					return
@@ -1158,13 +1224,9 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 				cnIconFiles = files
 			})
 		}
-	}
-	if !in.skipIcons && globalReader != nil {
-		if base != nil && base.GlobalReader == globalReader && base.globalIconFiles != nil {
-			globalIconFiles = base.globalIconFiles
-		} else {
-			tasks = append(tasks, func() {
-				files, err := sqpack.ScanIconFiles(globalReader)
+		if needGlobalIcons {
+			iconScanTasks = append(iconScanTasks, func() {
+				files, err := sqpack.ScanIconFilesCached(globalReader, in.iconCacheDir)
 				if err != nil {
 					setErr("ui/icon(Global)", err)
 					return
@@ -1172,6 +1234,10 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 				globalIconFiles = files
 			})
 		}
+	}
+	// 同步扫描模式下将耗时最长的图标扫描前置入队，避免在任务队列末尾形成长尾阻塞
+	if len(iconScanTasks) > 0 {
+		tasks = append(iconScanTasks, tasks...)
 	}
 
 	totalSheets := len(tasks)
@@ -1338,190 +1404,6 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 		}
 	}
 
-	// 构建配方索引
-	recipesByResult := make(map[int][]int)
-	recipesByIngredient := make(map[int][]recipeUsage)
-	recipeCountByCraft := make(map[int]int)
-	for recipeID, row := range recipes {
-		resultItemID := row.IntAt(4)
-		if resultItemID <= 0 {
-			continue
-		}
-		craftTypeID := row.IntAt(1)
-		recipeCountByCraft[craftTypeID]++
-		recipesByResult[resultItemID] = append(recipesByResult[resultItemID], recipeID)
-		for i := 0; i < 8; i++ {
-			ingID := row.IntAt(6 + i*2)
-			ingAmt := row.IntAt(7 + i*2)
-			if ingID > 0 && ingAmt > 0 {
-				recipesByIngredient[ingID] = append(recipesByIngredient[ingID], recipeUsage{
-					recipeID: recipeID,
-					amount:   ingAmt,
-				})
-			}
-		}
-	}
-	for _, list := range recipesByResult {
-		sort.Ints(list)
-	}
-
-	craftTypes := make(map[int]CraftTypeInfo, len(rawCraftTypes))
-	var craftTypeList []CraftTypeInfo
-	for id, row := range rawCraftTypes {
-		name := row.StringAt(2)
-		if name == "" {
-			continue
-		}
-		jobName := name
-		if cj, ok := classJobs[id+8]; ok && cj.name != "" {
-			jobName = cj.name
-		}
-		info := CraftTypeInfo{
-			ID:          id,
-			Name:        name,
-			JobName:     jobName,
-			IconID:      62008 + id,
-			RecipeCount: recipeCountByCraft[id],
-		}
-		craftTypes[id] = info
-		craftTypeList = append(craftTypeList, info)
-	}
-	sort.Slice(craftTypeList, func(i, j int) bool { return craftTypeList[i].ID < craftTypeList[j].ID })
-
-	// 构建采集与捕鱼反向索引
-	gatheringItemsByItem := make(map[int][]int)
-	for gItemID, row := range gatheringItems {
-		itemID := row.IntAt(0)
-		if itemID > 0 {
-			gatheringItemsByItem[itemID] = append(gatheringItemsByItem[itemID], gItemID)
-		}
-	}
-
-	gatheringPointsByGItem := make(map[int][]int)
-	addPointLink := func(gItemID, pointID int) {
-		if gItemID <= 0 || pointID <= 0 {
-			return
-		}
-		if !slices.Contains(gatheringPointsByGItem[gItemID], pointID) {
-			gatheringPointsByGItem[gItemID] = append(gatheringPointsByGItem[gItemID], pointID)
-		}
-	}
-	for gItemID, subs := range gatheringItemPointSubrows {
-		for _, sub := range subs {
-			addPointLink(gItemID, sub.Data.IntAt(0))
-		}
-	}
-	for pointID, ptRow := range gatheringPoints {
-		baseID := ptRow.IntAt(3)
-		territoryID := ptRow.IntAt(7)
-		placeNameID := ptRow.IntAt(8)
-		if baseID <= 0 || territoryID <= 1 || placeNameID <= 0 {
-			continue
-		}
-		baseRow, ok := gatheringPointBases[baseID]
-		if !ok {
-			continue
-		}
-		for i := 2; i <= 9; i++ {
-			gItemID := baseRow.IntAt(i)
-			if gItemID > 0 && gItemID < 20000 {
-				addPointLink(gItemID, pointID)
-			}
-		}
-	}
-
-	fishingSpotsByItem := make(map[int][]int)
-	for spotID, row := range fishingSpots {
-		if row.IntAt(6) <= 0 {
-			continue
-		}
-		for i := 13; i <= 22; i++ {
-			fishID := row.IntAt(i)
-			if fishID > 0 && !slices.Contains(fishingSpotsByItem[fishID], spotID) {
-				fishingSpotsByItem[fishID] = append(fishingSpotsByItem[fishID], spotID)
-			}
-		}
-	}
-
-	fishParamsByItem := make(map[int]sqpack.Row)
-	for _, row := range fishParameters {
-		itemID := row.IntAt(4)
-		if itemID > 0 {
-			if _, exists := fishParamsByItem[itemID]; !exists {
-				fishParamsByItem[itemID] = row
-			}
-		}
-	}
-
-	type nbEntry struct {
-		id  int
-		row sqpack.Row
-	}
-	notebooksByBaseID := make(map[int][]nbEntry)
-	for nbID, nbRow := range spearfishingNotebooks {
-		if baseID := nbRow.IntAt(9); baseID > 0 {
-			notebooksByBaseID[baseID] = append(notebooksByBaseID[baseID], nbEntry{id: nbID, row: nbRow})
-		}
-	}
-	spearfishingByItem := make(map[int][]spearfishingLink)
-	for baseID, nbs := range notebooksByBaseID {
-		baseRow, ok := gatheringPointBases[baseID]
-		if !ok {
-			continue
-		}
-		for i := 2; i <= 9; i++ {
-			sfID := baseRow.IntAt(i)
-			if sfID <= 0 {
-				continue
-			}
-			sfRow, ok := spearfishingItems[sfID]
-			if !ok {
-				continue
-			}
-			itemID := sfRow.IntAt(1)
-			if itemID <= 0 {
-				continue
-			}
-			for _, nb := range nbs {
-				spearfishingByItem[itemID] = append(spearfishingByItem[itemID], spearfishingLink{
-					spearfishingItemRow: sfRow,
-					notebookID:          nb.id,
-					notebookRow:         nb.row,
-				})
-			}
-		}
-	}
-
-	emit(LoadProgress{
-		Stage:   LoadStageIndices,
-		Done:    1,
-		Total:   4,
-		Message: i18n.T(appLang, "loading.msg_shops"),
-	}, true)
-
-	// 构建商店与雇员探险索引
-	shopIdx := buildShopIndices(shopLoaderInput{
-		appLang:             appLang,
-		itemsPrimary:        itemsPrimary,
-		gilShops:            gilShops,
-		gilShopItems:        gilShopItems,
-		specialShops:        specialShops,
-		gcScripShopItems:    gcScripShopItems,
-		fccShops:            fccShops,
-		tomestonesItems:     tomestonesItems,
-		enpcResidents:       enpcResidents,
-		enpcBases:           enpcBases,
-		topicSelects:        topicSelects,
-		preHandlers:         preHandlers,
-		inclusionShops:      inclusionShops,
-		inclusionCategories: inclusionCategories,
-		inclusionSeries:     inclusionSeries,
-		customTalks:         customTalks,
-		levels:              levels,
-	})
-
-	retainerIdx := buildRetainerIndices(appLang, retainerTasks, retainerTaskNormals, retainerTaskParameters, classJobCategories)
-
 	tomestoneByIndex := make(map[int]int)
 	for _, row := range tomestonesItems {
 		itemID := row.IntAt(0)
@@ -1530,86 +1412,6 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 			tomestoneByIndex[idx] = itemID
 		}
 	}
-
-	itemMeta := func(itemID int) (string, int) {
-		if row, ok := itemsPrimary[itemID]; ok {
-			return row.StringAt(9), row.IntAt(10)
-		}
-		return "", 0
-	}
-
-	emit(LoadProgress{
-		Stage:   LoadStageIndices,
-		Done:    2,
-		Total:   4,
-		Message: i18n.T(appLang, "loading.msg_relations"),
-	}, true)
-
-	collectablesIdx := buildCollectablesData(collectablesLoaderInput{
-		appLang:                appLang,
-		shops:                  collectablesShops,
-		shopItems:              collectablesShopItems,
-		shopItemGroups:         collectablesShopItemGroups,
-		shopRefines:            collectablesShopRefines,
-		shopRewardItems:        collectablesShopRewardItems,
-		shopRewardScrips:       collectablesShopRewardScrips,
-		satisfactionNpcs:       satisfactionNpcs,
-		satisfactionSupplies:   satisfactionSupplies,
-		satisfactionRewards:    satisfactionRewards,
-		hwdSupplies:            hwdSupplies,
-		hwdRewards:             hwdRewards,
-		hwdTerms:               hwdTerms,
-		quests:                 questsPrimary,
-		collectablesShopToNPCs: shopIdx.CollectablesShopToNPCs,
-		npcNames:               shopIdx.NpcNames,
-		npcLocations:           shopIdx.NpcLocations,
-		levelLocations:         shopIdx.LevelLocations,
-		tomestoneByIndex:       tomestoneByIndex,
-		placeNames:             placeNames,
-		territoryTypes:         territoryTypes,
-		maps:                   maps,
-		itemMeta:               itemMeta,
-	})
-
-	questIdx := buildQuestData(questLoaderInput{
-		appLang:                 appLang,
-		quests:                  questsPrimary,
-		questsCn:                questsCn,
-		questsEn:                questsEn,
-		questsJa:                questsJa,
-		journalGenres:           journalGenres,
-		journalCategories:       journalCategories,
-		journalSections:         journalSections,
-		questClassJobRewards:    questClassJobRewards,
-		questRewardOthers:       questRewardOthers,
-		eventIconTypes:          eventIconTypes,
-		paramGrows:              paramGrows,
-		beastTribes:             beastTribes,
-		beastRankBonuses:        beastRankBonuses,
-		beastReputationRanks:    beastReputationRanks,
-		grandCompanies:          grandCompanies,
-		exVersions:              exVersions,
-		mounts:                  mounts,
-		actions:                 actions,
-		emotes:                  emotes,
-		generalActions:          generalActions,
-		instanceContents:        instanceContents,
-		contentFinderConditions: contentFinderConditions,
-		eobjNames:               eobjNames,
-		cutscenes:               cutscenes,
-		completeJournals:        completeJournals,
-		bgms:                    bgmSheet,
-		npcNames:                shopIdx.NpcNames,
-		npcLocations:            shopIdx.NpcLocations,
-		levelLocations:          shopIdx.LevelLocations,
-		tomestoneByIndex:        tomestoneByIndex,
-		classJobs:               classJobs,
-		classJobCategories:      classJobCategories,
-		placeNames:              placeNames,
-		territoryTypes:          territoryTypes,
-		maps:                    maps,
-		itemMeta:                itemMeta,
-	})
 
 	cabinetIDs := make(map[int]struct{}, len(rawCabinets))
 	for _, row := range rawCabinets {
@@ -1658,10 +1460,314 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 		}
 	}
 
+	// 并行阶段 1：同时构建配方、采集/捕鱼、商店/NPC 与雇员探险索引
+	var (
+		recipesByResult        map[int][]int
+		recipesByIngredient    map[int][]recipeUsage
+		craftTypes             map[int]CraftTypeInfo
+		craftTypeList          []CraftTypeInfo
+		gatheringItemsByItem   map[int][]int
+		gatheringPointsByGItem map[int][]int
+		fishingSpotsByItem     map[int][]int
+		fishParamsByItem       map[int]sqpack.Row
+		spearfishingByItem     map[int][]spearfishingLink
+		shopIdx                ShopIndices
+		retainerIdx            RetainerIndices
+	)
+
+	var phase1WG sync.WaitGroup
+	phase1WG.Add(4)
+	go func() {
+		defer phase1WG.Done()
+		recipesByResult = make(map[int][]int)
+		recipesByIngredient = make(map[int][]recipeUsage)
+		recipeCountByCraft := make(map[int]int)
+		for recipeID, row := range recipes {
+			resultItemID := row.IntAt(4)
+			if resultItemID <= 0 {
+				continue
+			}
+			craftTypeID := row.IntAt(1)
+			recipeCountByCraft[craftTypeID]++
+			recipesByResult[resultItemID] = append(recipesByResult[resultItemID], recipeID)
+			for i := 0; i < 8; i++ {
+				ingID := row.IntAt(6 + i*2)
+				ingAmt := row.IntAt(7 + i*2)
+				if ingID > 0 && ingAmt > 0 {
+					recipesByIngredient[ingID] = append(recipesByIngredient[ingID], recipeUsage{
+						recipeID: recipeID,
+						amount:   ingAmt,
+					})
+				}
+			}
+		}
+		for _, list := range recipesByResult {
+			sort.Ints(list)
+		}
+
+		craftTypes = make(map[int]CraftTypeInfo, len(rawCraftTypes))
+		for id, row := range rawCraftTypes {
+			name := row.StringAt(2)
+			if name == "" {
+				continue
+			}
+			jobName := name
+			if cj, ok := classJobs[id+8]; ok && cj.name != "" {
+				jobName = cj.name
+			}
+			info := CraftTypeInfo{
+				ID:          id,
+				Name:        name,
+				JobName:     jobName,
+				IconID:      62008 + id,
+				RecipeCount: recipeCountByCraft[id],
+			}
+			craftTypes[id] = info
+			craftTypeList = append(craftTypeList, info)
+		}
+		sort.Slice(craftTypeList, func(i, j int) bool { return craftTypeList[i].ID < craftTypeList[j].ID })
+	}()
+
+	go func() {
+		defer phase1WG.Done()
+		gatheringItemsByItem = make(map[int][]int)
+		for gItemID, row := range gatheringItems {
+			itemID := row.IntAt(0)
+			if itemID > 0 {
+				gatheringItemsByItem[itemID] = append(gatheringItemsByItem[itemID], gItemID)
+			}
+		}
+
+		gatheringPointsByGItem = make(map[int][]int)
+		addPointLink := func(gItemID, pointID int) {
+			if gItemID <= 0 || pointID <= 0 {
+				return
+			}
+			if !slices.Contains(gatheringPointsByGItem[gItemID], pointID) {
+				gatheringPointsByGItem[gItemID] = append(gatheringPointsByGItem[gItemID], pointID)
+			}
+		}
+		for gItemID, subs := range gatheringItemPointSubrows {
+			for _, sub := range subs {
+				addPointLink(gItemID, sub.Data.IntAt(0))
+			}
+		}
+		for pointID, ptRow := range gatheringPoints {
+			baseID := ptRow.IntAt(3)
+			territoryID := ptRow.IntAt(7)
+			placeNameID := ptRow.IntAt(8)
+			if baseID <= 0 || territoryID <= 1 || placeNameID <= 0 {
+				continue
+			}
+			baseRow, ok := gatheringPointBases[baseID]
+			if !ok {
+				continue
+			}
+			for i := 2; i <= 9; i++ {
+				gItemID := baseRow.IntAt(i)
+				if gItemID > 0 && gItemID < 20000 {
+					addPointLink(gItemID, pointID)
+				}
+			}
+		}
+
+		fishingSpotsByItem = make(map[int][]int)
+		for spotID, row := range fishingSpots {
+			if row.IntAt(6) <= 0 {
+				continue
+			}
+			for i := 13; i <= 22; i++ {
+				fishID := row.IntAt(i)
+				if fishID > 0 && !slices.Contains(fishingSpotsByItem[fishID], spotID) {
+					fishingSpotsByItem[fishID] = append(fishingSpotsByItem[fishID], spotID)
+				}
+			}
+		}
+
+		fishParamsByItem = make(map[int]sqpack.Row)
+		for _, row := range fishParameters {
+			itemID := row.IntAt(4)
+			if itemID > 0 {
+				if _, exists := fishParamsByItem[itemID]; !exists {
+					fishParamsByItem[itemID] = row
+				}
+			}
+		}
+
+		type nbEntry struct {
+			id  int
+			row sqpack.Row
+		}
+		notebooksByBaseID := make(map[int][]nbEntry)
+		for nbID, nbRow := range spearfishingNotebooks {
+			if baseID := nbRow.IntAt(9); baseID > 0 {
+				notebooksByBaseID[baseID] = append(notebooksByBaseID[baseID], nbEntry{id: nbID, row: nbRow})
+			}
+		}
+		spearfishingByItem = make(map[int][]spearfishingLink)
+		for baseID, nbs := range notebooksByBaseID {
+			baseRow, ok := gatheringPointBases[baseID]
+			if !ok {
+				continue
+			}
+			for i := 2; i <= 9; i++ {
+				sfID := baseRow.IntAt(i)
+				if sfID <= 0 {
+					continue
+				}
+				sfRow, ok := spearfishingItems[sfID]
+				if !ok {
+					continue
+				}
+				itemID := sfRow.IntAt(1)
+				if itemID <= 0 {
+					continue
+				}
+				for _, nb := range nbs {
+					spearfishingByItem[itemID] = append(spearfishingByItem[itemID], spearfishingLink{
+						spearfishingItemRow: sfRow,
+						notebookID:          nb.id,
+						notebookRow:         nb.row,
+					})
+				}
+			}
+		}
+	}()
+
+	go func() {
+		defer phase1WG.Done()
+		shopIdx = buildShopIndices(shopLoaderInput{
+			appLang:             appLang,
+			itemsPrimary:        itemsPrimary,
+			gilShops:            gilShops,
+			gilShopItems:        gilShopItems,
+			specialShops:        specialShops,
+			gcScripShopItems:    gcScripShopItems,
+			fccShops:            fccShops,
+			tomestonesItems:     tomestonesItems,
+			enpcResidents:       enpcResidents,
+			enpcBases:           enpcBases,
+			topicSelects:        topicSelects,
+			preHandlers:         preHandlers,
+			inclusionShops:      inclusionShops,
+			inclusionCategories: inclusionCategories,
+			inclusionSeries:     inclusionSeries,
+			customTalks:         customTalks,
+			levels:              levels,
+		})
+	}()
+
+	go func() {
+		defer phase1WG.Done()
+		retainerIdx = buildRetainerIndices(appLang, retainerTasks, retainerTaskNormals, retainerTaskParameters, classJobCategories)
+	}()
+	phase1WG.Wait()
+
+	emit(LoadProgress{
+		Stage:   LoadStageIndices,
+		Done:    1,
+		Total:   4,
+		Message: i18n.T(appLang, "loading.msg_shops"),
+	}, true)
+
+	itemMeta := func(itemID int) (string, int) {
+		if row, ok := itemsPrimary[itemID]; ok {
+			return row.StringAt(9), row.IntAt(10)
+		}
+		return "", 0
+	}
+
+	emit(LoadProgress{
+		Stage:   LoadStageIndices,
+		Done:    2,
+		Total:   4,
+		Message: i18n.T(appLang, "loading.msg_relations"),
+	}, true)
+
+	// 并行阶段 2：同时构建收藏品交易与任务全量索引
+	var (
+		collectablesIdx collectablesIndices
+		questIdx        questIndices
+	)
+	var phase2WG sync.WaitGroup
+	phase2WG.Add(2)
+	go func() {
+		defer phase2WG.Done()
+		collectablesIdx = buildCollectablesData(collectablesLoaderInput{
+			appLang:                appLang,
+			shops:                  collectablesShops,
+			shopItems:              collectablesShopItems,
+			shopItemGroups:         collectablesShopItemGroups,
+			shopRefines:            collectablesShopRefines,
+			shopRewardItems:        collectablesShopRewardItems,
+			shopRewardScrips:       collectablesShopRewardScrips,
+			satisfactionNpcs:       satisfactionNpcs,
+			satisfactionSupplies:   satisfactionSupplies,
+			satisfactionRewards:    satisfactionRewards,
+			hwdSupplies:            hwdSupplies,
+			hwdRewards:             hwdRewards,
+			hwdTerms:               hwdTerms,
+			quests:                 questsPrimary,
+			collectablesShopToNPCs: shopIdx.CollectablesShopToNPCs,
+			npcNames:               shopIdx.NpcNames,
+			npcLocations:           shopIdx.NpcLocations,
+			levelLocations:         shopIdx.LevelLocations,
+			tomestoneByIndex:       tomestoneByIndex,
+			placeNames:             placeNames,
+			territoryTypes:         territoryTypes,
+			maps:                   maps,
+			itemMeta:               itemMeta,
+		})
+	}()
+	go func() {
+		defer phase2WG.Done()
+		questIdx = buildQuestData(questLoaderInput{
+			appLang:                 appLang,
+			quests:                  questsPrimary,
+			questsCn:                questsCn,
+			questsEn:                questsEn,
+			questsJa:                questsJa,
+			journalGenres:           journalGenres,
+			journalCategories:       journalCategories,
+			journalSections:         journalSections,
+			questClassJobRewards:    questClassJobRewards,
+			questRewardOthers:       questRewardOthers,
+			eventIconTypes:          eventIconTypes,
+			paramGrows:              paramGrows,
+			beastTribes:             beastTribes,
+			beastRankBonuses:        beastRankBonuses,
+			beastReputationRanks:    beastReputationRanks,
+			grandCompanies:          grandCompanies,
+			exVersions:              exVersions,
+			mounts:                  mounts,
+			actions:                 actions,
+			emotes:                  emotes,
+			generalActions:          generalActions,
+			instanceContents:        instanceContents,
+			contentFinderConditions: contentFinderConditions,
+			eobjNames:               eobjNames,
+			cutscenes:               cutscenes,
+			completeJournals:        completeJournals,
+			bgms:                    bgmSheet,
+			npcNames:                shopIdx.NpcNames,
+			npcLocations:            shopIdx.NpcLocations,
+			levelLocations:          shopIdx.LevelLocations,
+			tomestoneByIndex:        tomestoneByIndex,
+			classJobs:               classJobs,
+			classJobCategories:      classJobCategories,
+			placeNames:              placeNames,
+			territoryTypes:          territoryTypes,
+			maps:                    maps,
+			itemMeta:                itemMeta,
+		})
+	}()
+	phase2WG.Wait()
+
 	// 构建全量有效道具摘要列表
 	itemSummaries := make([]ItemSummary, 0, len(itemsPrimary))
 	itemSummaryByID := make(map[int]ItemSummary, len(itemsPrimary))
 	categoryCount := make(map[int]int)
+	otherCatLabel := i18n.T(appLang, "common.other")
 
 	for itemID, row := range itemsPrimary {
 		if itemID <= 0 {
@@ -1686,7 +1792,7 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 
 		catID := row.IntAt(15)
 		catInfo, hasCat := categories[catID]
-		catName := i18n.T(appLang, "common.other")
+		catName := otherCatLabel
 		catIconID := 0
 		if hasCat {
 			catName = catInfo.name
@@ -1753,39 +1859,6 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 	}
 	sort.Slice(itemSummaries, func(i, j int) bool { return itemSummaries[i].ID < itemSummaries[j].ID })
 
-	leveIdx := buildLeveData(leveLoaderInput{
-		appLang:               appLang,
-		leves:                 levesPrimary,
-		levesCn:               levesCn,
-		levesEn:               levesEn,
-		levesJa:               levesJa,
-		craftLeves:            craftLeves,
-		gatheringLeves:        gatheringLeves,
-		gatheringLeveRoutes:   gatheringLeveRoutes,
-		battleLeves:           battleLeves,
-		companyLeves:          companyLeves,
-		leveRewardItems:       leveRewardItems,
-		leveRewardItemGroups:  leveRewardItemGroups,
-		leveAssignmentTypes:   leveAssignmentTypes,
-		leveClients:           leveClients,
-		towns:                 towns,
-		leveStrings:           leveStrings,
-		gatheringLeveRules:    gatheringLeveRules,
-		battleLeveRules:       battleLeveRules,
-		companyLeveRules:      companyLeveRules,
-		eventItems:            eventItems,
-		bnpcNames:             bnpcNames,
-		journalGenres:         journalGenres,
-		fishingSpots:          fishingSpots,
-		spearfishingNotebooks: spearfishingNotebooks,
-		levelLocations:        shopIdx.LevelLocations,
-		classJobCategories:    classJobCategories,
-		placeNames:            placeNames,
-		territoryTypes:        territoryTypes,
-		maps:                  maps,
-		itemSummaryByID:       itemSummaryByID,
-	})
-
 	var categoryList []ItemCategoryInfo
 	for id, info := range categories {
 		if cnt := categoryCount[id]; cnt > 0 {
@@ -1806,241 +1879,299 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 		Message: i18n.T(appLang, "loading.msg_achievements"),
 	}, true)
 
-	// 解析成就分类、大类与称号表
-	type achKindDict struct {
-		name  string
-		order int
-	}
-	achKinds := make(map[int]achKindDict)
-	for id, row := range rawAchievementKinds {
-		if name := row.StringAt(0); name != "" {
-			achKinds[id] = achKindDict{name: name, order: row.IntAt(1)}
-		}
-	}
-	type achCatDict struct {
-		name   string
-		kindID int
-		order  int
-	}
-	achCats := make(map[int]achCatDict)
-	for id, row := range rawAchievementCategories {
-		if name := row.StringAt(0); name != "" {
-			// AchievementCategory 物理列序：0=Name, 1=AchievementKind, 4=Order
-			achCats[id] = achCatDict{name: name, kindID: row.IntAt(1), order: row.IntAt(4)}
-		}
-	}
+	// 并行阶段 3：同时构建理符、成就称号与音乐索引
+	var (
+		leveIdx                  leveIndices
+		totalTitles              int
+		achievements             []AchievementEntry
+		achievementByID          map[int]AchievementEntry
+		achievementsByRewardItem map[int][]AchievementEntry
+		achievementKindList      []AchievementKindInfo
+		achievementCategoryList  []AchievementCategoryInfo
+		musicIdx                 musicIndices
+		eventSystemBGMs          map[string]int
+		bgmByFile, orchByFile    map[string]MusicEntry
+	)
 
-	totalTitles := 0
-	for _, row := range titlesPrimary {
-		if row.StringAt(0) != "" {
-			totalTitles++
-		}
-	}
-
-	achievements := make([]AchievementEntry, 0, len(achievementsPrimary))
-	achievementByID := make(map[int]AchievementEntry, len(achievementsPrimary))
-	achievementsByRewardItem := make(map[int][]AchievementEntry)
-	kindCount := make(map[int]int)
-	catCount := make(map[int]int)
-
-	for achID, row := range achievementsPrimary {
-		if achID <= 0 {
-			continue
-		}
-		namePrimary := row.StringAt(1)
-		if namePrimary == "" {
-			continue
-		}
-		cnRow := achievementsCn[achID]
-		enRow := achievementsEn[achID]
-		jaRow := achievementsJa[achID]
-		catID := row.IntAt(0)
-		catInfo := achCats[catID]
-		kindID := catInfo.kindID
-		kindName := achKinds[kindID].name
-		if kindName == "" {
-			kindName = i18n.T(appLang, "common.other")
-		}
-		catName := catInfo.name
-		if catName == "" {
-			catName = i18n.T(appLang, "common.general")
-		}
-
-		titleID := row.IntAt(6)
-		var titleMasc, titleFem, titleEn, titleJa string
-		var titleIsPrefix bool
-		if titleID > 0 {
-			if tr, ok := titlesPrimary[titleID]; ok {
-				titleMasc = tr.StringAt(0)
-				titleFem = tr.StringAt(1)
-				titleIsPrefix = tr.BoolAt(2)
-			}
-			if tr, ok := titlesEn[titleID]; ok {
-				titleEn = tr.StringAt(0)
-			}
-			if tr, ok := titlesJa[titleID]; ok {
-				titleJa = tr.StringAt(0)
-			}
-		}
-
-		rewardItemID := row.IntAt(7)
-		var rewardItemName string
-		var rewardItemIcon int
-		if rewardItemID > 0 {
-			if s, ok := itemSummaryByID[rewardItemID]; ok {
-				rewardItemName = s.NameCn
-				rewardItemIcon = s.IconID
-			}
-		}
-
-		entry := AchievementEntry{
-			ID:               achID,
-			NameCn:           namePrimary,
-			NameZh:           cnRow.StringAt(1),
-			NameEn:           enRow.StringAt(1),
-			NameJa:           jaRow.StringAt(1),
-			DescriptionCn:    row.StringAt(2),
-			DescriptionEn:    enRow.StringAt(2),
-			DescriptionJa:    jaRow.StringAt(2),
-			Points:           row.IntAt(5),
-			IconID:           row.IntAt(11),
-			KindID:           kindID,
-			KindName:         kindName,
-			CategoryID:       catID,
-			CategoryName:     catName,
-			TitleID:          titleID,
-			TitleMasculineCn: titleMasc,
-			TitleFeminineCn:  titleFem,
-			TitleNameEn:      titleEn,
-			TitleNameJa:      titleJa,
-			TitleIsPrefix:    titleIsPrefix,
-			RewardItemID:     rewardItemID,
-			RewardItemNameCn: rewardItemName,
-			RewardItemIconID: rewardItemIcon,
-		}
-		achievements = append(achievements, entry)
-		achievementByID[achID] = entry
-		if kindID > 0 {
-			kindCount[kindID]++
-		}
-		if catID > 0 {
-			catCount[catID]++
-		}
-		if rewardItemID > 0 {
-			achievementsByRewardItem[rewardItemID] = append(achievementsByRewardItem[rewardItemID], entry)
-		}
-	}
-	sort.Slice(achievements, func(i, j int) bool { return achievements[i].ID < achievements[j].ID })
-
-	// 按大类归集并依游戏内 Order 排序二级分类
-	catsByKind := make(map[int][]AchievementCategoryInfo)
-	for id, cat := range achCats {
-		cnt := catCount[id]
-		if cnt <= 0 || id <= 0 {
-			continue
-		}
-		kName := achKinds[cat.kindID].name
-		if kName == "" {
-			kName = i18n.T(appLang, "common.other")
-		}
-		catsByKind[cat.kindID] = append(catsByKind[cat.kindID], AchievementCategoryInfo{
-			ID:       id,
-			KindID:   cat.kindID,
-			KindName: kName,
-			Name:     cat.name,
-			Count:    cnt,
+	var phase3WG sync.WaitGroup
+	phase3WG.Add(3)
+	go func() {
+		defer phase3WG.Done()
+		leveIdx = buildLeveData(leveLoaderInput{
+			appLang:               appLang,
+			leves:                 levesPrimary,
+			levesCn:               levesCn,
+			levesEn:               levesEn,
+			levesJa:               levesJa,
+			craftLeves:            craftLeves,
+			gatheringLeves:        gatheringLeves,
+			gatheringLeveRoutes:   gatheringLeveRoutes,
+			battleLeves:           battleLeves,
+			companyLeves:          companyLeves,
+			leveRewardItems:       leveRewardItems,
+			leveRewardItemGroups:  leveRewardItemGroups,
+			leveAssignmentTypes:   leveAssignmentTypes,
+			leveClients:           leveClients,
+			towns:                 towns,
+			leveStrings:           leveStrings,
+			gatheringLeveRules:    gatheringLeveRules,
+			battleLeveRules:       battleLeveRules,
+			companyLeveRules:      companyLeveRules,
+			eventItems:            eventItems,
+			bnpcNames:             bnpcNames,
+			journalGenres:         journalGenres,
+			fishingSpots:          fishingSpots,
+			spearfishingNotebooks: spearfishingNotebooks,
+			levelLocations:        shopIdx.LevelLocations,
+			classJobCategories:    classJobCategories,
+			placeNames:            placeNames,
+			territoryTypes:        territoryTypes,
+			maps:                  maps,
+			itemSummaryByID:       itemSummaryByID,
 		})
-	}
-	for kID, list := range catsByKind {
-		sort.Slice(list, func(i, j int) bool {
-			oi, oj := achCats[list[i].ID].order, achCats[list[j].ID].order
+	}()
+
+	go func() {
+		defer phase3WG.Done()
+		type achKindDict struct {
+			name  string
+			order int
+		}
+		achKinds := make(map[int]achKindDict)
+		for id, row := range rawAchievementKinds {
+			if name := row.StringAt(0); name != "" {
+				achKinds[id] = achKindDict{name: name, order: row.IntAt(1)}
+			}
+		}
+		type achCatDict struct {
+			name   string
+			kindID int
+			order  int
+		}
+		achCats := make(map[int]achCatDict)
+		for id, row := range rawAchievementCategories {
+			if name := row.StringAt(0); name != "" {
+				// AchievementCategory 物理列序：0=Name, 1=AchievementKind, 4=Order
+				achCats[id] = achCatDict{name: name, kindID: row.IntAt(1), order: row.IntAt(4)}
+			}
+		}
+
+		for _, row := range titlesPrimary {
+			if row.StringAt(0) != "" {
+				totalTitles++
+			}
+		}
+
+		achievements = make([]AchievementEntry, 0, len(achievementsPrimary))
+		achievementByID = make(map[int]AchievementEntry, len(achievementsPrimary))
+		achievementsByRewardItem = make(map[int][]AchievementEntry)
+		kindCount := make(map[int]int)
+		catCount := make(map[int]int)
+		generalLabel := i18n.T(appLang, "common.general")
+
+		for achID, row := range achievementsPrimary {
+			if achID <= 0 {
+				continue
+			}
+			namePrimary := row.StringAt(1)
+			if namePrimary == "" {
+				continue
+			}
+			cnRow := achievementsCn[achID]
+			enRow := achievementsEn[achID]
+			jaRow := achievementsJa[achID]
+			catID := row.IntAt(0)
+			catInfo := achCats[catID]
+			kindID := catInfo.kindID
+			kindName := achKinds[kindID].name
+			if kindName == "" {
+				kindName = otherCatLabel
+			}
+			catName := catInfo.name
+			if catName == "" {
+				catName = generalLabel
+			}
+
+			titleID := row.IntAt(6)
+			var titleMasc, titleFem, titleEn, titleJa string
+			var titleIsPrefix bool
+			if titleID > 0 {
+				if tr, ok := titlesPrimary[titleID]; ok {
+					titleMasc = tr.StringAt(0)
+					titleFem = tr.StringAt(1)
+					titleIsPrefix = tr.BoolAt(2)
+				}
+				if tr, ok := titlesEn[titleID]; ok {
+					titleEn = tr.StringAt(0)
+				}
+				if tr, ok := titlesJa[titleID]; ok {
+					titleJa = tr.StringAt(0)
+				}
+			}
+
+			rewardItemID := row.IntAt(7)
+			var rewardItemName string
+			var rewardItemIcon int
+			if rewardItemID > 0 {
+				if s, ok := itemSummaryByID[rewardItemID]; ok {
+					rewardItemName = s.NameCn
+					rewardItemIcon = s.IconID
+				}
+			}
+
+			entry := AchievementEntry{
+				ID:               achID,
+				NameCn:           namePrimary,
+				NameZh:           cnRow.StringAt(1),
+				NameEn:           enRow.StringAt(1),
+				NameJa:           jaRow.StringAt(1),
+				DescriptionCn:    row.StringAt(2),
+				DescriptionEn:    enRow.StringAt(2),
+				DescriptionJa:    jaRow.StringAt(2),
+				Points:           row.IntAt(5),
+				IconID:           row.IntAt(11),
+				KindID:           kindID,
+				KindName:         kindName,
+				CategoryID:       catID,
+				CategoryName:     catName,
+				TitleID:          titleID,
+				TitleMasculineCn: titleMasc,
+				TitleFeminineCn:  titleFem,
+				TitleNameEn:      titleEn,
+				TitleNameJa:      titleJa,
+				TitleIsPrefix:    titleIsPrefix,
+				RewardItemID:     rewardItemID,
+				RewardItemNameCn: rewardItemName,
+				RewardItemIconID: rewardItemIcon,
+			}
+			achievements = append(achievements, entry)
+			achievementByID[achID] = entry
+			if kindID > 0 {
+				kindCount[kindID]++
+			}
+			if catID > 0 {
+				catCount[catID]++
+			}
+			if rewardItemID > 0 {
+				achievementsByRewardItem[rewardItemID] = append(achievementsByRewardItem[rewardItemID], entry)
+			}
+		}
+		sort.Slice(achievements, func(i, j int) bool { return achievements[i].ID < achievements[j].ID })
+
+		catsByKind := make(map[int][]AchievementCategoryInfo)
+		for id, cat := range achCats {
+			cnt := catCount[id]
+			if cnt <= 0 || id <= 0 {
+				continue
+			}
+			kName := achKinds[cat.kindID].name
+			if kName == "" {
+				kName = otherCatLabel
+			}
+			catsByKind[cat.kindID] = append(catsByKind[cat.kindID], AchievementCategoryInfo{
+				ID:       id,
+				KindID:   cat.kindID,
+				KindName: kName,
+				Name:     cat.name,
+				Count:    cnt,
+			})
+		}
+		for kID, list := range catsByKind {
+			sort.Slice(list, func(i, j int) bool {
+				oi, oj := achCats[list[i].ID].order, achCats[list[j].ID].order
+				if oi != oj {
+					return oi < oj
+				}
+				return list[i].ID < list[j].ID
+			})
+			catsByKind[kID] = list
+		}
+
+		for id, k := range achKinds {
+			if cnt := kindCount[id]; cnt > 0 {
+				achievementKindList = append(achievementKindList, AchievementKindInfo{
+					ID:         id,
+					Name:       k.name,
+					Count:      cnt,
+					Categories: catsByKind[id],
+				})
+			}
+		}
+		sort.Slice(achievementKindList, func(i, j int) bool {
+			oi, oj := achKinds[achievementKindList[i].ID].order, achKinds[achievementKindList[j].ID].order
 			if oi != oj {
 				return oi < oj
 			}
-			return list[i].ID < list[j].ID
+			return achievementKindList[i].ID < achievementKindList[j].ID
 		})
-		catsByKind[kID] = list
-	}
 
-	var achievementKindList []AchievementKindInfo
-	for id, k := range achKinds {
-		if cnt := kindCount[id]; cnt > 0 {
-			achievementKindList = append(achievementKindList, AchievementKindInfo{
-				ID:         id,
-				Name:       k.name,
-				Count:      cnt,
-				Categories: catsByKind[id],
-			})
+		for _, k := range achievementKindList {
+			achievementCategoryList = append(achievementCategoryList, k.Categories...)
 		}
-	}
-	sort.Slice(achievementKindList, func(i, j int) bool {
-		oi, oj := achKinds[achievementKindList[i].ID].order, achKinds[achievementKindList[j].ID].order
-		if oi != oj {
-			return oi < oj
+		if orphanCats := catsByKind[0]; len(orphanCats) > 0 {
+			achievementCategoryList = append(achievementCategoryList, orphanCats...)
 		}
-		return achievementKindList[i].ID < achievementKindList[j].ID
-	})
+	}()
 
-	var achievementCategoryList []AchievementCategoryInfo
-	for _, k := range achievementKindList {
-		achievementCategoryList = append(achievementCategoryList, k.Categories...)
-	}
-	// 兜底纳入未归属有效大类的二级分类
-	if orphanCats := catsByKind[0]; len(orphanCats) > 0 {
-		achievementCategoryList = append(achievementCategoryList, orphanCats...)
-	}
-
-	musicIdx := buildMusicData(musicLoaderInput{
-		appLang:                 appLang,
-		primaryReader:           primaryEXD,
-		hasFileReader:           primaryReader,
-		presetFileExists:        in.presetFileExists,
-		schemasFS:               schemasFS,
-		bgmSheet:                bgmSheet,
-		bgmSituations:           bgmSituations,
-		bgmSwitches:             bgmSwitches,
-		bgmSystemDefines:        bgmSystemDefines,
-		weddingBGMs:             weddingBGMs,
-		weddingBGMsEn:           weddingBGMsEn,
-		weddingBGMsJa:           weddingBGMsJa,
-		orchPrimary:             orchPrimary,
-		orchCn:                  orchCn,
-		orchEn:                  orchEn,
-		orchJa:                  orchJa,
-		orchPaths:               orchPaths,
-		orchUiparams:            orchUiparams,
-		orchCategories:          orchCategories,
-		exVersions:              exVersions,
-		territoryTypes:          territoryTypes,
-		placeNames:              placeNames,
-		instanceContents:        instanceContents,
-		contentFinderConditions: contentFinderConditions,
-		mounts:                  mounts,
-		fates:                   fates,
-		gfates:                  gfates,
-		gfateTypes:              gfateTypes,
-		goldSaucerTexts:         goldSaucerTexts,
-		leves:                   levesPrimary,
-		itemsPrimary:            itemsPrimary,
-		itemSummaryByID:         itemSummaryByID,
-	})
-
-	eventSystemBGMs := buildEventSystemBGMMap(eventSystemDefines, bgmSheet)
-	bgmByFile, orchByFile := buildMusicFileLookup(musicIdx)
+	go func() {
+		defer phase3WG.Done()
+		musicIdx = buildMusicData(musicLoaderInput{
+			appLang:                 appLang,
+			primaryReader:           primaryEXD,
+			hasFileReader:           primaryReader,
+			presetFileExists:        in.presetFileExists,
+			schemasFS:               schemasFS,
+			bgmSheet:                bgmSheet,
+			bgmSituations:           bgmSituations,
+			bgmSwitches:             bgmSwitches,
+			bgmSystemDefines:        bgmSystemDefines,
+			weddingBGMs:             weddingBGMs,
+			weddingBGMsEn:           weddingBGMsEn,
+			weddingBGMsJa:           weddingBGMsJa,
+			orchPrimary:             orchPrimary,
+			orchCn:                  orchCn,
+			orchEn:                  orchEn,
+			orchJa:                  orchJa,
+			orchPaths:               orchPaths,
+			orchUiparams:            orchUiparams,
+			orchCategories:          orchCategories,
+			exVersions:              exVersions,
+			territoryTypes:          territoryTypes,
+			placeNames:              placeNames,
+			instanceContents:        instanceContents,
+			contentFinderConditions: contentFinderConditions,
+			mounts:                  mounts,
+			fates:                   fates,
+			gfates:                  gfates,
+			gfateTypes:              gfateTypes,
+			goldSaucerTexts:         goldSaucerTexts,
+			leves:                   levesPrimary,
+			itemsPrimary:            itemsPrimary,
+			itemSummaryByID:         itemSummaryByID,
+		})
+		eventSystemBGMs = buildEventSystemBGMMap(eventSystemDefines, bgmSheet)
+		bgmByFile, orchByFile = buildMusicFileLookup(musicIdx)
+	}()
+	phase3WG.Wait()
 
 	var iconIdx iconIndices
+	iconsReady := true
 	if !in.skipIcons {
-		iconIdx = buildIconIndex(iconBuildInput{
-			primaryReader:   primaryReader,
-			cnReader:        cnReader,
-			globalReader:    globalReader,
-			cnIconFiles:     cnIconFiles,
-			globalIconFiles: globalIconFiles,
-			itemSummaries:   itemSummaries,
-			achievements:    achievements,
-			quests:          questIdx.quests,
-			leves:           leveIdx.leves,
-		})
+		if deferIconScan {
+			iconsReady = false
+		} else {
+			iconIdx = buildIconIndex(iconBuildInput{
+				primaryReader:   primaryReader,
+				cnReader:        cnReader,
+				globalReader:    globalReader,
+				cnIconFiles:     cnIconFiles,
+				globalIconFiles: globalIconFiles,
+				itemSummaries:   itemSummaries,
+				achievements:    achievements,
+				quests:          questIdx.quests,
+				leves:           leveIdx.leves,
+			})
+		}
 	}
 
 	var reusedDigests map[int]BGMDigest
@@ -2336,6 +2467,8 @@ func loadGameDataStoreCore(in coreStoreLoadInput) (*Store, error) {
 		BGMByFile:                      bgmByFile,
 		OrchByFile:                     orchByFile,
 		bgmDigests:                     reusedDigests,
+		iconCacheDir:                   in.iconCacheDir,
+		iconsReady:                     iconsReady,
 		Icons:                          iconIdx.icons,
 		IconByID:                       iconIdx.iconByID,
 		IconGroups:                     iconIdx.groups,

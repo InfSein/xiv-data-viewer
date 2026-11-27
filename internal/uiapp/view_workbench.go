@@ -491,7 +491,12 @@ func (a *App) renderTitleSearch(c *ui.Context) {
 											numText(c, a.formatGlobalHitMeta(hit)).FontSize(t.text.micro).TextColor(t.muted).SingleLine()
 										})
 									})
-									drawPill(c, modLabel, pillKind)
+									ui.Row(c).Gap(4).AlignItems(ui.Center).Shrink(0).Children(func() {
+										if a.isNewGlobalHit(hit) {
+											a.drawLatestBadge(c)
+										}
+										drawPill(c, modLabel, pillKind)
+									})
 								})
 								if btn.Clicked() {
 									a.openGlobalSearchHit(hit)
@@ -534,7 +539,7 @@ func (a *App) renderTitleSearch(c *ui.Context) {
 								ui.Icon(c, jt.icon).Size(iconSm, iconSm).Shrink(0).TextColor(icoCol)
 								ui.Text(c, actionLabel).FontSize(t.text.xs).FontWeight(500).TextColor(t.foreground).SingleLine().Shrink(0)
 								if trimmedQ != "" {
-									ui.Text(c, "“"+trimmedQ+"”").FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
+									ui.Text(c, formatQuotedQuery(a.Language(), trimmedQ)).FontSize(t.text.xs).TextColor(t.muted).SingleLine().Grow(1).Shrink(1)
 								}
 							})
 							ui.Row(c).Gap(6).AlignItems(ui.Center).Shrink(0).Children(func() {
@@ -769,25 +774,12 @@ func (a *App) renderSidebarAppRestartCard(c *ui.Context) {
 			}
 		})
 
-		btnLabel := a.t("update.sidebar_restart_btn")
-		b := ui.ButtonBase(c.Key("sb-app-restart-btn")).Label(btnLabel).
-			FillWidth().Height(28).PaddingX(10).Radius(t.radius.md).
-			Gap(6).Justify(ui.Center).AlignItems(ui.Center).
-			Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
-		bg := t.primary
-		if b.Hovered() {
-			if b.Pressed() {
-				bg = t.primary.Mix(t.foreground, 0.16)
-			} else {
-				bg = t.primary.Mix(t.foreground, 0.08)
-			}
-		}
-		b.Background(bg).TextColor(t.primaryText)
-		b.Children(func() {
-			ui.Icon(c, icoRefresh).Size(iconSm, iconSm).Shrink(0).TextColor(t.primaryText)
-			ui.Text(c, btnLabel).FontSize(t.text.xs).FontWeight(500).TextColor(t.primaryText).SingleLine()
-		})
-		if b.Clicked() {
+		if kitButton(c, "sb-app-restart-btn", a.t("update.sidebar_restart_btn"), btnOpts{
+			variant:   btnDefault,
+			size:      btnSizeSm,
+			icon:      icoRefresh,
+			fillWidth: true,
+		}) {
 			a.restartForUpdate()
 		}
 	})
@@ -823,6 +815,7 @@ func (a *App) hasAnyItemFilter() bool {
 		a.itemQuery.Filter != "all" ||
 		a.itemQuery.CraftTypeID != nil ||
 		a.itemQuery.Sort != "id_asc" ||
+		a.itemQuery.NewOnly ||
 		a.countActiveAdvFilters() > 0
 }
 
@@ -871,7 +864,7 @@ func (a *App) renderItemListPane(c *ui.Context) {
 				a.refreshItemList()
 			})
 
-			// 途径筛选条（去掉冗余千位数字，保持两行内清爽排列）
+			// 途径筛选条（去掉冗余千位数字，保持两行内清爽排列；有上一版本快照时附带最新版本新增筛选）
 			ui.Row(c).FillWidth().Gap(4).Wrap().AlignItems(ui.Center).Children(func() {
 				for _, f := range a.itemScopeFilters() {
 					active := a.itemQuery.Filter == f.mode
@@ -883,6 +876,11 @@ func (a *App) renderItemListPane(c *ui.Context) {
 						a.itemQuery.Page = 1
 						a.refreshItemList()
 					}
+				}
+				if a.renderLatestFilterChip(c, "scope-latest-new", a.latestItemCount(), a.itemQuery.NewOnly) {
+					a.itemQuery.NewOnly = !a.itemQuery.NewOnly
+					a.itemQuery.Page = 1
+					a.refreshItemList()
 				}
 			})
 
@@ -986,6 +984,9 @@ func (a *App) renderItemListRow(c *ui.Context, key string, item gamedata.ItemSum
 				}
 				ui.Text(c, item.NameCn).FontSize(t.text.sm).FontWeight(fw).TextColor(t.foreground).SingleLine().Grow(1).Shrink(1)
 				ui.Row(c).Gap(4).AlignItems(ui.Center).Shrink(0).Children(func() {
+					if a.isNewItem(item.ID) {
+						a.drawLatestBadge(c)
+					}
 					if favorited {
 						ui.Icon(c, icoStarFill).Size(11, 11).TextColor(t.attention)
 					}

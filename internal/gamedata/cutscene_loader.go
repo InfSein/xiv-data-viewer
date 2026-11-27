@@ -128,6 +128,13 @@ func buildQuestCutsceneLinks(
 	}
 
 	// 1. 提取每个任务 QuestParams 中的 Cutscene 与 BGM 脚本指令映射
+	var insCols [50]int
+	var argCols [50]int
+	for i := 0; i < 50; i++ {
+		insCols[i] = quests.Col(fmt.Sprintf("QuestParams[%d].ScriptInstruction", i))
+		argCols[i] = quests.Col(fmt.Sprintf("QuestParams[%d].ScriptArg", i))
+	}
+
 	scriptCutByQuest := make(map[int][]int)
 	for qid, row := range quests.Rows {
 		if qid <= 0 {
@@ -139,9 +146,16 @@ func buildQuestCutsceneLinks(
 		var bgmVars map[string]int
 
 		for i := 0; i < 50; i++ {
-			ins := strings.TrimSpace(quests.Str(row, fmt.Sprintf("QuestParams[%d].ScriptInstruction", i)))
-			arg := quests.Int(row, fmt.Sprintf("QuestParams[%d].ScriptArg", i))
-			if ins == "" || arg <= 0 {
+			insCol, argCol := insCols[i], argCols[i]
+			if insCol < 0 || argCol < 0 {
+				continue
+			}
+			arg := row.IntAt(argCol)
+			if arg <= 0 {
+				continue
+			}
+			ins := strings.TrimSpace(row.StringAt(insCol))
+			if ins == "" {
 				continue
 			}
 			upper := strings.ToUpper(ins)
@@ -182,12 +196,21 @@ func buildQuestCutsceneLinks(
 	// 预先剔除理符（62501）与副本（61802）分类条目，并二次校验任务标题一致，杜绝同名副本或废弃任务串台
 	journalCutByQuest := make(map[int][]int)
 	if completeJournals != nil {
+		var cjCutCols [24]int
+		for i := 0; i < 24; i++ {
+			cjCutCols[i] = completeJournals.Col(fmt.Sprintf("Cutscene[%d]", i))
+		}
+		cjIconCol := completeJournals.Col("Icon")
+		cjU0Col := completeJournals.Col("Unknown0")
+		cjNameCol := completeJournals.Col("Name")
+		qNameCol := quests.Col("Name")
+
 		for _, row := range completeJournals.Rows {
-			icon := completeJournals.Int(row, "Icon")
+			icon := row.IntAt(cjIconCol)
 			if icon == completeJournalDutyIcon || icon == completeJournalLeveIcon {
 				continue
 			}
-			u0 := completeJournals.Int(row, "Unknown0")
+			u0 := row.IntAt(cjU0Col)
 			if u0 <= 0 {
 				continue
 			}
@@ -196,15 +219,18 @@ func buildQuestCutsceneLinks(
 			if !ok {
 				continue
 			}
-			cjName := CleanQuestTitle(strings.TrimSpace(completeJournals.Str(row, "Name")))
-			qName := CleanQuestTitle(strings.TrimSpace(quests.Str(qRow, "Name")))
+			cjName := CleanQuestTitle(strings.TrimSpace(row.StringAt(cjNameCol)))
+			qName := CleanQuestTitle(strings.TrimSpace(qRow.StringAt(qNameCol)))
 			if cjName == "" || qName == "" || cjName != qName {
 				continue
 			}
 			var cuts []int
 			seen := make(map[int]bool)
 			for i := 0; i < 24; i++ {
-				cid := completeJournals.Int(row, fmt.Sprintf("Cutscene[%d]", i))
+				if cjCutCols[i] < 0 {
+					continue
+				}
+				cid := row.IntAt(cjCutCols[i])
 				if cid > 0 && !seen[cid] {
 					if _, valid := cutPathByID[cid]; valid {
 						seen[cid] = true

@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
-	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -26,7 +24,7 @@ var textSearchPageSizeChoices = []int{30, 50, 100}
 
 const (
 	textColSourceW   float32 = 212
-	textColActionsW  float32 = 82
+	textColActionsW  float32 = 52
 	textColContentMn float32 = 220
 	textColCompareMn float32 = 200
 	textSnippetLimit int     = 260
@@ -60,20 +58,12 @@ func (a *App) cancelTextSearchTasks() {
 
 func (a *App) effectiveTextSearchLang() string {
 	if a.service == nil {
-		return a.textSearchLang
-	}
-	avail := a.service.AvailableTextSearchLangs()
-	if a.textSearchLang != "" {
-		for _, opt := range avail {
-			if opt.Code == a.textSearchLang {
-				return opt.Code
-			}
-		}
+		return "chs"
 	}
 	return a.service.DefaultTextSearchLang()
 }
 
-// syncTextSearchOnLangChange 在切换应用语言并激活新 Service 时，复用已有全量索引并将检索语言对齐至当前主语言。
+// syncTextSearchOnLangChange 在切换应用语言并激活新 Service 时，复用已构建的全部语言全文索引并按新主语言刷新展示。
 func (a *App) syncTextSearchOnLangChange() {
 	if a.service == nil {
 		return
@@ -83,7 +73,6 @@ func (a *App) syncTextSearchOnLangChange() {
 			a.service.SetTextSearchIndex(code, idx)
 		}
 	}
-	a.textSearchLang = a.service.DefaultTextSearchLang()
 	a.textSearchSheet = ""
 	a.textSearchPage = 1
 	a.textSearchPageStr = "1"
@@ -93,37 +82,38 @@ func (a *App) syncTextSearchOnLangChange() {
 	}
 }
 
-// ensureTextSearchReady 确保当前语言的全量文本索引可用；首次访问时在后台异步构建，避免阻塞 UI 线程。
+// ensureTextSearchReady 确保当前客户端可用的全部核心语言（中/日/英）全文索引均已就绪；
+// 首次访问时在后台异步构建，避免阻塞 UI 线程，完成后输入任意语言均可直接命中。
 func (a *App) ensureTextSearchReady() {
 	if a.service == nil {
 		return
 	}
-	lang := a.effectiveTextSearchLang()
-	a.textSearchLang = lang
-
-	if cached := a.textIndexCache[lang]; cached != nil {
-		a.service.SetTextSearchIndex(lang, cached)
+	for code, idx := range a.textIndexCache {
+		if idx != nil {
+			a.service.SetTextSearchIndex(code, idx)
+		}
 	}
-	if idx := a.service.GetTextSearchIndex(lang); idx != nil {
-		a.textIndexCache[lang] = idx
+	primaryLang := a.effectiveTextSearchLang()
+
+	if a.service.HasAllCoreTextSearchIndices() {
 		a.textSearchIdxBusy = false
 		a.textSearchIdxErr = ""
 		if strings.TrimSpace(a.textSearchQ) != "" {
 			a.runTextSearch(false)
 		} else {
 			a.textSearchRes = gamedata.TextSearchResponse{
-				LangCode:   lang,
+				LangCode:   primaryLang,
 				Page:       1,
 				PageSize:   max(1, a.textSearchPageSize),
 				TotalPages: 1,
-				IndexStats: idx.Stats(),
+				IndexStats: a.service.CombinedTextIndexStats(),
 			}
 		}
 		return
 	}
 
-	// 若正在构建同一语言索引，直接继续等待进度推送
-	if a.textSearchIdxBusy && a.textSearchIdxProg.LangCode == lang {
+	// 若正在后台构建跨语言索引，直接继续等待进度推送
+	if a.textSearchIdxBusy {
 		return
 	}
 
@@ -137,14 +127,16 @@ func (a *App) ensureTextSearchReady() {
 	a.textSearchIdxBusy = true
 	a.textSearchIdxErr = ""
 	a.textSearchIdxProg = gamedata.TextIndexProgress{
-		LangCode: lang,
-		Phase:    "scanning",
+		LangCode:  primaryLang,
+		LangIndex: 1,
+		LangTotal: max(1, len(svc.CoreTextSearchLangs())),
+		Phase:     "scanning",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.textSearchIdxCancel = cancel
 
-	applyDone := func(built *gamedata.TextSearchIndex, err error) {
+	applyDone := func(builtMap map[string]*gamedata.TextSearchIndex, err error) {
 		cancel()
 		if a.textSearchIdxSeq != seq {
 			return
@@ -158,10 +150,12 @@ func (a *App) ensureTextSearchReady() {
 			a.textSearchIdxErr = a.tf("text_search.indexing_failed", "err", err.Error())
 			return
 		}
-		if built != nil {
-			a.textIndexCache[lang] = built
-			if a.service != nil {
-				a.service.SetTextSearchIndex(lang, built)
+		for code, built := range builtMap {
+			if built != nil {
+				a.textIndexCache[code] = built
+				if a.service != nil {
+					a.service.SetTextSearchIndex(code, built)
+				}
 			}
 		}
 		a.textSearchIdxErr = ""
@@ -169,17 +163,17 @@ func (a *App) ensureTextSearchReady() {
 	}
 
 	if a.win == nil {
-		built, err := svc.BuildTextSearchIndex(ctx, lang, func(p gamedata.TextIndexProgress) {
+		builtMap, err := svc.BuildAllTextSearchIndices(ctx, func(p gamedata.TextIndexProgress) {
 			if a.textSearchIdxSeq == seq {
 				a.textSearchIdxProg = p
 			}
 		})
-		applyDone(built, err)
+		applyDone(builtMap, err)
 		return
 	}
 
 	go func() {
-		built, err := svc.BuildTextSearchIndex(ctx, lang, func(p gamedata.TextIndexProgress) {
+		builtMap, err := svc.BuildAllTextSearchIndices(ctx, func(p gamedata.TextIndexProgress) {
 			cp := p
 			a.win.Update(func() {
 				if a.textSearchIdxSeq == seq {
@@ -188,22 +182,22 @@ func (a *App) ensureTextSearchReady() {
 			})
 		})
 		a.win.Update(func() {
-			applyDone(built, err)
+			applyDone(builtMap, err)
 		})
 	}()
 }
 
-// runTextSearch 触发全量文本检索。pagingOnly=true 时命中内部翻页缓存可同帧瞬时返回，
+// runTextSearch 触发跨语言全量文本检索。pagingOnly=true 时命中内部翻页缓存可同帧瞬时返回，
 // 新关键词检索在有窗口时后台执行并自动取消陈旧查询，保障连续打字零掉帧。
 func (a *App) runTextSearch(pagingOnly bool) {
 	if a.service == nil {
 		return
 	}
-	lang := a.effectiveTextSearchLang()
-	idx := a.service.GetTextSearchIndex(lang)
-	if idx == nil {
+	stats := a.service.CombinedTextIndexStats()
+	if stats.TotalTexts == 0 {
 		return
 	}
+	lang := a.effectiveTextSearchLang()
 
 	pageSize := a.textSearchPageSize
 	if pageSize <= 0 {
@@ -229,7 +223,7 @@ func (a *App) runTextSearch(pagingOnly bool) {
 			Page:       1,
 			PageSize:   pageSize,
 			TotalPages: 1,
-			IndexStats: idx.Stats(),
+			IndexStats: stats,
 		}
 		return
 	}
@@ -343,12 +337,9 @@ func (a *App) textSearchJumpTooltip(kind string) string {
 
 func (a *App) renderTextSearchView(c *ui.Context) {
 	t := themeOf(c)
-	lang := a.effectiveTextSearchLang()
 	var idxStats gamedata.TextIndexStats
 	if a.service != nil {
-		if idx := a.service.GetTextSearchIndex(lang); idx != nil {
-			idxStats = idx.Stats()
-		}
+		idxStats = a.service.CombinedTextIndexStats()
 	}
 	parsed := gamedata.ParseTextSearchQuery(a.textSearchQ)
 
@@ -356,7 +347,7 @@ func (a *App) renderTextSearchView(c *ui.Context) {
 		// 1. 页头、主搜索框、匹配模式指示与范围/表筛选控制区
 		ui.Column(c).FillWidth().Padding(12, 16, 10, 16).Gap(8).
 			BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Children(func() {
-			// 第一行：标题 + 索引概览 + 右侧重置/语言切换/每页条数
+			// 第一行：标题 + 索引概览 + 右侧重置/每页条数
 			ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Wrap().Gap(8).Children(func() {
 				ui.Row(c).Gap(10).AlignItems(ui.Baseline).Children(func() {
 					ui.Text(c, a.t("text_search.title")).FontSize(t.text.base).FontWeight(600).TextColor(t.foreground).SingleLine()
@@ -372,24 +363,6 @@ func (a *App) renderTextSearchView(c *ui.Context) {
 					if a.hasTextSearchFilter() {
 						if kitButton(c, "ts-reset", a.t("common.reset"), btnOpts{variant: btnGhost, size: btnSizeSm}) {
 							a.resetTextSearchFilters()
-						}
-					}
-
-					// 多语言客户端时允许按需切换检索语言（默认对齐当前界面主数据语言）
-					if a.service != nil {
-						availLangs := a.service.AvailableTextSearchLangs()
-						if len(availLangs) > 1 {
-							langOpts := make([]selectOption[string], 0, len(availLangs))
-							for _, opt := range availLangs {
-								langOpts = append(langOpts, selectOption[string]{value: opt.Code, label: opt.Label})
-							}
-							if kitSelect(c, "ts-lang-select", &a.textSearchLang, langOpts, 148, 176, true) {
-								a.textSearchSheet = ""
-								a.textSearchPage = 1
-								a.textSearchPageStr = "1"
-								clear(a.textSearchExpanded)
-								a.ensureTextSearchReady()
-							}
 						}
 					}
 
@@ -515,8 +488,9 @@ func (a *App) renderTextSearchView(c *ui.Context) {
 			})
 		default:
 			showCompare := hasAnyHitTranslation(a.textSearchRes.Items)
-			a.renderTextSearchTableHeader(c, showCompare)
-			a.renderTextSearchRows(c, showCompare)
+			showActions := hasAnyHitJump(a.textSearchRes.Items)
+			a.renderTextSearchTableHeader(c, showCompare, showActions)
+			a.renderTextSearchRows(c, showCompare, showActions)
 			a.renderPaginationBar(
 				c,
 				"ts-pg",
@@ -559,20 +533,28 @@ func (a *App) buildTextSearchSheetOptions() []selectOption[string] {
 func (a *App) renderTextSearchIndexingState(c *ui.Context) {
 	t := themeOf(c)
 	prog := a.textSearchIdxProg
-	pct := 0.0
+	langFrac := 0.0
 	msg := ""
 	if prog.Phase == "indexing" {
-		pct = 0.88
+		langFrac = 0.88
 		msg = a.tf("text_search.indexing_build", "texts", formatInt(prog.IndexedTexts))
 	} else {
 		if prog.TotalSheets > 0 {
-			pct = float64(prog.DoneSheets) / float64(prog.TotalSheets) * 0.85
+			langFrac = float64(prog.DoneSheets) / float64(prog.TotalSheets) * 0.85
 		}
 		msg = a.tf("text_search.indexing_scan",
 			"done", formatInt(prog.DoneSheets),
 			"total", formatInt(prog.TotalSheets),
 			"texts", formatInt(prog.IndexedTexts),
 		)
+	}
+	pct := langFrac
+	if prog.LangTotal > 1 {
+		idx := max(1, min(prog.LangIndex, prog.LangTotal))
+		pct = (float64(idx-1) + langFrac) / float64(prog.LangTotal)
+		if prog.LangCode != "" {
+			msg = fmt.Sprintf("[%d/%d %s] %s", idx, prog.LangTotal, gamedata.TextLangBadge(prog.LangCode), msg)
+		}
 	}
 	if pct < 0 {
 		pct = 0
@@ -586,8 +568,8 @@ func (a *App) renderTextSearchIndexingState(c *ui.Context) {
 			ui.Spinner(c).FontSize(iconMd).TextColor(t.primary)
 			ui.Text(c, a.t("text_search.indexing_title")).FontSize(t.text.sm).FontWeight(600).TextColor(t.foreground)
 		})
-		ui.Box(c).Width(360).Height(6).Radius(t.radius.full).Background(t.tint(1.5)).Clip().Children(func() {
-			ui.Box(c).FillHeight().Width(float32(360 * pct)).Radius(t.radius.full).Background(t.primary)
+		ui.Box(c).Width(360).Children(func() {
+			kitProgressBar(c, float32(pct*100))
 		})
 		numText(c, msg).FontSize(t.text.xs).TextColor(t.subdued).TextAlign(ui.Center)
 		ui.Text(c, a.t("text_search.indexing_hint")).FontSize(t.text.xs).TextColor(t.muted).TextAlign(ui.Center).MaxWidth(440)
@@ -603,7 +585,16 @@ func hasAnyHitTranslation(items []gamedata.TextSearchHit) bool {
 	return false
 }
 
-func (a *App) renderTextSearchTableHeader(c *ui.Context, showCompare bool) {
+func hasAnyHitJump(items []gamedata.TextSearchHit) bool {
+	for i := range items {
+		if items[i].JumpKind != "" && items[i].JumpID > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) renderTextSearchTableHeader(c *ui.Context, showCompare, showActions bool) {
 	t := themeOf(c)
 	ui.Row(c).FillWidth().Padding(8, 16).Background(t.card).
 		BorderWidth(0, 0, hairline, 0).BorderColor(t.border).Gap(12).AlignItems(ui.Center).Children(func() {
@@ -612,13 +603,15 @@ func (a *App) renderTextSearchTableHeader(c *ui.Context, showCompare bool) {
 		if showCompare {
 			ui.Text(c, a.t("text_search.col_compare")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Grow(1).Shrink(1).MinWidth(textColCompareMn)
 		}
-		ui.Text(c, a.t("text_search.col_actions")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(textColActionsW).Shrink(0).TextAlign(ui.End)
+		if showActions {
+			ui.Text(c, a.t("text_search.col_actions")).FontSize(t.text.xs).FontWeight(500).TextColor(t.muted).Width(textColActionsW).Shrink(0).TextAlign(ui.End)
+		}
 	})
 }
 
-func (a *App) renderTextSearchRows(c *ui.Context, showCompare bool) {
+func (a *App) renderTextSearchRows(c *ui.Context, showCompare, showActions bool) {
 	t := themeOf(c)
-	now := time.Now()
+	primaryLang := a.textSearchRes.LangCode
 	ui.Scroll(c.Key("ts-table-scroll")).TrackScroll(&a.textSearchScroll).Grow(1).Shrink(1).Children(func() {
 		ui.Column(c).FillWidth().Selectable().Children(func() {
 			for i, hit := range a.textSearchRes.Items {
@@ -673,7 +666,19 @@ func (a *App) renderTextSearchRows(c *ui.Context, showCompare bool) {
 					}
 					ui.Column(c).Grow(1.15).Shrink(1).MinWidth(textColContentMn).Gap(4).Children(func() {
 						dispText, dispSpans, truncated := sliceTextSnippet(hit.Text, hit.MatchSpans, textSnippetLimit, expanded)
-						renderHighlightedSearchText(c, dispText, dispSpans, t)
+						if hit.LangCode != "" && primaryLang != "" && hit.LangCode != primaryLang {
+							// 主语言无该条目时，标注当前展示的回退语言徽章
+							ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Start).Children(func() {
+								ui.Box(c).Padding(2, 0, 0, 0).Shrink(0).Children(func() {
+									drawPill(c, gamedata.TextLangBadge(hit.LangCode), pillNeutral)
+								})
+								ui.Box(c).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+									renderHighlightedSearchText(c, dispText, dispSpans, t)
+								})
+							})
+						} else {
+							renderHighlightedSearchText(c, dispText, dispSpans, t)
+						}
 						if truncated || anyTransTrunc || expanded {
 							lbl := a.t("text_search.expand_text")
 							if expanded {
@@ -687,7 +692,7 @@ func (a *App) renderTextSearchRows(c *ui.Context, showCompare bool) {
 						}
 					})
 
-					// 3. 多语言对照列（仅在当前页存在对照数据时展示，清晰并排呈现 JA / EN / ZH 译文）
+					// 3. 多语言对照列（仅在当前页存在对照数据时展示，清晰并排呈现 JA / EN / ZH 译文并高亮命中词）
 					if showCompare {
 						ui.Column(c).Grow(1).Shrink(1).MinWidth(textColCompareMn).Gap(5).Children(func() {
 							if len(hit.Translations) == 0 {
@@ -695,42 +700,30 @@ func (a *App) renderTextSearchRows(c *ui.Context, showCompare bool) {
 								return
 							}
 							for _, tr := range hit.Translations {
-								dispTr, _, _ := sliceTextSnippet(tr.Text, nil, textTransSnipLim, expanded)
+								dispTr, dispTrSpans, _ := sliceTextSnippet(tr.Text, tr.MatchSpans, textTransSnipLim, expanded)
 								ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Start).Children(func() {
 									ui.Box(c).Padding(1, 0, 0, 0).Shrink(0).Children(func() {
 										drawPill(c, tr.Badge, pillNeutral)
 									})
-									ui.Text(c, dispTr).FontSize(t.text.xs).LineHeight(lineProse).TextColor(t.subdued).
-										Selectable().Grow(1).Shrink(1).MinWidth(0)
+									ui.Box(c).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+										renderHighlightedTranslationText(c, dispTr, dispTrSpans, t)
+									})
 								})
 							}
 						})
 					}
 
-					// 4. 操作列：一键复制全文 + 若关联内置实体则显示直跳详情按钮
-					ui.Row(c).Width(textColActionsW).Shrink(0).Justify(ui.End).AlignItems(ui.Center).Gap(4).Children(func() {
-						copied := a.textSearchCopiedDoc == hit.DocID && now.Before(a.textSearchCopiedEnd)
-						copyTip := a.t("text_search.copy_text")
-						copyIco := icoCopy
-						if copied {
-							copyTip = a.t("text_search.copied")
-							copyIco = icoCheck
-						}
-						if kitIconButton(c, fmt.Sprintf("ts-copy-%d", hit.DocID), copyIco, copyTip, btnOpts{variant: btnGhost, size: btnSizeSm}) {
-							if a.win != nil {
-								mygo.Clipboard.WriteText(hit.Text)
+					// 4. 操作列：若关联内置实体则显示直跳详情按钮
+					if showActions {
+						ui.Row(c).Width(textColActionsW).Shrink(0).Justify(ui.End).AlignItems(ui.Center).Gap(4).Children(func() {
+							if hit.JumpKind != "" && hit.JumpID > 0 {
+								jumpTip := a.textSearchJumpTooltip(hit.JumpKind)
+								if kitIconButton(c, fmt.Sprintf("ts-jump-%d", hit.DocID), icoExternalLink, jumpTip, btnOpts{variant: btnGhost, size: btnSizeSm}) {
+									a.inspectTextSearchHit(hit)
+								}
 							}
-							a.textSearchCopiedDoc = hit.DocID
-							a.textSearchCopiedEnd = time.Now().Add(1500 * time.Millisecond)
-						}
-
-						if hit.JumpKind != "" && hit.JumpID > 0 {
-							jumpTip := a.textSearchJumpTooltip(hit.JumpKind)
-							if kitIconButton(c, fmt.Sprintf("ts-jump-%d", hit.DocID), icoExternalLink, jumpTip, btnOpts{variant: btnGhost, size: btnSizeSm}) {
-								a.inspectTextSearchHit(hit)
-							}
-						}
-					})
+						})
+					}
 				})
 			}
 		})
@@ -801,8 +794,17 @@ func sliceTextSnippet(text string, spans []gamedata.TextMatchSpan, maxRunes int,
 
 // renderHighlightedSearchText 将命中的字符区间以语义高亮样式渲染为可框选富文本。
 func renderHighlightedSearchText(c *ui.Context, text string, spans []gamedata.TextMatchSpan, t uiTokens) {
+	renderHighlightedTextStyled(c, text, spans, t.text.sm, t.foreground, t)
+}
+
+// renderHighlightedTranslationText 渲染多语言对照列译文，若该语言译文直接命中搜索词则同步高亮。
+func renderHighlightedTranslationText(c *ui.Context, text string, spans []gamedata.TextMatchSpan, t uiTokens) {
+	renderHighlightedTextStyled(c, text, spans, t.text.xs, t.subdued, t)
+}
+
+func renderHighlightedTextStyled(c *ui.Context, text string, spans []gamedata.TextMatchSpan, fontSize float32, baseColor ui.Color, t uiTokens) {
 	if len(spans) == 0 {
-		ui.Text(c, text).FontSize(t.text.sm).LineHeight(lineProse).TextColor(t.foreground).Selectable().FillWidth()
+		ui.Text(c, text).FontSize(fontSize).LineHeight(lineProse).TextColor(baseColor).Selectable().FillWidth()
 		return
 	}
 
@@ -828,10 +830,10 @@ func renderHighlightedSearchText(c *ui.Context, text string, spans []gamedata.Te
 		uiSpans = append(uiSpans, ui.Span{Text: text[cursor:]})
 	}
 	if len(uiSpans) == 0 {
-		ui.Text(c, text).FontSize(t.text.sm).LineHeight(lineProse).TextColor(t.foreground).Selectable().FillWidth()
+		ui.Text(c, text).FontSize(fontSize).LineHeight(lineProse).TextColor(baseColor).Selectable().FillWidth()
 		return
 	}
-	ui.RichText(c, uiSpans...).FontSize(t.text.sm).FontWeight(400).TextColor(t.foreground).
+	ui.RichText(c, uiSpans...).FontSize(fontSize).FontWeight(400).TextColor(baseColor).
 		LineHeight(lineProse).Selectable().FillWidth()
 }
 

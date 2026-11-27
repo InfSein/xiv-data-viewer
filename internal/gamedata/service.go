@@ -109,9 +109,72 @@ type Service struct {
 
 	textIndexMu       sync.RWMutex
 	textIndices       map[string]*TextSearchIndex
+	textIndexGen      uint64
+	textUnifiedMu     sync.Mutex
+	textUnifiedCache  *unifiedTextSearchCacheEntry
 	textParallel      *textParallelCache
 	questInternalOnce sync.Once
 	questByInternalID map[string]int
+
+	latestAddMu sync.RWMutex
+	latestAdd   *LatestPatchAdditions
+}
+
+// SetLatestAdditions 注入相较于上一版本快照新增的各模块条目 ID 集合。
+func (s *Service) SetLatestAdditions(add *LatestPatchAdditions) {
+	if s == nil {
+		return
+	}
+	s.latestAddMu.Lock()
+	s.latestAdd = add
+	s.latestAddMu.Unlock()
+}
+
+// LatestAdditions 返回当前生效的最新版本新增条目索引（无上一版本快照时返回 nil）。
+func (s *Service) LatestAdditions() *LatestPatchAdditions {
+	if s == nil {
+		return nil
+	}
+	s.latestAddMu.RLock()
+	add := s.latestAdd
+	s.latestAddMu.RUnlock()
+	return add
+}
+
+func (s *Service) IsNewItem(id int) bool {
+	add := s.LatestAdditions()
+	return add != nil && add.Items[id]
+}
+
+func (s *Service) IsNewQuest(id int) bool {
+	add := s.LatestAdditions()
+	return add != nil && add.Quests[id]
+}
+
+func (s *Service) IsNewLeve(id int) bool {
+	add := s.LatestAdditions()
+	return add != nil && add.Leves[id]
+}
+
+func (s *Service) IsNewAchievement(id int) bool {
+	add := s.LatestAdditions()
+	return add != nil && add.Achievements[id]
+}
+
+func (s *Service) IsNewMusic(kind string, id int) bool {
+	add := s.LatestAdditions()
+	if add == nil {
+		return false
+	}
+	if kind == MusicKindOrchestrion {
+		return add.Orchestrions[id]
+	}
+	return add.BGMs[id]
+}
+
+func (s *Service) IsNewIcon(id int) bool {
+	add := s.LatestAdditions()
+	return add != nil && add.HasIconBaseline && add.Icons[id]
 }
 
 // NewService 基于已加载的 Store 创建核心游戏数据查询服务。
@@ -159,6 +222,12 @@ func (s *Service) GetSystemStatus() SystemStatus {
 		}
 	}
 
+	s.store.iconMu.RLock()
+	totalIcons := len(s.store.Icons)
+	iconGroups := s.store.IconGroups
+	availIconVariants := s.store.AvailableIconVariants
+	s.store.iconMu.RUnlock()
+
 	return SystemStatus{
 		HasCN:          s.store.HasCN,
 		HasGlobal:      s.store.HasGlobal,
@@ -189,8 +258,8 @@ func (s *Service) GetSystemStatus() SystemStatus {
 			TotalBGMs:              len(s.store.BGMs),
 			TotalOrchestrions:      len(s.store.Orchestrions),
 			TotalMusic:             len(s.allMusicEntries()),
-			TotalIcons:             len(s.store.Icons),
-			TotalIconGroups:        len(s.store.IconGroups),
+			TotalIcons:             totalIcons,
+			TotalIconGroups:        len(iconGroups),
 			LoadTimeMs:             s.store.LoadTimeMs,
 		},
 		Categories:            s.store.CategoryList,
@@ -201,8 +270,8 @@ func (s *Service) GetSystemStatus() SystemStatus {
 		LeveAssignmentTypes:   s.store.LeveAssignmentTypes,
 		MusicCategories:       s.store.MusicCategoryList,
 		MusicExpansions:       s.store.MusicExpansionList,
-		IconGroups:            s.store.IconGroups,
-		AvailableIconVariants: s.store.AvailableIconVariants,
+		IconGroups:            iconGroups,
+		AvailableIconVariants: availIconVariants,
 	}
 }
 
@@ -219,8 +288,12 @@ func (s *Service) filterAndSortItems(query ItemSearchQuery) []ItemSummary {
 		filter = "all"
 	}
 
+	latestAdd := s.LatestAdditions()
 	filtered := make([]ItemSummary, 0, 256)
 	for _, it := range s.store.ItemSummaries {
+		if query.NewOnly && (latestAdd == nil || !latestAdd.Items[it.ID]) {
+			continue
+		}
 		if query.CategoryID > 0 && it.CategoryID != query.CategoryID {
 			continue
 		}
@@ -1570,8 +1643,12 @@ func (s *Service) SearchAchievements(query AchievementSearchQuery) AchievementSe
 		filter = "all"
 	}
 
+	latestAdd := s.LatestAdditions()
 	filtered := make([]AchievementEntry, 0, 128)
 	for _, ach := range s.store.Achievements {
+		if query.NewOnly && (latestAdd == nil || !latestAdd.Achievements[ach.ID]) {
+			continue
+		}
 		if query.KindID > 0 && ach.KindID != query.KindID {
 			continue
 		}
@@ -1694,8 +1771,12 @@ func (s *Service) filterQuests(query QuestSearchQuery) []QuestEntry {
 		entry QuestEntry
 		rank  int
 	}
+	latestAdd := s.LatestAdditions()
 	matches := make([]questMatch, 0, 128)
 	for _, qe := range s.store.Quests {
+		if query.NewOnly && (latestAdd == nil || !latestAdd.Quests[qe.ID]) {
+			continue
+		}
 		if query.SectionID >= 0 && qe.SectionID != query.SectionID {
 			continue
 		}
@@ -1851,8 +1932,12 @@ func (s *Service) filterLeves(query LeveSearchQuery) []LeveEntry {
 		kind = "all"
 	}
 
+	latestAdd := s.LatestAdditions()
 	filtered := make([]LeveEntry, 0, 128)
 	for _, lv := range s.store.Leves {
+		if query.NewOnly && (latestAdd == nil || !latestAdd.Leves[lv.ID]) {
+			continue
+		}
 		if kind != "all" && lv.LeveKind != kind {
 			continue
 		}
@@ -2393,8 +2478,21 @@ func (s *Service) filterMusic(query MusicSearchQuery) []MusicEntry {
 		entry MusicEntry
 		rank  int
 	}
+	latestAdd := s.LatestAdditions()
 	matches := make([]musicMatch, 0, 128)
 	for _, m := range s.allMusicEntries() {
+		if query.NewOnly {
+			if latestAdd == nil {
+				continue
+			}
+			if m.Kind == MusicKindOrchestrion {
+				if !latestAdd.Orchestrions[m.ID] {
+					continue
+				}
+			} else if !latestAdd.BGMs[m.ID] {
+				continue
+			}
+		}
 		if kindFilter != "all" && m.Kind != kindFilter {
 			continue
 		}

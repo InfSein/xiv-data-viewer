@@ -51,6 +51,8 @@ type EXDStringShard struct {
 type EXDTextScanOptions struct {
 	PreferredLang Language
 	ResolveSheet  SeSheetResolver
+	// LocalizedOnly 为 true 时仅扫描具备目标语言本地化分片的数据表，跳过无语言通用表（用于同客户端多语言扫描去重）。
+	LocalizedOnly bool
 	// SheetNames 为空时自动读取 exd/root.exl 获取全量数据表清单。
 	SheetNames []string
 	// Workers 为并发解压协程数，<=0 时自动使用 CPU 核心数。
@@ -593,7 +595,7 @@ func scanAllEXDStringsFromFileReader(ctx context.Context, reader FileReader, opt
 					continue
 				}
 				langSuffix, isLoc, ok := resolvePreferredSheetLang(exh, opts.PreferredLang)
-				if !ok {
+				if !ok || (opts.LocalizedOnly && !isLoc) {
 					continue
 				}
 				plansByIdx[t.origIdx] = &parsedSheetPlan{
@@ -868,7 +870,7 @@ func scanAllEXDStringsFromGameReader(ctx context.Context, reader *GameReader, op
 					continue
 				}
 				langSuffix, isLoc, ok := resolvePreferredSheetLang(exh, opts.PreferredLang)
-				if !ok {
+				if !ok || (opts.LocalizedOnly && !isLoc) {
 					continue
 				}
 				plansByIdx[t.origIdx] = &parsedSheetPlan{

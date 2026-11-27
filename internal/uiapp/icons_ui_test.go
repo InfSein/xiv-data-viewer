@@ -15,6 +15,7 @@ import (
 	"github.com/InfSein/xiv-data-viewer/internal/gamedata"
 	"github.com/InfSein/xiv-data-viewer/internal/i18n"
 	"github.com/InfSein/xiv-data-viewer/internal/snapshot"
+	"github.com/InfSein/xiv-data-viewer/internal/sqpack"
 )
 
 func buildSyntheticIconTestStore() *gamedata.Store {
@@ -586,5 +587,62 @@ func TestIconsVersionDiffSeparatePartitionAndVisualCards(t *testing.T) {
 	}
 	if app.tab != tabIcons || app.selectedIconID != 37618 {
 		t.Fatalf("点击变更图标卡片应跳转到图标页 #037618，实际 tab=%v icon=%d", app.tab, app.selectedIconID)
+	}
+}
+
+func TestDeferredIconIndexLoadingPromptUI(t *testing.T) {
+	// 构造一个尚未完成后台图标索引扫描的 Store（模拟启动加速后后台静默扫描尚未结束的场景）
+	dummyReader := sqpack.NewGameReader(t.TempDir())
+	defer dummyReader.Close()
+	pendingStore := &gamedata.Store{
+		CNReader:       dummyReader,
+		PrimaryReader:  dummyReader,
+		HasCN:          true,
+		CNVersion:      "2026.11.01.0000.0000",
+		PrimaryVersion: "2026.11.01.0000.0000",
+		AppLang:        i18n.LangZH,
+		ItemSummaries: []gamedata.ItemSummary{
+			{ID: 44099, NameCn: "图拉尔菠萝蛋糕", IconID: 37618, ItemLevel: 710, CategoryID: 46, CategoryName: "食品"},
+		},
+		ItemSummaryByID: map[int]gamedata.ItemSummary{
+			44099: {ID: 44099, NameCn: "图拉尔菠萝蛋糕", IconID: 37618, ItemLevel: 710, CategoryID: 46, CategoryName: "食品"},
+		},
+	}
+
+	app := NewApp("test", t.TempDir(), nil)
+	svc := gamedata.NewService(pendingStore)
+	st := svc.GetSystemStatus()
+	app.service = svc
+	app.status = &st
+	app.mode = modeReady
+	app.tab = tabIcons
+	app.iconIndexLoading = true
+
+	tt := ui.NewTester(app.View, 1366, 768)
+
+	// 验证点进「图标」页时明确展示后台加载提示，不误显示「没有找到匹配的图标」
+	if !tt.HasText(app.t("icons.loading_title")) || !tt.HasText(app.t("icons.loading_badge")) {
+		t.Fatalf("后台扫描图标期间进入图标页应展示加载提示，实际文本: %v", tt.Texts())
+	}
+	if tt.HasText(app.t("icons.empty_title")) {
+		t.Fatalf("后台扫描图标期间不应误显空结果提示")
+	}
+
+	// 模拟后台图标索引扫描失败：展示错误提示与重试按钮
+	app.iconIndexLoading = false
+	app.iconIndexError = "disk busy"
+	tt.Frame()
+	if !tt.HasText(app.t("icons.retry_load")) {
+		t.Fatalf("图标索引加载失败时应显示重试按钮，实际文本: %v", tt.Texts())
+	}
+
+	// 模拟后台图标索引就绪完成：自动切换为正常分组与图标网格
+	if err := pendingStore.EnsureIconsLoaded(); err != nil {
+		t.Fatalf("EnsureIconsLoaded 失败: %v", err)
+	}
+	app.iconIndexError = ""
+	tt.Frame()
+	if tt.HasText(app.t("icons.loading_title")) {
+		t.Fatalf("图标索引就绪后不应继续停留在加载提示")
 	}
 }

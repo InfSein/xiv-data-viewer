@@ -87,35 +87,19 @@ func (a *App) changelogCategoryLabel(kind changelog.CategoryKind) string {
 	}
 }
 
-func changelogCategoryPillKind(kind changelog.CategoryKind) pillKind {
+// changelogCategoryHeaderColors 返回更新日志章节标题栏的语义浅底、细描边与文字色。
+func changelogCategoryHeaderColors(t uiTokens, kind changelog.CategoryKind) (bg, border, text ui.Color) {
 	switch kind {
 	case changelog.CategoryAdded:
-		return pillPositive
+		return t.successBg, t.successBorder, t.successText
 	case changelog.CategoryChanged:
-		return pillAccent
+		return t.infoBg, t.infoBorder, t.infoText
 	case changelog.CategoryFixed:
-		return pillWarning
-	case changelog.CategoryEngineering:
-		return pillNeutral
+		return t.warningBg, t.warningBorder, t.warningText
 	case changelog.CategoryRemoved:
-		return pillNegative
+		return t.dangerBg, t.dangerBorder, t.dangerText
 	default:
-		return pillOutline
-	}
-}
-
-func changelogCategoryDotColor(t uiTokens, kind changelog.CategoryKind) ui.Color {
-	switch kind {
-	case changelog.CategoryAdded:
-		return t.success
-	case changelog.CategoryChanged:
-		return t.primary
-	case changelog.CategoryFixed:
-		return t.attention
-	case changelog.CategoryRemoved:
-		return t.danger
-	default:
-		return t.muted
+		return t.card, t.border, t.subdued
 	}
 }
 
@@ -289,7 +273,7 @@ func (a *App) renderChangelogView(c *ui.Context) {
 
 		ui.Scroll(c.Key("changelog-scroll")).TrackScroll(&a.changelogScroll).Grow(1).Shrink(1).FillWidth().Children(func() {
 			ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(20, 24, 32, 24).Children(func() {
-				ui.Column(c).FillWidth().MaxWidth(880).Gap(16).Children(func() {
+				ui.Column(c).FillWidth().MaxWidth(760).Gap(16).Children(func() {
 					if !a.hasChangelogFilter() && len(doc.IntroSpans) > 0 {
 						kitBlock(c, ui.Row(c).FillWidth().Padding(10, 14).Gap(10).AlignItems(ui.Center), toneCard).Children(func() {
 							ui.Icon(c, icoInfo).Size(iconSm, iconSm).Shrink(0).TextColor(t.primary)
@@ -314,9 +298,21 @@ func (a *App) renderChangelogReleaseCard(c *ui.Context, t uiTokens, rel changelo
 		Background(t.background).Border(hairline, t.border).Clip()
 
 	card.Children(func() {
-		// 版本卡头栏
-		hdr := ui.Row(c).FillWidth().Padding(13, 18).Gap(12).Background(t.card).
-			Justify(ui.SpaceBetween).AlignItems(ui.Center).Wrap()
+		toggleIco := icoChevronDown
+		toggleTip := a.t("changelog.collapse_tip")
+		if collapsed {
+			toggleIco = icoChevronRight
+			toggleTip = a.t("changelog.expand_tip")
+		}
+
+		// 整条版本卡头栏可点击展开/收起，用克制的纯文本汇总替代多枚彩色统计胶囊
+		hdr := ui.ButtonBase(c.Key("cl-toggle-"+rel.Version)).Label(toggleTip).
+			FillWidth().Padding(13, 18).Gap(12).Background(t.card).
+			Justify(ui.SpaceBetween).AlignItems(ui.Center).
+			Cursor(ui.CursorPointer).Transition(colorTransition(motionFast))
+		if hdr.Hovered() {
+			hdr.Background(t.hover)
+		}
 		if !collapsed {
 			hdr.BorderWidth(0, 0, hairline, 0).BorderColor(t.border)
 		}
@@ -340,63 +336,56 @@ func (a *App) renderChangelogReleaseCard(c *ui.Context, t uiTokens, rel changelo
 				}
 			})
 
-			ui.Row(c).Gap(6).AlignItems(ui.Center).Wrap().Shrink(0).Children(func() {
+			ui.Row(c).Gap(10).AlignItems(ui.Center).Shrink(0).Children(func() {
+				var summaryParts []string
 				for _, sec := range rel.Sections {
 					cntStr := formatInt(len(sec.Items))
 					switch sec.Kind {
 					case changelog.CategoryAdded:
-						drawPill(c, a.tf("changelog.short_added", "count", cntStr), pillPositive)
+						summaryParts = append(summaryParts, a.tf("changelog.short_added", "count", cntStr))
 					case changelog.CategoryChanged:
-						drawPill(c, a.tf("changelog.short_changed", "count", cntStr), pillAccent)
+						summaryParts = append(summaryParts, a.tf("changelog.short_changed", "count", cntStr))
 					case changelog.CategoryFixed:
-						drawPill(c, a.tf("changelog.short_fixed", "count", cntStr), pillWarning)
+						summaryParts = append(summaryParts, a.tf("changelog.short_fixed", "count", cntStr))
 					case changelog.CategoryEngineering:
-						drawPill(c, a.tf("changelog.short_engineering", "count", cntStr), pillNeutral)
+						summaryParts = append(summaryParts, a.tf("changelog.short_engineering", "count", cntStr))
 					}
 				}
-
-				toggleIco := icoChevronDown
-				toggleTip := a.t("changelog.collapse_tip")
-				if collapsed {
-					toggleIco = icoChevronRight
-					toggleTip = a.t("changelog.expand_tip")
+				if len(summaryParts) > 0 {
+					numText(c, strings.Join(summaryParts, " · ")).FontSize(t.text.xs).TextColor(t.muted).SingleLine()
 				}
-				if kitIconButton(c, "cl-toggle-"+rel.Version, toggleIco, toggleTip, btnOpts{variant: btnGhost, size: btnSizeSm}) {
-					if a.changelogCollapsed == nil {
-						a.changelogCollapsed = make(map[string]bool)
-					}
-					a.changelogCollapsed[rel.Version] = !collapsed
-				}
+				ui.Icon(c, toggleIco).Size(iconSm, iconSm).Shrink(0).TextColor(t.muted)
 			})
 		})
+		if hdr.Clicked() {
+			if a.changelogCollapsed == nil {
+				a.changelogCollapsed = make(map[string]bool)
+			}
+			a.changelogCollapsed[rel.Version] = !collapsed
+		}
 
 		if collapsed {
 			return
 		}
 
-		// 版本正文区
-		ui.Column(c).FillWidth().Padding(16, 18, 18, 18).Gap(16).Children(func() {
-			for secIdx, sec := range rel.Sections {
-				if secIdx > 0 {
-					kitSeparator(c, false)
-				}
+		// 版本正文区：章节标题使用带浅色语义底条的分组头，与下方缩进的中性圆点条目形成清晰层级
+		ui.Column(c).FillWidth().Padding(16, 18, 18, 18).Gap(18).Children(func() {
+			for _, sec := range rel.Sections {
 				ui.Column(c).FillWidth().Gap(10).Children(func() {
-					ui.Row(c).FillWidth().Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
-						ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-							heading := sec.Heading
-							if heading == "" {
-								heading = a.changelogCategoryLabel(sec.Kind)
-							}
-							drawPill(c, heading, changelogCategoryPillKind(sec.Kind))
-							numText(c, a.tf("changelog.section_count", "count", formatInt(len(sec.Items)))).
-								FontSize(t.text.xs).TextColor(t.muted).SingleLine()
-						})
+					secBg, secBorder, secText := changelogCategoryHeaderColors(t, sec.Kind)
+					heading := sec.Heading
+					if heading == "" {
+						heading = a.changelogCategoryLabel(sec.Kind)
+					}
+					ui.Row(c).FillWidth().Padding(6, 12).Radius(t.radius.md).
+						Background(secBg).Border(hairline, secBorder).
+						Justify(ui.SpaceBetween).AlignItems(ui.Center).Gap(8).Children(func() {
+						ui.Text(c, heading).FontSize(t.text.base).TextColor(secText).SingleLine()
 					})
 
-					ui.Column(c).FillWidth().Gap(12).Children(func() {
-						dotCol := changelogCategoryDotColor(t, sec.Kind)
+					ui.Column(c).FillWidth().Padding(0, 6, 0, 10).Gap(10).Children(func() {
 						for _, item := range sec.Items {
-							renderChangelogItem(c, t, item, dotCol)
+							renderChangelogItem(c, t, item)
 						}
 					})
 				})
@@ -405,11 +394,11 @@ func (a *App) renderChangelogReleaseCard(c *ui.Context, t uiTokens, rel changelo
 	})
 }
 
-func renderChangelogItem(c *ui.Context, t uiTokens, item changelog.ChangeItem, dotCol ui.Color) {
+func renderChangelogItem(c *ui.Context, t uiTokens, item changelog.ChangeItem) {
 	ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Start).Children(func() {
-		// 左侧语义状态圆点，与首行文本中线垂直对齐
-		ui.Box(c).Width(10).Height(20).Shrink(0).Center().Children(func() {
-			drawStatusDot(c, dotCol)
+		// 中性小圆点与首行文本中线垂直对齐，避免与章节分组头在视觉上混为一谈
+		ui.Box(c).Width(8).Height(20).Shrink(0).Center().Children(func() {
+			ui.Box(c).Size(4, 4).Radius(t.radius.full).Background(t.idle)
 		})
 
 		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(4).Children(func() {

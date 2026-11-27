@@ -3,11 +3,21 @@ package sqpack
 import (
 	"fmt"
 	"io/fs"
+	"reflect"
 	"sort"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
+
+type schemaFieldCacheKey struct {
+	fsys  any
+	sheet string
+}
+
+// schemaFieldNamesCache 按只读文件系统实例与表名缓存展开后的 YAML 字段序列，避免多语言同表重复解析 YAML。
+var schemaFieldNamesCache sync.Map
 
 // SchemaColumnMeta 描述 EXH 列与 EXDSchema YAML 字段对齐后的元信息。
 type SchemaColumnMeta struct {
@@ -33,6 +43,14 @@ func LoadSchemaFieldNames(schemasFS fs.FS, sheetName string) ([]string, error) {
 	if schemasFS == nil {
 		return nil, fmt.Errorf("未提供 schemas 文件系统")
 	}
+	canCache := reflect.TypeOf(schemasFS).Comparable()
+	var key schemaFieldCacheKey
+	if canCache {
+		key = schemaFieldCacheKey{fsys: schemasFS, sheet: sheetName}
+		if cached, ok := schemaFieldNamesCache.Load(key); ok {
+			return cached.([]string), nil
+		}
+	}
 	raw, err := fs.ReadFile(schemasFS, sheetName+".yml")
 	if err != nil {
 		return nil, err
@@ -43,6 +61,9 @@ func LoadSchemaFieldNames(schemasFS fs.FS, sheetName string) ([]string, error) {
 	}
 	var out []string
 	flattenSchemaFields(doc.Fields, &out, "")
+	if canCache {
+		schemaFieldNamesCache.Store(key, out)
+	}
 	return out, nil
 }
 
@@ -272,7 +293,7 @@ func LoadSheetWithSchema(reader FileReader, schemasFS fs.FS, sheetName string, p
 		return &SchemaSheet{Rows: make(map[int]Row), Cols: colIndex}, nil
 	}
 
-	rows, err := LoadSheetRows(reader, sheetName, preferredLang, colSlice)
+	rows, err := loadSheetRowsWithEXH(reader, lower, exh, preferredLang, colSlice)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +323,7 @@ func LoadSubrowSheetWithSchema(reader FileReader, schemasFS fs.FS, sheetName str
 	}
 	_, colIndex := AlignEXHColumns(exh, flatNames)
 
-	rows, err := LoadSubrowSheet(reader, sheetName, preferredLang)
+	rows, err := loadSubrowSheetWithEXH(reader, lower, exh, preferredLang, nil)
 	if err != nil {
 		return nil, err
 	}
